@@ -1,0 +1,39 @@
+# --- Node (frontend, backend) ---
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+
+# --- Python (model-service) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Env files (never commit real secrets) ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+
+# --- Claude Code local permission cache (personal, not shared) ---
+.claude/settings.local.json
+
+# --- Docker ---
+*.pid
+
+# --- Logs ---
+*.log
+logs/

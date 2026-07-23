@@ -1,0 +1,138 @@
+# Mentat FC — Premier League Fantasy, Betting & Prediction App
+
+Named after the Mentats in Dune — humans trained to perform the
+superhuman computation and analysis that machines were forbidden from doing.
+That's the spirit of this app: a model doing the analytical heavy lifting
+so the person using it can make sharper calls.
+
+## Purpose (read this first, every session)
+
+**This is a learning exercise first, a product second.** I'm an experienced
+data engineer (Databricks, Delta Lake, Python, SQL, Azure) but new to:
+React/TypeScript, Node/Express backend design, relational schema design for
+a live product, auth, caching, background jobs, cloud deployment of a full
+app, and — for the prediction model piece — applying ML to a new domain
+(sports prediction) rather than data engineering pipelines.
+
+**Documentation and explanation are not optional polish — they are the
+point of this project.** Concretely, that means:
+
+- Before implementing any concept I haven't used yet in this repo (JWT auth,
+  caching, background jobs, a specific ML approach, constrained optimization,
+  etc.), explain it first: what it is, why it's needed here, what the
+  alternative would be. Then implement it.
+- After finishing each phase (see `PHASES.md`), append an entry to
+  `/docs/learning-log.md` summarizing: what we built, what concept(s) it
+  taught, and any design decision worth remembering. This is my study
+  material for reviewing later — write it for future-me, not just as a
+  changelog.
+- Prefer clear, conventional code over clever code. Comment non-obvious
+  decisions in the code itself, not just in chat.
+- If a "quick fix" would create real technical debt, flag it even if I don't
+  ask.
+- Keep `/docs/architecture.md` and `/docs/erd.md` accurate any time the
+  system design or schema changes — these are my reference diagrams.
+
+## What the app actually does
+
+1. **Fantasy** — official FPL rules and scoring, pulling live data from the
+   public FPL API (players, prices, ownership, gameweek points). Not a
+   custom scoring system — the real thing.
+2. **Betting tracker** — I log bets I've placed elsewhere (pick, odds,
+   stake, result). The app tracks my ROI and record over time. This is a
+   personal tracker only — no real-money wagering happens inside the app.
+3. **Prediction model** — a model I build and own predicts match outcomes
+   (score/result), and eventually goal scorers. Predictions surface in the
+   app next to my logged bets, so I can see where the model and the market
+   (bookmaker odds) disagree.
+4. **Team dashboards, storylines, formation/position explainer** — carried
+   over from the earlier scope, still in as secondary features.
+
+## Audience
+
+Still built for an American fan getting into the Premier League, but the
+center of gravity has shifted from "help me learn the league" to "give me a
+sharper edge on fantasy and betting picks, and let me see my own model's
+reasoning."
+
+## Tech stack
+
+- **Frontend:** React + TypeScript
+- **Backend:** Node.js + Express + TypeScript — serves the app, reads
+  predictions from Postgres (does not run the model itself)
+- **Model service:** Python (FastAPI to start) — trains the prediction
+  model, writes predictions to Postgres on a schedule. Kept as a separate
+  service on purpose: it's a real-world pattern (batch inference vs. a
+  request/response API) and keeps ML code out of the Express app.
+- **Database:** PostgreSQL (Azure Database for PostgreSQL — Flexible
+  Server, burstable tier — once deployed)
+- **AI features (explainer only):** Groq API — Llama 3.3 70B to start.
+  Kept behind our own service layer so swapping providers later is cheap.
+- **Local dev:** Docker Compose for Postgres, `.env` for secrets
+- **Hosting (eventual):** Azure Static Web App (frontend) + Azure App
+  Service (Node backend) + Azure Container Apps or App Service (Python
+  model service) + Azure Database for PostgreSQL
+
+## Non-functional targets
+
+- Comfortably support 50 concurrent users
+- UI should look and feel like a real, professionally-built product
+- Cost-conscious cloud scaling: start cheapest-tier-that-works, document
+  the next scaling step at each phase rather than over-provisioning early.
+  Budget roughly $10–30/mo for paid data APIs if free tiers are too limited.
+
+## Data sources
+
+- **Fixtures / lineups / standings, whole PL:** API-Football or
+  Football-Data.org (confirm current free tier limits before building)
+- **Fantasy:** Official FPL public API (`fantasy.premierleague.com/api/...`)
+  — free, no key required
+- **Historical match data for model training:** football-data.co.uk — free
+  CSVs of PL results going back many seasons, including historical odds.
+  This is the standard starting dataset for exactly this kind of project.
+- **Odds (for the betting tracker/model comparison):** The Odds API
+- **News / storylines:** TBD — likely RSS aggregation or a news API, with
+  caching
+- **AI explanations:** Groq API, with caching on common queries
+
+## Database
+
+PostgreSQL fits well — the core data (leagues, teams, players, fixtures,
+FPL data, my bets, model predictions) is genuinely relational. Predictions
+and odds are time-series-ish (a new prediction/odds snapshot per gameweek
+or per line movement); start with plain, well-indexed tables and only
+reach for something like the TimescaleDB extension later if querying
+history naively actually becomes painful.
+
+See `/docs/erd.md` once schema work starts in Phase 1.
+
+## The prediction model — sequencing and why
+
+1. **Match outcome prediction first** (score / win-draw-loss). Cleanest
+   labels, richest free historical dataset, and it's the piece that
+   directly powers the betting comparison feature.
+2. **Goal scorer prediction next** — harder (more variance: minutes played,
+   rotation, red cards), but gives us player-level prediction data as a
+   byproduct.
+3. **Lineup optimizer later, as a stretch phase** — this is really two
+   problems stacked (predict expected fantasy points per player, then run
+   constrained optimization — likely linear/integer programming — under
+   budget and position constraints). Doing this after player-level
+   predictions already exist turns it into "just" the optimization layer,
+   rather than an unfamiliar technique plus a from-scratch data problem at
+   the same time.
+
+Classic soccer-specific approaches worth learning about when we get there:
+Poisson regression / Dixon-Coles for score prediction, versus a more
+general ML approach (XGBoost) framed as classification. We'll pick one
+deliberately in Phase 5, not by default.
+
+## Phases
+
+See `PHASES.md` for the detailed, checkboxed breakdown.
+
+## Diagrams
+
+- `/docs/architecture.md` — system architecture, updated as components are added
+- `/docs/erd.md` — database schema, created in Phase 1 and updated as it evolves
+- `/docs/learning-log.md` — concept summary per phase, my study reference
