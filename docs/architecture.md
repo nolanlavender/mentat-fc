@@ -21,6 +21,14 @@ flowchart TD
 ```
 
 Notes:
+- **Data scope is wider than the app's user-facing surface.** The database
+  holds Premier League + Championship + FA Cup, 3 seasons, including
+  lineups/players — but the frontend and the Express API's own endpoints
+  only ever surface Premier League. The extra competitions exist purely as
+  training data for the model service (more matches for the same teams
+  across promotion/relegation, cup-form signal). Phase 2's endpoint design
+  should filter to Premier League by default rather than exposing all
+  competitions the schema happens to support.
 - The **model service is separate from the Node backend on purpose** — it
   trains on historical data and writes predictions to Postgres on a
   schedule (batch inference). The Express API just reads predictions like

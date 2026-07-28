@@ -83,17 +83,32 @@ reasoning."
 
 ## Data sources
 
-- **Fixtures / lineups / standings, whole PL:** API-Football or
-  Football-Data.org (confirm current free tier limits before building)
+- **Fixtures / lineups / standings:** API-Football (free tier: 100
+  requests/day). Pulled for Premier League, Championship, and FA Cup, 3
+  seasons — see "Data scope vs. app scope" below for why it's wider than
+  what the app shows.
 - **Fantasy:** Official FPL public API (`fantasy.premierleague.com/api/...`)
-  — free, no key required
+  — free, no key required. Premier League only, current season only — that's
+  inherent to what FPL is, not a gap.
 - **Historical match data for model training:** football-data.co.uk — free
-  CSVs of PL results going back many seasons, including historical odds.
-  This is the standard starting dataset for exactly this kind of project.
+  CSVs, Premier League (E0) and Championship (E1), 3 seasons, including
+  historical odds. No FA Cup coverage (league-division CSVs only) — FA Cup
+  comes from API-Football instead.
 - **Odds (for the betting tracker/model comparison):** The Odds API
 - **News / storylines:** TBD — likely RSS aggregation or a news API, with
   caching
 - **AI explanations:** Groq API, with caching on common queries
+
+## Data scope vs. app scope
+
+The database intentionally holds more than the app shows: **Premier League +
+Championship + FA Cup**, 3 seasons, full player/lineup depth. **The frontend
+and the API's own endpoints only ever surface Premier League** — the other
+two competitions exist purely to give the prediction model more training
+signal (more matches for the same teams across promotion/relegation, cup
+upset patterns). Don't build Championship/FA Cup dashboards or endpoints
+without a deliberate decision to expand app scope; treat that data as
+model-service input only unless told otherwise.
 
 ## Database
 

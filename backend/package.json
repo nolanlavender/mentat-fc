@@ -14,7 +14,10 @@
     "migrate:create": "node-pg-migrate create -j sql --",
     "migrate:up": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
-    "db:seed": "tsx seed/index.ts"
+    "db:seed": "tsx seed/index.ts",
+    "db:dump": "tsx seed/dump.ts",
+    "db:restore": "tsx seed/restore.ts",
+    "check:lineup-depth": "tsx seed/check-lineup-depth.ts"
   },
   "license": "ISC",
   "dependencies": {

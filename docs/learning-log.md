@@ -293,3 +293,42 @@ changes the schema and the data-sourcing plan materially.
   never received an actual response to check it against (no key, no network path
   to the host). Treat the field names in there as "best effort, confirm before a
   large backfill," not "known correct."
+
+### Follow-up, same day: data scope vs. app scope, and a snapshot layer
+
+Clarified after the initial pass: the full-depth Championship/FA Cup data is for
+**the model only** — the frontend and API only ever surface Premier League. This
+didn't change the schema at all (it was already competition-agnostic — teams,
+fixtures, and lineups were never scoped to one competition), which is a decent
+sign the schema design held up under a real scope clarification instead of
+needing rework. It does mean Phase 2's endpoints need to filter to Premier
+League deliberately rather than exposing everything the schema can hold — noted
+in `docs/architecture.md` and `docs/CLAUDE.md` so it isn't lost before Phase 2.
+
+Also added a **second storage layer on top of the raw cache**: `backend/seed/dump.ts`
+/ `restore.ts` (`npm run db:dump` / `db:restore`) wrap `pg_dump`/`pg_restore` to
+snapshot the fully seeded database itself, committed to git at
+`backend/seed/snapshot/mentat_fc_seed.dump`. These solve two different problems,
+not the same one twice:
+
+- `seed/raw/` (gitignored) protects the **API budget** during the weeks-long
+  backfill — fetch-if-absent, so reruns never re-spend the 100/day cap.
+- The snapshot protects **setup time on a new environment** — restoring it skips
+  the entire parse-and-upsert pipeline (thousands of rows) in favor of one
+  `pg_restore` call, no network involved at all. This is the concrete answer to
+  "store it somewhere so we don't have to hit the API to seed local environments."
+
+Tested the same way as the seed pipeline itself: dumped the scratch database
+(410KB for one season + FPL data — small enough that committing it to git
+outright, rather than a GitHub Release or external blob storage, is the right
+call for now), wiped all 12 tables with `migrate down`, restored from the dump,
+and confirmed identical row counts. The committed snapshot right now only has
+the 2023/24 Premier League season + FPL bootstrap (the only data this session
+could actually test against) — `docs/seeding-runbook.md` has the full step-by-step
+plan for running the real 3-competition, 3-season, full-lineup backfill on a
+machine with real internet access, and re-dumping once it's done.
+
+Added `npm run check:lineup-depth` — the empirical test flagged earlier (does
+API-Football's free tier serve lineup data for old fixtures at all?) as an
+actual runnable script rather than a manual instruction, so it's not something
+that quietly gets skipped before the real backfill starts.
