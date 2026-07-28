@@ -95,7 +95,7 @@ uvicorn app.main:app --reload --port 8000   # http://localhost:8000/health
 
 ## Project status
 
-Currently finishing **Phase 0 — environment & planning**. See
+Currently finishing **Phase 1 — data layer & schema**. See
 [`docs/PHASES.md`](docs/PHASES.md) for the full checkboxed roadmap and
 [`docs/learning-log.md`](docs/learning-log.md) for a running study log of what's been
 built and why, phase by phase.

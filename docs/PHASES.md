@@ -27,14 +27,25 @@ not optional.
 - [x] Create `/docs/learning-log.md` (empty, ready for Phase 0 entry)
 
 ## Phase 1 — Data layer & schema
-- [ ] Design schema: leagues, teams, players, fixtures, lineups
-- [ ] Design schema: FPL data (player prices, ownership, gameweek points)
-- [ ] Design schema: my logged bets (pick, odds, stake, result, timestamp)
-- [ ] Design schema: model predictions (per fixture, per gameweek)
-- [ ] Write `/docs/erd.md` (mermaid ERD)
-- [ ] Migrations set up (e.g. node-pg-migrate or Prisma migrate)
-- [ ] Seed script pulling real data for all 20 PL teams
-- [ ] Explain: why this schema shape, what a migration is and why we don't
+- [x] Design schema: leagues, teams, players, fixtures, lineups (scope grew
+      to Premier League + Championship + FA Cup, 3 seasons, full depth --
+      see learning-log)
+- [x] Design schema: FPL data (player prices, ownership, gameweek points)
+- [x] Design schema: my logged bets (pick, odds, stake, result, timestamp)
+      -- design sketch only, in erd.md notes; no migration yet, deferred to
+      Phase 6 per its actual sequencing
+- [x] Design schema: model predictions (per fixture, per gameweek)
+- [x] Write `/docs/erd.md` (mermaid ERD)
+- [x] Migrations set up (e.g. node-pg-migrate or Prisma migrate) --
+      node-pg-migrate, plain `.sql` migrations
+- [x] Seed script pulling real data for all 20 PL teams -- built and
+      verified end-to-end for the 2023/24 season (380 real fixtures, odds,
+      stats, FPL players/gameweeks). Remaining seasons, Championship, FA
+      Cup, and the lineup backfill need to run on a machine with real
+      internet access and a real `API_FOOTBALL_KEY` -- not available in the
+      cloud session this was built in. See learning-log for the exact
+      commands to run.
+- [x] Explain: why this schema shape, what a migration is and why we don't
       just edit the DB by hand
 
 ## Phase 2 — Backend API core
