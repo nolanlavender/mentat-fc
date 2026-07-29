@@ -49,10 +49,11 @@ not optional.
       just edit the DB by hand
 
 ## Phase 2 — Backend API core
-- [ ] Express + TypeScript project structure
-- [ ] CRUD endpoints for teams, fixtures, players
-- [ ] Team dashboard endpoint (next match, table position, squad)
-- [ ] Explain: REST resource design, error handling conventions, why we
+- [x] Express + TypeScript project structure (routes/controllers/services)
+- [x] Read-only endpoints for teams, fixtures, players -- not full CRUD, see
+      learning-log for why
+- [x] Team dashboard endpoint (next match, table position, squad)
+- [x] Explain: REST resource design, error handling conventions, why we
       structure routes/controllers/services the way we do
 - [ ] Recurring refresh job to keep current-season data current (new
       fixtures/results, FPL prices/ownership) -- designed in Phase 1, see

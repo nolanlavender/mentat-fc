@@ -18,6 +18,7 @@ erDiagram
     fixtures ||--o{ fixture_lineups : has
     teams ||--o{ fixture_lineups : has
     players ||--o{ fixture_lineups : appears_in
+    teams ||--o{ players : "current squad (PL only)"
     fixtures ||--o{ fixture_player_stats : has
     teams ||--o{ fixture_player_stats : has
     players ||--o{ fixture_player_stats : performed_in
@@ -58,6 +59,7 @@ erDiagram
         date date_of_birth
         text nationality
         text position
+        int current_team_id FK "from FPL, PL players only"
         text natural_key UK "generated: md5(name + date_of_birth)"
         int external_api_football_id UK
         int external_fpl_id UK
@@ -252,6 +254,14 @@ erDiagram
   (a player had 1 goal, 2 assists), which is enough for Phase 5's match
   outcome model; a minute-by-minute event timeline is a Phase 7 (goal
   scorer prediction) need specifically, not built speculatively now.
+- **`players.current_team_id`**, added while building Phase 2's team
+  dashboard endpoint: there was no way to answer "who's on this team" at
+  all, since `fixture_lineups` (the eventual real source of truth) is empty
+  until the paid-tier API-Football backfill runs. FPL's bootstrap-static
+  already carries a player's current team directly and is always live, so
+  it populates this column — but only for Premier League players (FPL has
+  no Championship data). Championship squads stay empty until lineups are
+  backfilled; a known, documented gap, not a bug in the dashboard endpoint.
 - **No `bets` table yet.** PHASES.md schedules the betting tracker at
   Phase 6. It'll look roughly like
   `bets(id, fixture_id, market, selection, odds_decimal, stake, result, placed_at, settled_at)`

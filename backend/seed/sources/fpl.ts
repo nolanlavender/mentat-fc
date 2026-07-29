@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import { fetchCached } from '../lib/cache.js';
-import { getOrCreateTeam, setTeamExternalFplId, upsertPlayerGoldenRecord, upsertFplGameweek } from '../lib/db.js';
+import { getOrCreateTeam, setTeamExternalFplId, setPlayerCurrentTeam, upsertPlayerGoldenRecord, upsertFplGameweek } from '../lib/db.js';
 
 // The official FPL API only ever reflects the *current* season -- it isn't a
 // historical archive. That's a fundamental property of what FPL is (a live
@@ -20,6 +20,7 @@ interface BootstrapStatic {
     second_name: string;
     web_name: string;
     element_type: number;
+    team: number;
     birth_date?: string | null;
   }>;
   events: Array<{
@@ -51,18 +52,22 @@ export async function seedFplBootstrap(pool: Pool): Promise<void> {
   // in practice (both use full names like "Arsenal", "Nottingham Forest") --
   // getOrCreateTeam matches on name, so this links to teams already seeded
   // from historical results rather than creating duplicates.
+  const teamIdByFplId = new Map<number, number>();
   for (const team of data.teams) {
     const teamId = await getOrCreateTeam(pool, team.name);
     await setTeamExternalFplId(pool, teamId, team.id);
+    teamIdByFplId.set(team.id, teamId);
   }
 
   for (const element of data.elements) {
-    await upsertPlayerGoldenRecord(pool, {
+    const playerId = await upsertPlayerGoldenRecord(pool, {
       externalFplId: element.id,
       fullName: `${element.first_name} ${element.second_name}`.trim(),
       dateOfBirth: element.birth_date ?? undefined,
       position: positionByTypeId.get(element.element_type),
     });
+    const teamId = teamIdByFplId.get(element.team);
+    if (teamId) await setPlayerCurrentTeam(pool, playerId, teamId);
   }
 
   for (const event of data.events) {
