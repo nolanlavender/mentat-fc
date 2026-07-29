@@ -21,17 +21,19 @@ flowchart TD
 ```
 
 Notes:
-- **Data scope is wider than the app's user-facing surface, but predictions
-  aren't PL-only.** The database holds Premier League + Championship + FA
-  Cup, 3 seasons, including lineups/players. Team dashboards, fantasy, and
-  the betting tracker stay Premier League only. **Match predictions cover
-  Premier League and Championship, plus FA Cup fixtures where both teams are
-  in one of those two tiers** — most FA Cup matchups from the Third Round on
-  qualify. An FA Cup fixture against a team outside PL/Championship (no
-  historical data to model against) gets a default logo and the team name,
-  no score prediction — see `docs/CLAUDE.md`'s "Data scope vs. app scope"
-  for the full breakdown. Phase 2's endpoint design should filter
-  accordingly rather than exposing every competition the schema supports.
+- **Data scope is wider than the app's user-facing surface, but dashboards
+  and predictions aren't PL-only.** The database holds Premier League +
+  Championship + FA Cup, 3 seasons, including lineups/players. **Team
+  dashboards and match predictions cover Premier League and Championship,
+  plus FA Cup fixtures where both teams are in one of those two tiers** —
+  most FA Cup matchups from the Third Round on qualify. An FA Cup fixture
+  against a team outside PL/Championship (no historical data to model
+  against) gets a default logo and the team name, no score prediction.
+  Fantasy stays Premier League only (not a scope choice — FPL has no
+  Championship data to show), and so does the betting tracker for now. See
+  `docs/CLAUDE.md`'s "Data scope vs. app scope" for the full breakdown.
+  Phase 2's endpoint design should filter accordingly rather than exposing
+  every competition the schema supports.
 - The **model service is separate from the Node backend on purpose** — it
   trains on historical data and writes predictions to Postgres on a
   schedule (batch inference). The Express API just reads predictions like

@@ -105,22 +105,26 @@ The database holds **Premier League + Championship + FA Cup**, 3 seasons,
 full player/lineup depth. What the app actually shows is narrower, but not
 PL-only:
 
-- **Team dashboards, fantasy, betting tracker:** Premier League only.
-- **Match predictions:** Premier League **and** Championship, plus FA Cup
-  fixtures — but only where the model can actually say something. Most FA
-  Cup matchups from the Third Round onward are PL/Championship sides
-  playing each other, so those get real predictions like any other fixture.
-  When an FA Cup fixture involves a team from outside those two tiers (a
-  League One/Two or non-league side, no historical data to model against),
-  the UI shows a default logo and the team name with **no score
-  prediction** — degrade gracefully instead of guessing.
+- **Team dashboards and match predictions:** Premier League **and**
+  Championship, plus FA Cup fixtures — but only where the model can
+  actually say something. Most FA Cup matchups from the Third Round onward
+  are PL/Championship sides playing each other, so those get a dashboard
+  and a real prediction like any other fixture. When an FA Cup fixture
+  involves a team from outside those two tiers (a League One/Two or
+  non-league side, no historical data to model against), the UI shows a
+  default logo and the team name with **no score prediction** — degrade
+  gracefully instead of guessing.
+- **Fantasy:** Premier League only — not a scope choice, just what FPL is.
+  There's no Championship fantasy data to show.
+- **Betting tracker:** Premier League only for now — unchanged, revisit
+  deliberately if that ever needs to widen.
 - Championship/FA Cup data involving lower-tier opponents still feeds the
   model as training signal even when we don't display a prediction for
   that specific matchup.
 
-Don't build Championship/FA Cup team dashboards or fantasy/betting features
-without a deliberate decision to expand app scope further — this note is
-specifically about predictions, not a blanket app-wide expansion.
+Don't build Championship/FA Cup fantasy/betting features without a
+deliberate decision to expand app scope further — this note is about
+dashboards and predictions specifically, not a blanket app-wide expansion.
 
 ## Database
 
