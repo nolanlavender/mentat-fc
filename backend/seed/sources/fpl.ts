@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import { fetchCached } from '../lib/cache.js';
-import { getOrCreateTeam, setTeamExternalFplId, upsertPlayerByFplId, upsertFplGameweek } from '../lib/db.js';
+import { getOrCreateTeam, setTeamExternalFplId, upsertPlayerGoldenRecord, upsertFplGameweek } from '../lib/db.js';
 
 // The official FPL API only ever reflects the *current* season -- it isn't a
 // historical archive. That's a fundamental property of what FPL is (a live
@@ -57,7 +57,7 @@ export async function seedFplBootstrap(pool: Pool): Promise<void> {
   }
 
   for (const element of data.elements) {
-    await upsertPlayerByFplId(pool, {
+    await upsertPlayerGoldenRecord(pool, {
       externalFplId: element.id,
       fullName: `${element.first_name} ${element.second_name}`.trim(),
       dateOfBirth: element.birth_date ?? undefined,

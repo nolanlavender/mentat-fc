@@ -101,14 +101,26 @@ reasoning."
 
 ## Data scope vs. app scope
 
-The database intentionally holds more than the app shows: **Premier League +
-Championship + FA Cup**, 3 seasons, full player/lineup depth. **The frontend
-and the API's own endpoints only ever surface Premier League** — the other
-two competitions exist purely to give the prediction model more training
-signal (more matches for the same teams across promotion/relegation, cup
-upset patterns). Don't build Championship/FA Cup dashboards or endpoints
-without a deliberate decision to expand app scope; treat that data as
-model-service input only unless told otherwise.
+The database holds **Premier League + Championship + FA Cup**, 3 seasons,
+full player/lineup depth. What the app actually shows is narrower, but not
+PL-only:
+
+- **Team dashboards, fantasy, betting tracker:** Premier League only.
+- **Match predictions:** Premier League **and** Championship, plus FA Cup
+  fixtures — but only where the model can actually say something. Most FA
+  Cup matchups from the Third Round onward are PL/Championship sides
+  playing each other, so those get real predictions like any other fixture.
+  When an FA Cup fixture involves a team from outside those two tiers (a
+  League One/Two or non-league side, no historical data to model against),
+  the UI shows a default logo and the team name with **no score
+  prediction** — degrade gracefully instead of guessing.
+- Championship/FA Cup data involving lower-tier opponents still feeds the
+  model as training signal even when we don't display a prediction for
+  that specific matchup.
+
+Don't build Championship/FA Cup team dashboards or fantasy/betting features
+without a deliberate decision to expand app scope further — this note is
+specifically about predictions, not a blanket app-wide expansion.
 
 ## Database
 

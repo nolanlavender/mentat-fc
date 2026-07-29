@@ -21,14 +21,17 @@ flowchart TD
 ```
 
 Notes:
-- **Data scope is wider than the app's user-facing surface.** The database
-  holds Premier League + Championship + FA Cup, 3 seasons, including
-  lineups/players — but the frontend and the Express API's own endpoints
-  only ever surface Premier League. The extra competitions exist purely as
-  training data for the model service (more matches for the same teams
-  across promotion/relegation, cup-form signal). Phase 2's endpoint design
-  should filter to Premier League by default rather than exposing all
-  competitions the schema happens to support.
+- **Data scope is wider than the app's user-facing surface, but predictions
+  aren't PL-only.** The database holds Premier League + Championship + FA
+  Cup, 3 seasons, including lineups/players. Team dashboards, fantasy, and
+  the betting tracker stay Premier League only. **Match predictions cover
+  Premier League and Championship, plus FA Cup fixtures where both teams are
+  in one of those two tiers** — most FA Cup matchups from the Third Round on
+  qualify. An FA Cup fixture against a team outside PL/Championship (no
+  historical data to model against) gets a default logo and the team name,
+  no score prediction — see `docs/CLAUDE.md`'s "Data scope vs. app scope"
+  for the full breakdown. Phase 2's endpoint design should filter
+  accordingly rather than exposing every competition the schema supports.
 - The **model service is separate from the Node backend on purpose** — it
   trains on historical data and writes predictions to Postgres on a
   schedule (batch inference). The Express API just reads predictions like
@@ -39,6 +42,36 @@ Notes:
   instances.
 - Groq API calls go through a caching check first (common explainer
   queries shouldn't hit the API twice).
+
+## Keeping data current (designed in Phase 1, built in Phase 2)
+
+The seed pipeline (`backend/seed/`) populates historical data once. Once
+Phase 2's API exists and the app has an actual reason to see fresh data,
+something needs to keep the *current* season current: new fixtures as
+they're scheduled, results as they go final, FPL prices/ownership (which
+shift daily in-season). This is deliberately not built yet — a refresh job
+with nothing reading its output is premature — but the shape is settled:
+
+- **No new fetching logic needed.** Every seed source module already does
+  idempotent upserts (`ON CONFLICT ... DO UPDATE`), so "refresh" is just
+  rerunning the existing functions scoped to the *current* competition-season
+  only, instead of all 3 historical seasons:
+  - `seedFootballDataSeason` for the current PL/Championship season (results
+    + odds go final match by match).
+  - `seedFplBootstrap` — always current-season by nature of what FPL is.
+  - `seedApiFootballFixtures` for the current competition-season (one cheap
+    call, picks up newly scheduled/completed fixtures) followed by
+    `backfillLineupsForCompetitionSeason` — already resumable, and already
+    skips fixtures that haven't changed, so pointing it at "this week's
+    matches" instead of "3 years of history" is the same function, smaller
+    input.
+- **Scheduling**: locally, a cron entry or manual periodic run is enough.
+  Once deployed (Phase 10), this is the same pattern as the model service's
+  scheduled batch job — Azure Container Apps Jobs or a scheduled function,
+  not a new architectural concept.
+- **What this explicitly doesn't cover yet**: live/in-play score updates
+  (this app is not building a live-score ticker) and live betting odds
+  (Phase 6, The Odds API, a separate concern from historical odds).
 
 ## Local development
 

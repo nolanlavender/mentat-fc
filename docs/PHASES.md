@@ -54,6 +54,10 @@ not optional.
 - [ ] Team dashboard endpoint (next match, table position, squad)
 - [ ] Explain: REST resource design, error handling conventions, why we
       structure routes/controllers/services the way we do
+- [ ] Recurring refresh job to keep current-season data current (new
+      fixtures/results, FPL prices/ownership) -- designed in Phase 1, see
+      `docs/architecture.md`'s "Keeping data current" section; build it once
+      there's an actual API/frontend consuming the data, not before
 
 ## Phase 3 — Frontend shell
 - [ ] React + TypeScript app scaffold

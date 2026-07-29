@@ -7,14 +7,16 @@ reasoning and concepts behind these choices.
 
 ## Scope
 
-Historical match data (results, odds, team stats, lineups, players) covers
-**Premier League + Championship + FA Cup, 3 seasons**. This is deliberately
-wider than the app's user-facing surface: **the frontend and API only ever
-show Premier League.** Championship and FA Cup data exists purely to give
-the prediction model more training signal (more matches for the same teams
-across promotion/relegation, cup-form signal) — see the note in
-`docs/architecture.md`. Nothing about the schema changes based on this; it
-only affects which competitions Phase 2's endpoints filter to.
+Historical match data (results, odds, team stats, lineups, per-fixture
+player performance) covers **Premier League + Championship + FA Cup, 3
+seasons**. This is wider than the app's user-facing surface, but not
+uniformly PL-only: team dashboards/fantasy/betting stay Premier League
+only, but **match predictions cover Premier League and Championship, plus
+FA Cup fixtures where both teams are in one of those two tiers** — an FA
+Cup fixture against a lower-tier side gets a default logo and no
+prediction. See `docs/CLAUDE.md`'s "Data scope vs. app scope" for the full
+breakdown. Nothing about the schema changes based on this; it only affects
+which competitions Phase 2's endpoints filter to.
 
 ## The three layers, and what each one is for
 
@@ -66,28 +68,33 @@ multi-season/multi-competition pull needs your own machine).
    current bootstrap, and upserts everything. Idempotent — safe to rerun.
 
 3. **Sign up for an API-Football key** and add it to `backend/.env` as
-   `API_FOOTBALL_KEY`. Confirm the free tier's daily cap still applies
-   (100/day, per Phase 0's findings) — worth a quick check on their pricing
-   page in case it's changed.
+   `API_FOOTBALL_KEY` — never commit it or paste it anywhere outside your
+   own `.env`. The plan is to pay for a higher tier once the code below is
+   verified working, specifically because per-fixture player performance
+   stats (`fixture_player_stats` — goals/assists/cards/minutes, not just who
+   played) need a *second* API-Football call per fixture on top of lineups,
+   roughly doubling the free tier's already-long backfill timeline.
 
-4. **Before trusting a multi-week lineup backfill, run the depth check:**
+4. **Before trusting a multi-week (or paid-tier) backfill, run the depth
+   check:**
    ```
    npm run check:lineup-depth
    ```
-   This fetches one 2023/24 Premier League fixture's lineup and tells you
-   plainly whether the free tier actually serves lineup data that far back.
-   If it doesn't, stop and decide (pay for a higher tier, or scope lineups
-   to the current season only) rather than finding out 1,500 fixtures into
-   the real backfill. See `docs/learning-log.md`'s Phase 1 entry for why
-   this is a real risk, not a formality.
+   This fetches one 2023/24 Premier League fixture's lineup *and* player
+   stats and reports on both separately. It's possible one comes back and
+   the other doesn't (they're different endpoints) — the script tells you
+   which case you're in. If neither works, stop and check whether your tier
+   covers historical seasons for these endpoints at all before paying for
+   more speed. See `docs/learning-log.md`'s Phase 1 entry for why this is a
+   real risk, not a formality.
 
 5. **Run the full backfill** (`npm run db:seed` again — it now also pulls
-   FA Cup fixture lists and kicks off the lineup backfill). This is
-   throttled to the daily API-Football budget and resumable: it logs how
-   many fixtures it backfilled and how many remain, then stops cleanly.
-   **Rerun this once a day** (a cron job, or just remembering) until it
-   reports zero remaining across Premier League, Championship, and FA Cup,
-   all 3 seasons. Expect this to take several weeks on the free tier.
+   FA Cup fixture lists and kicks off the lineup + player-stats backfill for
+   any fixture missing either). This is throttled to the daily API-Football
+   budget (whatever your tier's limit is) and resumable: it logs how many
+   fixtures it backfilled and how many remain, then stops cleanly. **Rerun
+   this regularly** (a cron job, or just remembering) until it reports zero
+   remaining across Premier League, Championship, and FA Cup, all 3 seasons.
 
 6. **Once the backfill is complete, update the committed snapshot:**
    ```

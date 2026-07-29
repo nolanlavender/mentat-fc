@@ -56,11 +56,20 @@ export async function getOrCreateCompetitionSeason(
   return rows[0].id;
 }
 
+// Teams' golden-record key (natural_key, a generated column hashing the
+// normalized name -- see migration 1701000000013) makes this a single
+// upsert instead of a select-then-insert: any source computes the same key
+// for "Manchester United" and lands on the same row, as long as
+// canonicalTeamName() has already resolved source-specific short names to
+// the canonical one before this is called.
 export async function getOrCreateTeam(pool: Pool, name: string): Promise<number> {
-  const existing = await pool.query<{ id: number }>(`SELECT id FROM teams WHERE name = $1`, [name]);
-  if (existing.rows[0]) return existing.rows[0].id;
-  const inserted = await pool.query<{ id: number }>(`INSERT INTO teams (name) VALUES ($1) RETURNING id`, [name]);
-  return inserted.rows[0].id;
+  const { rows } = await pool.query<{ id: number }>(
+    `INSERT INTO teams (name) VALUES ($1)
+     ON CONFLICT (natural_key) DO UPDATE SET name = teams.name
+     RETURNING id`,
+    [name],
+  );
+  return rows[0].id;
 }
 
 export async function setTeamExternalFplId(pool: Pool, teamId: number, externalFplId: number): Promise<void> {
@@ -76,18 +85,66 @@ export interface PlayerInput {
   position?: string;
 }
 
-export async function upsertPlayerByFplId(pool: Pool, p: PlayerInput & { externalFplId: number }): Promise<number> {
-  const { rows } = await pool.query<{ id: number }>(
-    `INSERT INTO players (external_fpl_id, full_name, date_of_birth, nationality, position)
+/**
+ * One golden-record entry point for both sources, instead of a separate
+ * upsert per external ID (which is what let the same real player get two
+ * disconnected rows -- one from FPL, one from API-Football -- with no link
+ * between them). players.natural_key (full name + date of birth, generated
+ * column) is the merge target when we know a DOB.
+ *
+ * When we don't know a DOB -- the normal case for a player only seen via
+ * API-Football's lineup endpoint, which gives a name and shirt number but
+ * not a birth date -- we reconcile by name against an existing row (e.g.
+ * one FPL already seeded with a real DOB) before falling back to inserting
+ * under the DOB-less natural_key. That fallback isn't perfect: two
+ * genuinely different real players sharing an exact name and both missing
+ * a DOB would incorrectly merge. Acceptable at Premier League/Championship
+ * scale; revisit if FA Cup's lower-tier entrants make that collision
+ * observably real.
+ */
+export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Promise<number> {
+  if (p.dateOfBirth) {
+    const { rows } = await pool.query<{ id: number }>(
+      `INSERT INTO players (full_name, date_of_birth, nationality, position, external_fpl_id, external_api_football_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (natural_key) DO UPDATE SET
+         nationality = COALESCE(EXCLUDED.nationality, players.nationality),
+         position = COALESCE(EXCLUDED.position, players.position),
+         external_fpl_id = COALESCE(EXCLUDED.external_fpl_id, players.external_fpl_id),
+         external_api_football_id = COALESCE(EXCLUDED.external_api_football_id, players.external_api_football_id)
+       RETURNING id`,
+      [p.fullName, p.dateOfBirth, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null],
+    );
+    return rows[0].id;
+  }
+
+  const existingByName = await pool.query<{ id: number }>(`SELECT id FROM players WHERE lower(full_name) = lower($1) LIMIT 1`, [
+    p.fullName,
+  ]);
+  if (existingByName.rows[0]) {
+    const id = existingByName.rows[0].id;
+    await pool.query(
+      `UPDATE players SET
+         position = COALESCE($2, position),
+         external_fpl_id = COALESCE($3, external_fpl_id),
+         external_api_football_id = COALESCE($4, external_api_football_id)
+       WHERE id = $1`,
+      [id, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null],
+    );
+    return id;
+  }
+
+  const inserted = await pool.query<{ id: number }>(
+    `INSERT INTO players (full_name, nationality, position, external_fpl_id, external_api_football_id)
      VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (external_fpl_id) DO UPDATE SET
-       full_name = EXCLUDED.full_name,
-       date_of_birth = COALESCE(EXCLUDED.date_of_birth, players.date_of_birth),
-       position = COALESCE(EXCLUDED.position, players.position)
+     ON CONFLICT (natural_key) DO UPDATE SET
+       position = COALESCE(EXCLUDED.position, players.position),
+       external_fpl_id = COALESCE(EXCLUDED.external_fpl_id, players.external_fpl_id),
+       external_api_football_id = COALESCE(EXCLUDED.external_api_football_id, players.external_api_football_id)
      RETURNING id`,
-    [p.externalFplId, p.fullName, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null],
+    [p.fullName, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null],
   );
-  return rows[0].id;
+  return inserted.rows[0].id;
 }
 
 export async function upsertFplGameweek(
@@ -254,22 +311,84 @@ export async function upsertFixtureLineup(
   );
 }
 
-export async function upsertPlayerByApiFootballId(
-  pool: Pool,
-  p: PlayerInput & { externalApiFootballId: number },
-): Promise<number> {
-  const { rows } = await pool.query<{ id: number }>(
-    `INSERT INTO players (external_api_football_id, full_name, date_of_birth, nationality, position)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (external_api_football_id) DO UPDATE SET
-       full_name = EXCLUDED.full_name,
-       date_of_birth = COALESCE(EXCLUDED.date_of_birth, players.date_of_birth),
-       nationality = COALESCE(EXCLUDED.nationality, players.nationality),
-       position = COALESCE(EXCLUDED.position, players.position)
-     RETURNING id`,
-    [p.externalApiFootballId, p.fullName, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null],
+export interface FixturePlayerStatsInput {
+  fixtureId: number;
+  teamId: number;
+  playerId: number;
+  minutesPlayed?: number;
+  rating?: number;
+  goals?: number;
+  assists?: number;
+  shots?: number;
+  shotsOnTarget?: number;
+  passes?: number;
+  passesAccuracy?: number;
+  tackles?: number;
+  interceptions?: number;
+  dribblesAttempted?: number;
+  dribblesCompleted?: number;
+  foulsDrawn?: number;
+  foulsCommitted?: number;
+  yellowCards?: number;
+  redCards?: number;
+  penaltiesScored?: number;
+  penaltiesMissed?: number;
+  saves?: number;
+}
+
+export async function upsertFixturePlayerStats(pool: Pool, s: FixturePlayerStatsInput): Promise<void> {
+  await pool.query(
+    `INSERT INTO fixture_player_stats (
+       fixture_id, team_id, player_id, minutes_played, rating, goals, assists,
+       shots, shots_on_target, passes, passes_accuracy, tackles, interceptions,
+       dribbles_attempted, dribbles_completed, fouls_drawn, fouls_committed,
+       yellow_cards, red_cards, penalties_scored, penalties_missed, saves
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+     ON CONFLICT (fixture_id, player_id) DO UPDATE SET
+       minutes_played = EXCLUDED.minutes_played,
+       rating = EXCLUDED.rating,
+       goals = EXCLUDED.goals,
+       assists = EXCLUDED.assists,
+       shots = EXCLUDED.shots,
+       shots_on_target = EXCLUDED.shots_on_target,
+       passes = EXCLUDED.passes,
+       passes_accuracy = EXCLUDED.passes_accuracy,
+       tackles = EXCLUDED.tackles,
+       interceptions = EXCLUDED.interceptions,
+       dribbles_attempted = EXCLUDED.dribbles_attempted,
+       dribbles_completed = EXCLUDED.dribbles_completed,
+       fouls_drawn = EXCLUDED.fouls_drawn,
+       fouls_committed = EXCLUDED.fouls_committed,
+       yellow_cards = EXCLUDED.yellow_cards,
+       red_cards = EXCLUDED.red_cards,
+       penalties_scored = EXCLUDED.penalties_scored,
+       penalties_missed = EXCLUDED.penalties_missed,
+       saves = EXCLUDED.saves`,
+    [
+      s.fixtureId,
+      s.teamId,
+      s.playerId,
+      s.minutesPlayed ?? null,
+      s.rating ?? null,
+      s.goals ?? null,
+      s.assists ?? null,
+      s.shots ?? null,
+      s.shotsOnTarget ?? null,
+      s.passes ?? null,
+      s.passesAccuracy ?? null,
+      s.tackles ?? null,
+      s.interceptions ?? null,
+      s.dribblesAttempted ?? null,
+      s.dribblesCompleted ?? null,
+      s.foulsDrawn ?? null,
+      s.foulsCommitted ?? null,
+      s.yellowCards ?? null,
+      s.redCards ?? null,
+      s.penaltiesScored ?? null,
+      s.penaltiesMissed ?? null,
+      s.saves ?? null,
+    ],
   );
-  return rows[0].id;
 }
 
 export async function findFixtureId(

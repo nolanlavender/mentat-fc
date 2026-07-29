@@ -10,7 +10,8 @@ import {
   getOrCreateTeam,
   upsertFixture,
   upsertFixtureLineup,
-  upsertPlayerByApiFootballId,
+  upsertFixturePlayerStats,
+  upsertPlayerGoldenRecord,
 } from '../lib/db.js';
 
 // UNVERIFIED: this module is written against API-Football v3's publicly
@@ -151,7 +152,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
     const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name));
 
     for (const { player } of teamLineup.startXI) {
-      const playerId = await upsertPlayerByApiFootballId(pool, {
+      const playerId = await upsertPlayerGoldenRecord(pool, {
         externalApiFootballId: player.id,
         fullName: player.name,
         position: player.pos ?? undefined,
@@ -167,7 +168,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
     }
 
     for (const { player } of teamLineup.substitutes) {
-      const playerId = await upsertPlayerByApiFootballId(pool, {
+      const playerId = await upsertPlayerGoldenRecord(pool, {
         externalApiFootballId: player.id,
         fullName: player.name,
         position: player.pos ?? undefined,
@@ -184,29 +185,116 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
   }
 }
 
+interface ApiFootballPlayerStatsResponse {
+  response: Array<{
+    team: { id: number; name: string };
+    players: Array<{
+      player: { id: number; name: string };
+      statistics: Array<{
+        games: { minutes: number | null; rating: string | null; position: string | null };
+        shots: { total: number | null; on: number | null };
+        goals: { total: number | null; assists: number | null; saves: number | null };
+        passes: { total: number | null; accuracy: string | null };
+        tackles: { total: number | null; interceptions: number | null };
+        dribbles: { attempts: number | null; success: number | null };
+        fouls: { drawn: number | null; committed: number | null };
+        cards: { yellow: number | null; red: number | null };
+        penalty: { scored: number | null; missed: number | null };
+      }>;
+    }>;
+  }>;
+}
+
 /**
- * Resumable backfill: finds fixtures in the given competition-season that
- * don't have lineups yet and fetches them one at a time, stopping cleanly
- * when the daily budget runs out. Safe to rerun daily until it reports
- * everything is done.
+ * A *separate* per-fixture call from lineups (API-Football splits "who
+ * played" from "how did they perform" across two endpoints) -- this is the
+ * one that doubles the backfill's daily-budget cost, which is why it's
+ * gated behind having a paid tier rather than bundled into the original
+ * free-tier lineup plan.
+ */
+export async function seedApiFootballPlayerStats(pool: Pool, fixtureExternalId: number, fixtureId: number): Promise<void> {
+  const data = await callApiFootball<ApiFootballPlayerStatsResponse>(
+    `/fixtures/players?fixture=${fixtureExternalId}`,
+    `player-stats/${fixtureExternalId}.json`,
+  );
+
+  for (const teamEntry of data.response) {
+    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name));
+
+    for (const { player, statistics } of teamEntry.players) {
+      const stats = statistics[0]; // one fixture -> one stat block per player
+      if (!stats) continue;
+
+      const playerId = await upsertPlayerGoldenRecord(pool, {
+        externalApiFootballId: player.id,
+        fullName: player.name,
+        position: stats.games.position ?? undefined,
+      });
+
+      await upsertFixturePlayerStats(pool, {
+        fixtureId,
+        teamId,
+        playerId,
+        minutesPlayed: stats.games.minutes ?? undefined,
+        rating: stats.games.rating ? Number(stats.games.rating) : undefined,
+        goals: stats.goals.total ?? undefined,
+        assists: stats.goals.assists ?? undefined,
+        shots: stats.shots.total ?? undefined,
+        shotsOnTarget: stats.shots.on ?? undefined,
+        passes: stats.passes.total ?? undefined,
+        passesAccuracy: stats.passes.accuracy ? Number(stats.passes.accuracy) : undefined,
+        tackles: stats.tackles.total ?? undefined,
+        interceptions: stats.tackles.interceptions ?? undefined,
+        dribblesAttempted: stats.dribbles.attempts ?? undefined,
+        dribblesCompleted: stats.dribbles.success ?? undefined,
+        foulsDrawn: stats.fouls.drawn ?? undefined,
+        foulsCommitted: stats.fouls.committed ?? undefined,
+        yellowCards: stats.cards.yellow ?? undefined,
+        redCards: stats.cards.red ?? undefined,
+        penaltiesScored: stats.penalty.scored ?? undefined,
+        penaltiesMissed: stats.penalty.missed ?? undefined,
+        saves: stats.goals.saves ?? undefined,
+      });
+    }
+  }
+}
+
+/**
+ * Resumable backfill: finds fixtures in the given competition-season still
+ * missing lineups and/or player stats, and fetches only whatever's actually
+ * missing for each one -- so a fixture that already has lineups from an
+ * earlier run doesn't burn budget re-fetching them just because player
+ * stats came later. Stops cleanly when the daily budget runs out; safe to
+ * rerun (daily, on a paid tier or free) until it reports everything done.
  */
 export async function backfillLineupsForCompetitionSeason(
   pool: Pool,
   competitionSeasonId: number,
 ): Promise<{ done: number; remaining: number; stoppedOnBudget: boolean }> {
-  const { rows } = await pool.query<{ id: number; external_api_football_id: number | null }>(
-    `SELECT f.id, f.external_api_football_id
+  const { rows } = await pool.query<{
+    id: number;
+    external_api_football_id: number | null;
+    has_lineup: boolean;
+    has_player_stats: boolean;
+  }>(
+    `SELECT f.id, f.external_api_football_id,
+       EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id) AS has_lineup,
+       EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id) AS has_player_stats
      FROM fixtures f
      WHERE f.competition_season_id = $1
        AND f.external_api_football_id IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id)`,
+       AND (
+         NOT EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id)
+         OR NOT EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id)
+       )`,
     [competitionSeasonId],
   );
 
   let done = 0;
   for (const row of rows) {
     try {
-      await seedApiFootballLineup(pool, row.external_api_football_id!, row.id);
+      if (!row.has_lineup) await seedApiFootballLineup(pool, row.external_api_football_id!, row.id);
+      if (!row.has_player_stats) await seedApiFootballPlayerStats(pool, row.external_api_football_id!, row.id);
       done += 1;
     } catch (err) {
       if (err instanceof BudgetExhaustedError) {

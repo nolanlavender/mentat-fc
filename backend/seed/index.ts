@@ -61,7 +61,7 @@ async function seedFaCupFixtures(): Promise<void> {
 
 async function backfillLineups(): Promise<void> {
   if (!process.env.API_FOOTBALL_KEY) {
-    console.log('Skipping lineup backfill (API_FOOTBALL_KEY not set).');
+    console.log('Skipping lineup + player-stats backfill (API_FOOTBALL_KEY not set).');
     return;
   }
 
@@ -80,7 +80,7 @@ async function backfillLineups(): Promise<void> {
 
       try {
         const result = await backfillLineupsForCompetitionSeason(pool, competitionSeasonId);
-        console.log(`${competition.name} ${label}: backfilled ${result.done} lineups, ${result.remaining} remaining.`);
+        console.log(`${competition.name} ${label}: backfilled ${result.done} fixtures (lineups + player stats), ${result.remaining} remaining.`);
         if (result.stoppedOnBudget) {
           console.log('Daily API-Football budget exhausted -- rerun tomorrow to continue.');
           return;
