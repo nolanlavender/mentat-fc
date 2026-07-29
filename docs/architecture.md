@@ -69,8 +69,8 @@ with nothing reading its output is premature — but the shape is settled:
     input.
 - **Scheduling**: locally, a cron entry or manual periodic run is enough.
   Once deployed (Phase 10), this is the same pattern as the model service's
-  scheduled batch job — Azure Container Apps Jobs or a scheduled function,
-  not a new architectural concept.
+  scheduled batch job — a GitHub Actions scheduled workflow, not a new
+  architectural concept.
 - **What this explicitly doesn't cover yet**: live/in-play score updates
   (this app is not building a live-score ticker) and live betting odds
   (Phase 6, The Odds API, a separate concern from historical odds).
@@ -91,26 +91,55 @@ entirely local, including training and running the model on your machine.
 
 ## Deployment target (Phase 10)
 
+Originally planned around Azure's managed tiers, but reconsidered for cost:
+Azure's cheapest *always-on* Postgres + App Service combo runs roughly
+$25-40/mo before any real traffic. This project's actual scale (~50
+concurrent users at most, mostly personal use) fits a stack of serverless/
+free tiers that scale down to near-$0 between visits far better than a
+fixed-cost VM-shaped stack does.
+
 ```mermaid
 flowchart TD
-    Users --> SWA[Azure Static Web App\nfrontend]
-    SWA --> ASE[Azure App Service\nNode backend, burstable tier]
-    ASE --> APG[(Azure Database for PostgreSQL\nFlexible Server, burstable tier)]
-    MODELJOB[Azure Container Apps Job\nor scheduled function\nPython model service] -- writes predictions --> APG
-    GH[GitHub Actions] -.CI/CD.-> SWA
-    GH -.CI/CD.-> ASE
-    GH -.CI/CD.-> MODELJOB
+    Users --> VC[Vercel or Cloudflare Pages\nfrontend, static build, free tier]
+    VC --> RND[Render\nExpress backend, free/starter tier]
+    RND --> NEON[(Neon\nserverless Postgres, autosuspends when idle)]
+    GHA[GitHub Actions\nscheduled workflow] -- writes predictions --> NEON
+    GHA -.CI/CD.-> VC
+    GHA -.CI/CD.-> RND
 ```
+
+- **Frontend — Vercel or Cloudflare Pages.** Free static hosting for the
+  Vite/React build, CDN-backed by default (no separate "add a CDN" step,
+  unlike Azure Static Web Apps).
+- **Backend — Render.** Free tier spins the Express API down after ~15
+  minutes idle (adds cold-start latency on the next request); the $7/mo
+  starter tier keeps it always-on if that latency ever actually bothers
+  anyone. Either way, a fraction of App Service's minimum cost.
+- **Database — Neon.** Serverless Postgres with a genuinely useful free
+  tier: it **autosuspends compute when idle**, so cost tracks actual usage
+  rather than a fixed monthly floor the way Azure's Flexible Server does.
+  Same `DATABASE_URL`-based connection this project already uses locally —
+  migrations, seed scripts, and the dump/restore snapshot all work
+  unchanged, just pointed at a different connection string.
+- **Model service — GitHub Actions scheduled workflow, not a hosted
+  service.** The model service was always designed as scheduled batch
+  inference, never a request/response API (see the notes above) — a free
+  Actions cron job that runs the training/prediction script and writes to
+  Neon satisfies that exactly, with no compute to pay for at all. Worth
+  knowing: Actions minutes are metered on private repos (free/unlimited on
+  public ones) and scheduled runs can be delayed a few minutes under
+  GitHub's own load — fine for "predictions ready well before kickoff,"
+  not fine for anything latency-sensitive.
 
 ## Scaling path (documented, not pre-built)
 
 | Component | Current | Next step when needed |
 |---|---|---|
-| Backend | Single App Service, burstable | Bump plan tier, then scale out to multiple instances |
-| Database | Single Flexible Server, burstable | Bump compute tier, then add a read replica |
-| Cache | In-process TTL map | Redis (Azure Cache for Redis) once >1 backend instance |
-| Model service | Scheduled batch job | Move to real-time serving only if a feature actually needs live inference |
-| Static assets | Served via Static Web App | Add CDN if latency becomes an issue |
+| Backend | Render free/starter tier | Bump to a larger Render plan, then scale out to multiple instances |
+| Database | Neon free tier (autosuspend) | Bump to Neon's paid always-on compute tier, then consider a read replica |
+| Cache | In-process TTL map | A hosted Redis (e.g. Upstash's serverless free tier) once >1 backend instance |
+| Model service | GitHub Actions scheduled workflow | Move to a dedicated worker (e.g. a Render background worker) only if a feature needs faster/more frequent runs than Actions scheduling supports |
+| Static assets | Served via Vercel/Cloudflare Pages | Already CDN-backed by default — no next step here |
 
 50 concurrent users should be comfortable on the "current" column across the
 board — no need to reach for the "next step" column until there's a real

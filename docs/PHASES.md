@@ -116,13 +116,16 @@ not optional.
 - [ ] UI polish pass against a real design system, not defaults
 - [ ] Explain: what's worth testing vs not, test pyramid basics
 
-## Phase 10 — Azure deployment & scaling plan
-- [ ] Azure Static Web App (frontend) + Azure App Service (Node backend) +
-      Azure Container Apps or App Service (Python model service) + Azure
-      Postgres Flexible Server (burstable tier)
-- [ ] GitHub Actions CI/CD pipeline for all three services
-- [ ] Scheduled job for the model service in the cloud (e.g. Azure
-      Container Apps Jobs, or a simple cron-triggered function)
+## Phase 10 — Deployment & scaling plan
+- [ ] Vercel or Cloudflare Pages (frontend) + Render (Node backend) + Neon
+      (serverless Postgres) -- switched from the original Azure plan for
+      cost: Azure's cheapest always-on tiers run ~$25-40/mo before any real
+      traffic, versus this stack scaling down to near-$0 between visits.
+      See `docs/architecture.md`'s "Deployment target" section for the
+      full reasoning.
+- [ ] GitHub Actions CI/CD pipeline for frontend + backend
+- [ ] GitHub Actions scheduled workflow for the model service (batch
+      inference, no hosted compute needed -- see architecture.md)
 - [ ] Document the next scaling step for each component
 - [ ] Load-check against the 50-concurrent-user target
 

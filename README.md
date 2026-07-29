@@ -30,7 +30,7 @@ for the full reasoning and how the project is meant to be worked on.
 | Frontend | React + TypeScript (Vite) |
 | Backend | Node.js + Express + TypeScript — serves the app, reads predictions from Postgres |
 | Model service | Python + FastAPI — trains the prediction model, writes predictions to Postgres on a schedule (separate from the backend on purpose; see `docs/architecture.md`) |
-| Database | PostgreSQL (Docker Compose locally, Azure Database for PostgreSQL once deployed) |
+| Database | PostgreSQL (Docker Compose locally, Neon — serverless, autosuspending — once deployed) |
 | AI explainer | Groq API (Llama 3.3 70B), behind our own service layer |
 
 ## Repo structure

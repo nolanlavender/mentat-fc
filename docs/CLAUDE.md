@@ -64,14 +64,16 @@ reasoning."
   model, writes predictions to Postgres on a schedule. Kept as a separate
   service on purpose: it's a real-world pattern (batch inference vs. a
   request/response API) and keeps ML code out of the Express app.
-- **Database:** PostgreSQL (Azure Database for PostgreSQL — Flexible
-  Server, burstable tier — once deployed)
+- **Database:** PostgreSQL (Neon, serverless/autosuspending — once deployed)
 - **AI features (explainer only):** Groq API — Llama 3.3 70B to start.
   Kept behind our own service layer so swapping providers later is cheap.
 - **Local dev:** Docker Compose for Postgres, `.env` for secrets
-- **Hosting (eventual):** Azure Static Web App (frontend) + Azure App
-  Service (Node backend) + Azure Container Apps or App Service (Python
-  model service) + Azure Database for PostgreSQL
+- **Hosting (eventual):** Vercel or Cloudflare Pages (frontend) + Render
+  (Node backend) + a GitHub Actions scheduled workflow (Python model
+  service, batch only — no hosted compute needed) + Neon (PostgreSQL).
+  Chosen over the original Azure plan for cost: this stack scales down to
+  near-$0 between visits instead of a fixed monthly floor — see
+  `docs/architecture.md`'s "Deployment target" for the full reasoning.
 
 ## Non-functional targets
 
