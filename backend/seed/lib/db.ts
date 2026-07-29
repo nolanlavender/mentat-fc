@@ -76,6 +76,17 @@ export async function setTeamExternalFplId(pool: Pool, teamId: number, externalF
   await pool.query(`UPDATE teams SET external_fpl_id = $2 WHERE id = $1`, [teamId, externalFplId]);
 }
 
+// A direct overwrite, not a COALESCE-preserve-old upsert: FPL's
+// bootstrap-static always reflects the current reality of a live fantasy
+// game, so on a rerun it should win over whatever was there before (a
+// transfer moved the player, and that stops being true, not something to
+// preserve). Only FPL touches this column -- API-Football-sourced sightings
+// (lineups, player-stats) know "this player played for this team in this
+// match," not "this is the player's current team," so they don't call this.
+export async function setPlayerCurrentTeam(pool: Pool, playerId: number, teamId: number): Promise<void> {
+  await pool.query(`UPDATE players SET current_team_id = $2 WHERE id = $1`, [playerId, teamId]);
+}
+
 export interface PlayerInput {
   externalFplId?: number;
   externalApiFootballId?: number;

@@ -462,3 +462,108 @@ Re-dumped `backend/seed/snapshot/mentat_fc_seed.dump` after each schema
 change in this session (golden-record keys, the view, `fixture_player_stats`)
 so the committed snapshot stays in sync with what the migrations actually
 produce.
+
+---
+
+## Phase 2 — Backend API core (2026-07-29)
+
+### What we built
+
+Express endpoints in `backend/src/`, split into three layers for the first
+time (Phase 0's learning-log explicitly deferred this until there was more
+than one endpoint to justify it):
+
+- **`routes/`** — just URL + HTTP method → controller function mapping.
+- **`controllers/`** — parse/validate the request (query params, route
+  params), call a service, shape the response. No SQL here.
+- **`services/`** — the actual `pool.query(...)` calls and business logic.
+  No knowledge of `req`/`res` here — a service could be called from a CLI
+  script or a test with zero changes.
+
+Endpoints: `GET /api/teams`, `GET /api/teams/:id`,
+`GET /api/teams/:id/dashboard` (next match + prediction if one exists,
+league table position, squad), `GET /api/fixtures` (filterable by
+competition/team/date range), `GET /api/fixtures/:id` (team stats, all odds
+rows, latest prediction), `GET /api/players` and `GET /api/players/:id`.
+
+**Deliberately read-only — no POST/PUT/DELETE**, even though PHASES.md's
+checklist said "CRUD endpoints." Nothing about teams/fixtures/players is
+ever authored through this API: the seed pipeline and the (future) refresh
+job own writing this data. Building create/update/delete for a resource
+nothing ever calls would be unused surface area — the same "don't build for
+a need that doesn't exist" reasoning applied throughout Phase 1.
+
+Error handling: a small typed hierarchy (`AppError`, `NotFoundError` in
+`src/lib/errors.ts`) and one centralized `errorHandler` middleware
+(`src/middleware/errorHandler.ts`) that turns a thrown error into the right
+status code + JSON body. Controllers just `throw new NotFoundError(...)` —
+they don't know or care how that becomes an HTTP response.
+
+### Concepts this taught
+
+- **Why routes/controllers/services, not one file.** `src/index.ts` used to
+  hold the entire app (one route, inline). That's fine at one endpoint; past
+  that, mixing "what URL matches this," "how do I validate this request,"
+  and "what SQL answers this" in one function makes each one harder to
+  change without touching the others. Splitting them means a service can be
+  tested or reused without spinning up Express at all, and a controller's
+  validation logic doesn't depend on knowing SQL.
+- **Express 5 changed a real Express 4 pain point.** In Express 4, an async
+  route handler that throws or rejects does *not* automatically reach your
+  error middleware — every tutorial either wraps handlers in try/catch or
+  pulls in the `express-async-errors` package as a workaround. Express 5
+  (already the version installed here from Phase 0) forwards rejected
+  promises from async handlers to error middleware automatically. Every
+  controller here is a plain `async function` that just `throw`s on
+  failure — no wrapper needed. Worth knowing this is version-specific: code
+  copied from an older Express 4 tutorial would need the workaround this
+  project doesn't.
+- **Error middleware position is the routing mechanism, not a path.** Express
+  recognizes error-handling middleware by its arity (4 parameters:
+  `(err, req, res, next)`), and only middleware registered *after* a route
+  can catch that route's errors. `app.use(errorHandler)` has to be the last
+  thing registered in `src/index.ts` — moving it earlier would silently stop
+  it from seeing errors from routes below it.
+- **A real gap found by building the feature, not planning it.** The team
+  dashboard's "squad" needed *some* way to answer "who's on this team," and
+  there wasn't one: `fixture_lineups` (the eventual real source) is empty
+  until the paid-tier backfill runs, and nothing had ever captured a
+  player's team from FPL's `bootstrap-static` (`element.team` was parsed for
+  position but the team link was dropped). Added `players.current_team_id`
+  (migration `1701000000016`), populated from FPL — Premier League only,
+  since FPL has no Championship players, which means Championship dashboards
+  get an empty squad until lineups exist. Documented as a known gap, not
+  silently left broken.
+- **A stale snapshot, and why that's expected, not a bug.** Restoring the
+  previously-committed `seed/snapshot/mentat_fc_seed.dump` against the new
+  schema failed (`cannot drop table teams because other objects depend on
+  it` — the new `players.current_team_id` foreign key). Postgres restores
+  objects in dependency order captured *at dump time*; a dump taken before a
+  new foreign key existed doesn't know to drop it first. This is exactly why
+  `docs/seeding-runbook.md` says to re-dump after every schema change —
+  re-seeded from the cached raw CSV/JSON (no network needed) and re-dumped.
+
+### Decisions worth remembering
+
+- **"Next match" isn't filtered to Premier League/Championship.** It shows
+  the team's next fixture across any competition (including FA Cup against
+  a lower-tier side); the *prediction* attached to it is what's
+  conditionally missing, via a plain `LEFT JOIN`-style lookup that returns
+  `null` when there's nothing in `model_predictions` yet. This naturally
+  handles both "Phase 5 hasn't run yet" and "this opponent is out of scope
+  for a prediction" the same way, without the API needing to know which
+  case it's in.
+- **Table position falls back to "most recent season with fixtures for this
+  team"** rather than a genuine "current season" flag, because
+  `competition_seasons.is_current` was designed in Phase 1's schema but
+  nothing has ever set it to `true` — there's only ever been one season's
+  worth of data in any environment so far. Revisit once multiple seasons are
+  actually seeded and "current" needs to mean something more precise than
+  "most recent by start date."
+- **Verified against real data, not just "it returned 200."** Arsenal's
+  dashboard reports 2nd place, 89 points, 91 goals for, 29 against for
+  2023/24 — the actual final table. `GET /api/fixtures/1` returns Burnley
+  0-3 Manchester City, referee C Pawson — the same row spot-checked against
+  the raw CSV back in Phase 1. 404s and 400s (bad ID, non-numeric query
+  param) checked directly against a running server, not assumed from
+  reading the code.
