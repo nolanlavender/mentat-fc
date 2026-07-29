@@ -27,14 +27,25 @@ not optional.
 - [x] Create `/docs/learning-log.md` (empty, ready for Phase 0 entry)
 
 ## Phase 1 — Data layer & schema
-- [ ] Design schema: leagues, teams, players, fixtures, lineups
-- [ ] Design schema: FPL data (player prices, ownership, gameweek points)
-- [ ] Design schema: my logged bets (pick, odds, stake, result, timestamp)
-- [ ] Design schema: model predictions (per fixture, per gameweek)
-- [ ] Write `/docs/erd.md` (mermaid ERD)
-- [ ] Migrations set up (e.g. node-pg-migrate or Prisma migrate)
-- [ ] Seed script pulling real data for all 20 PL teams
-- [ ] Explain: why this schema shape, what a migration is and why we don't
+- [x] Design schema: leagues, teams, players, fixtures, lineups (scope grew
+      to Premier League + Championship + FA Cup, 3 seasons, full depth --
+      see learning-log)
+- [x] Design schema: FPL data (player prices, ownership, gameweek points)
+- [x] Design schema: my logged bets (pick, odds, stake, result, timestamp)
+      -- design sketch only, in erd.md notes; no migration yet, deferred to
+      Phase 6 per its actual sequencing
+- [x] Design schema: model predictions (per fixture, per gameweek)
+- [x] Write `/docs/erd.md` (mermaid ERD)
+- [x] Migrations set up (e.g. node-pg-migrate or Prisma migrate) --
+      node-pg-migrate, plain `.sql` migrations
+- [x] Seed script pulling real data for all 20 PL teams -- built and
+      verified end-to-end for the 2023/24 season (380 real fixtures, odds,
+      stats, FPL players/gameweeks). Remaining seasons, Championship, FA
+      Cup, and the lineup backfill need to run on a machine with real
+      internet access and a real `API_FOOTBALL_KEY` -- not available in the
+      cloud session this was built in. See learning-log for the exact
+      commands to run.
+- [x] Explain: why this schema shape, what a migration is and why we don't
       just edit the DB by hand
 
 ## Phase 2 — Backend API core
@@ -43,6 +54,10 @@ not optional.
 - [ ] Team dashboard endpoint (next match, table position, squad)
 - [ ] Explain: REST resource design, error handling conventions, why we
       structure routes/controllers/services the way we do
+- [ ] Recurring refresh job to keep current-season data current (new
+      fixtures/results, FPL prices/ownership) -- designed in Phase 1, see
+      `docs/architecture.md`'s "Keeping data current" section; build it once
+      there's an actual API/frontend consuming the data, not before
 
 ## Phase 3 — Frontend shell
 - [ ] React + TypeScript app scaffold
@@ -101,13 +116,16 @@ not optional.
 - [ ] UI polish pass against a real design system, not defaults
 - [ ] Explain: what's worth testing vs not, test pyramid basics
 
-## Phase 10 — Azure deployment & scaling plan
-- [ ] Azure Static Web App (frontend) + Azure App Service (Node backend) +
-      Azure Container Apps or App Service (Python model service) + Azure
-      Postgres Flexible Server (burstable tier)
-- [ ] GitHub Actions CI/CD pipeline for all three services
-- [ ] Scheduled job for the model service in the cloud (e.g. Azure
-      Container Apps Jobs, or a simple cron-triggered function)
+## Phase 10 — Deployment & scaling plan
+- [ ] Vercel or Cloudflare Pages (frontend) + Render (Node backend) + Neon
+      (serverless Postgres) -- switched from the original Azure plan for
+      cost: Azure's cheapest always-on tiers run ~$25-40/mo before any real
+      traffic, versus this stack scaling down to near-$0 between visits.
+      See `docs/architecture.md`'s "Deployment target" section for the
+      full reasoning.
+- [ ] GitHub Actions CI/CD pipeline for frontend + backend
+- [ ] GitHub Actions scheduled workflow for the model service (batch
+      inference, no hosted compute needed -- see architecture.md)
 - [ ] Document the next scaling step for each component
 - [ ] Load-check against the 50-concurrent-user target
 

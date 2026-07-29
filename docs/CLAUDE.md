@@ -64,14 +64,16 @@ reasoning."
   model, writes predictions to Postgres on a schedule. Kept as a separate
   service on purpose: it's a real-world pattern (batch inference vs. a
   request/response API) and keeps ML code out of the Express app.
-- **Database:** PostgreSQL (Azure Database for PostgreSQL — Flexible
-  Server, burstable tier — once deployed)
+- **Database:** PostgreSQL (Neon, serverless/autosuspending — once deployed)
 - **AI features (explainer only):** Groq API — Llama 3.3 70B to start.
   Kept behind our own service layer so swapping providers later is cheap.
 - **Local dev:** Docker Compose for Postgres, `.env` for secrets
-- **Hosting (eventual):** Azure Static Web App (frontend) + Azure App
-  Service (Node backend) + Azure Container Apps or App Service (Python
-  model service) + Azure Database for PostgreSQL
+- **Hosting (eventual):** Vercel or Cloudflare Pages (frontend) + Render
+  (Node backend) + a GitHub Actions scheduled workflow (Python model
+  service, batch only — no hosted compute needed) + Neon (PostgreSQL).
+  Chosen over the original Azure plan for cost: this stack scales down to
+  near-$0 between visits instead of a fixed monthly floor — see
+  `docs/architecture.md`'s "Deployment target" for the full reasoning.
 
 ## Non-functional targets
 
@@ -83,17 +85,48 @@ reasoning."
 
 ## Data sources
 
-- **Fixtures / lineups / standings, whole PL:** API-Football or
-  Football-Data.org (confirm current free tier limits before building)
+- **Fixtures / lineups / standings:** API-Football (free tier: 100
+  requests/day). Pulled for Premier League, Championship, and FA Cup, 3
+  seasons — see "Data scope vs. app scope" below for why it's wider than
+  what the app shows.
 - **Fantasy:** Official FPL public API (`fantasy.premierleague.com/api/...`)
-  — free, no key required
+  — free, no key required. Premier League only, current season only — that's
+  inherent to what FPL is, not a gap.
 - **Historical match data for model training:** football-data.co.uk — free
-  CSVs of PL results going back many seasons, including historical odds.
-  This is the standard starting dataset for exactly this kind of project.
+  CSVs, Premier League (E0) and Championship (E1), 3 seasons, including
+  historical odds. No FA Cup coverage (league-division CSVs only) — FA Cup
+  comes from API-Football instead.
 - **Odds (for the betting tracker/model comparison):** The Odds API
 - **News / storylines:** TBD — likely RSS aggregation or a news API, with
   caching
 - **AI explanations:** Groq API, with caching on common queries
+
+## Data scope vs. app scope
+
+The database holds **Premier League + Championship + FA Cup**, 3 seasons,
+full player/lineup depth. What the app actually shows is narrower, but not
+PL-only:
+
+- **Team dashboards and match predictions:** Premier League **and**
+  Championship, plus FA Cup fixtures — but only where the model can
+  actually say something. Most FA Cup matchups from the Third Round onward
+  are PL/Championship sides playing each other, so those get a dashboard
+  and a real prediction like any other fixture. When an FA Cup fixture
+  involves a team from outside those two tiers (a League One/Two or
+  non-league side, no historical data to model against), the UI shows a
+  default logo and the team name with **no score prediction** — degrade
+  gracefully instead of guessing.
+- **Fantasy:** Premier League only — not a scope choice, just what FPL is.
+  There's no Championship fantasy data to show.
+- **Betting tracker:** Premier League only for now — unchanged, revisit
+  deliberately if that ever needs to widen.
+- Championship/FA Cup data involving lower-tier opponents still feeds the
+  model as training signal even when we don't display a prediction for
+  that specific matchup.
+
+Don't build Championship/FA Cup fantasy/betting features without a
+deliberate decision to expand app scope further — this note is about
+dashboards and predictions specifically, not a blanket app-wide expansion.
 
 ## Database
 

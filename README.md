@@ -30,7 +30,7 @@ for the full reasoning and how the project is meant to be worked on.
 | Frontend | React + TypeScript (Vite) |
 | Backend | Node.js + Express + TypeScript — serves the app, reads predictions from Postgres |
 | Model service | Python + FastAPI — trains the prediction model, writes predictions to Postgres on a schedule (separate from the backend on purpose; see `docs/architecture.md`) |
-| Database | PostgreSQL (Docker Compose locally, Azure Database for PostgreSQL once deployed) |
+| Database | PostgreSQL (Docker Compose locally, Neon — serverless, autosuspending — once deployed) |
 | AI explainer | Groq API (Llama 3.3 70B), behind our own service layer |
 
 ## Repo structure
@@ -95,7 +95,7 @@ uvicorn app.main:app --reload --port 8000   # http://localhost:8000/health
 
 ## Project status
 
-Currently finishing **Phase 0 — environment & planning**. See
+Currently finishing **Phase 1 — data layer & schema**. See
 [`docs/PHASES.md`](docs/PHASES.md) for the full checkboxed roadmap and
 [`docs/learning-log.md`](docs/learning-log.md) for a running study log of what's been
 built and why, phase by phase.

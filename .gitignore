@@ -17,6 +17,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# --- Seed data cache (raw pulls from football-data.co.uk, API-Football, FPL --
+# --- large, regenerable, and the whole point is not re-fetching it) ---
+backend/seed/raw/
+
 # --- Env files (never commit real secrets) ---
 .env
 .env.local

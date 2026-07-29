@@ -157,3 +157,308 @@ odds-rich dataset CLAUDE.md pointed at for Phase 5 model training — no gaps fo
   we ever needed a second source alongside API-Football).
 - Deciding when to pay for The Odds API's Professional tier — needed by Phase 6, not
   before.
+
+---
+
+## Phase 1 — Data layer & schema (2026-07-28)
+
+### What we built
+
+Scope grew before this phase started: instead of Premier League only, we're now
+covering **Premier League + Championship + FA Cup, 3 seasons back, full depth**
+(lineups and player-level data for all three, not just match results for model
+training) — decided via a couple of scoping questions up front, since that choice
+changes the schema and the data-sourcing plan materially.
+
+- **12 tables**, migrated via plain SQL files in `backend/migrations/` (`node-pg-migrate`,
+  `.sql` mode): `competitions`, `seasons`, `competition_seasons` (join table),
+  `teams`, `players`, `fixtures`, `fixture_team_stats`, `fixture_odds`,
+  `fixture_lineups`, `fpl_gameweeks`, `fpl_player_gameweek_stats`, `model_predictions`.
+  Full breakdown and the ERD diagram are in `docs/erd.md` — that file is the source
+  of truth for the schema, this entry is about *why*.
+- **Seed pipeline** in `backend/seed/`: one module per data source
+  (`sources/football-data-co-uk.ts`, `sources/fpl.ts`, `sources/api-football.ts`),
+  a shared `lib/db.ts` of upsert helpers, and `lib/cache.ts` implementing
+  fetch-if-absent caching to `backend/seed/raw/` (gitignored). Orchestrated by
+  `seed/index.ts`, run via `npm run db:seed`.
+- **Tested end-to-end in this session**, since this container has no Docker and no
+  network access to football-data.co.uk/API-Football (its network policy blocks
+  both): installed Postgres 16 natively (no Docker needed for this — `initdb`/`pg_ctl`
+  directly) as a scratch database, ran all 12 migrations up and back down cleanly,
+  then ran the football-data.co.uk + FPL seed against the real cached samples already
+  in the repo. Confirmed: 380 real 2023/24 Premier League fixtures with correct
+  scores/referees/dates, real odds parsed correctly across 8 bookmakers and three
+  market types, 841 real FPL players, 38 real gameweeks — and reran the whole seed
+  three times in a row with **zero duplicate rows and zero network calls** after the
+  first run, proving both the idempotent-upsert design and the cache actually work.
+
+### Concepts this taught
+
+- **Why migrations are SQL you write, not SQL you generate.** We used
+  `node-pg-migrate` in its `.sql` file mode (not its JS DSL, and not an ORM like
+  Prisma) specifically so every `CREATE TABLE` is something we wrote and can read
+  back, not something a schema DSL generated on our behalf. The tool still earns its
+  keep: it tracks which migrations have run (a `pgmigrations` bookkeeping table) and
+  runs them in order, so you're not manually remembering "did I run that one on this
+  machine yet." Each migration file has both an `up` and a `down` — we actually ran
+  `down` on all 12 tables and confirmed the database returned to empty, which is the
+  concrete answer to "why not just hand-edit the DB": a hand edit isn't recorded
+  anywhere, isn't reversible, and doesn't replay on a teammate's machine or in CI.
+- **Entity resolution across data sources — the same bug, twice.** FPL and
+  API-Football assign their own, unrelated IDs to the same real player, and
+  football-data.co.uk and API-Football have no shared ID at all for the same real
+  match. Both `players` and `fixtures` solve this the same way: a **natural key**
+  (something derived from the real-world data itself — team names + date for
+  fixtures) is the actual dedup target, with each source's numeric ID stored
+  alongside as a nullable enrichment column, not the primary way of finding the row.
+  Reach for a natural key whenever two systems describe the same real thing but
+  don't agree on an ID for it — this comes up constantly in data engineering, not
+  just here.
+- **A live bug in exactly that pattern, found by actually rerunning the seed.**
+  The first version of `getOrCreateCompetition` used `ON CONFLICT (external_api_football_league_id)`
+  — a nullable column — to decide whether "Premier League" already existed.
+  Postgres never treats `NULL = NULL` as a conflict, so with no id supplied yet
+  (which is the normal case until API-Football actually runs), every rerun silently
+  inserted a second "Premier League" row, which cascaded into doubled seasons,
+  fixtures, and odds on the second seed run. Fixed by matching on `name` (the actual
+  natural key — there are only 3 competitions, ever) and only using the external id
+  as an enrichment column once we have one. The lesson: an `ON CONFLICT` target has
+  to be a column that's actually always populated at conflict time, or it silently
+  doesn't do its job — and this class of bug only shows up if you rerun the thing
+  and check row counts, which is exactly why we tested that instead of assuming it
+  worked after one clean run.
+- **EAV (entity-attribute-value) tables, and when the tradeoff is worth it.**
+  `fixture_odds` stores `(bookmaker, market, outcome, line, price)` as rows instead
+  of giving every bookmaker/market combination its own column. That's the EAV
+  pattern, normally a smell — but here it's the right call because the set of
+  bookmakers and market types isn't fixed and shouldn't require a schema change
+  every time football-data.co.uk adds one. The real cost, which we're deferring:
+  reading this back out as a wide table for model training needs a pivot
+  query/view, which doesn't exist yet — a Phase 5 problem, noted now so it isn't a
+  surprise later.
+- **UTC vs. local wall-clock time, concretely.** football-data.co.uk gives kickoff
+  times as UK local time with no timezone attached, and that offset changes between
+  GMT and BST across a single season. `seed/lib/london-time.ts` converts correctly
+  in both directions using `Intl.DateTimeFormat` against the `Europe/London` zone
+  (asking the real IANA tz database what the offset was at that specific moment,
+  rather than assuming a fixed one) — both the football-data.co.uk importer and the
+  (not-yet-run) API-Football importer compute `kickoff_date` this same way, so they
+  agree on which calendar day a match happened on even though their raw timestamps
+  come from different sources with different precision.
+- **Why Postgres was available without Docker in this session, and why that
+  doesn't change anything about the real setup.** This cloud dev container has no
+  Docker daemon, but does have Postgres 16 installed as a system package, so
+  `initdb`/`pg_ctl` stood up a scratch instance directly for testing. Your actual
+  local dev environment still uses `docker-compose.yml` as documented in the
+  README — this was purely a way to verify the migrations and seed script actually
+  work before you run them for real.
+
+### Decisions worth remembering
+
+- **No stored standings table, no `fixture_events` table, no `minutes_played` on
+  lineups, no `bets` table yet.** All four were deliberately left out and explained
+  in `docs/erd.md`'s notes rather than silently designed away — standings are
+  derivable from `fixtures` on demand; goal/card event data and `minutes_played`
+  are Phase 7 (goal scorer prediction) needs, and `minutes_played` specifically
+  would have doubled the API-Football lineup backfill for no Phase 1 payoff;
+  `bets` is Phase 6, and won't need a `user_id` at all given this is a single-user
+  personal tracker throughout CLAUDE.md, not "waiting on Phase 9 auth."
+- **The full 3-year, 3-competition, full-depth backfill could not be completed in
+  this session** — two real constraints, not a shortcut: (1) this container's
+  network policy blocks both football-data.co.uk and API-Football, so only the
+  already-cached 2023/24 Premier League CSV and FPL sample could be tested; (2) no
+  real `API_FOOTBALL_KEY` exists yet. Concretely still to do, on a machine with
+  normal internet access and a real key in `backend/.env`:
+  1. Run `npm run migrate:up` and `npm run db:seed` in `backend/` — this will
+     actually fetch the 2024/25 and 2025/26 Premier League + Championship CSVs
+     over the network (the 2023/24 one is already cached from this session) and
+     seed FPL fresh.
+  2. Add `API_FOOTBALL_KEY` to `backend/.env`, then **before trusting the lineup
+     backfill**: run `seedApiFootballLineup` against a single fixture from 2+
+     seasons ago and check what comes back. API-Football's free tier is
+     confirmed at 100 requests/day, but whether it serves detailed
+     lineups/statistics that far back at all is genuinely unconfirmed — if it
+     doesn't, that's a "pay for depth" decision, not a "wait longer" one, and
+     worth deciding together rather than discovering mid-backfill.
+  3. If that check passes, `npm run db:seed` again to pull FA Cup fixture lists
+     and kick off the lineup backfill — it's throttled to the daily budget and
+     resumable by design (`backend/seed/sources/api-football.ts`), so it's meant
+     to be rerun daily (not left running) until it reports nothing left to do.
+  4. Recommending against paying for a faster API-Football tier for now: The Odds
+     API's Professional tier ($29/mo, needed by Phase 6) already uses nearly all
+     of the $10-30/mo paid-API budget CLAUDE.md sets aside, so stacking a second
+     paid tier here would be defaulting into a cost rather than deciding on it.
+- **`api-football.ts` is unverified against a real response.** It's written
+  against API-Football v3's publicly documented response shape, but this session
+  never received an actual response to check it against (no key, no network path
+  to the host). Treat the field names in there as "best effort, confirm before a
+  large backfill," not "known correct."
+
+### Follow-up, same day: data scope vs. app scope, and a snapshot layer
+
+Clarified after the initial pass: the full-depth Championship/FA Cup data is for
+**the model only** — the frontend and API only ever surface Premier League. This
+didn't change the schema at all (it was already competition-agnostic — teams,
+fixtures, and lineups were never scoped to one competition), which is a decent
+sign the schema design held up under a real scope clarification instead of
+needing rework. It does mean Phase 2's endpoints need to filter to Premier
+League deliberately rather than exposing everything the schema can hold — noted
+in `docs/architecture.md` and `docs/CLAUDE.md` so it isn't lost before Phase 2.
+
+Also added a **second storage layer on top of the raw cache**: `backend/seed/dump.ts`
+/ `restore.ts` (`npm run db:dump` / `db:restore`) wrap `pg_dump`/`pg_restore` to
+snapshot the fully seeded database itself, committed to git at
+`backend/seed/snapshot/mentat_fc_seed.dump`. These solve two different problems,
+not the same one twice:
+
+- `seed/raw/` (gitignored) protects the **API budget** during the weeks-long
+  backfill — fetch-if-absent, so reruns never re-spend the 100/day cap.
+- The snapshot protects **setup time on a new environment** — restoring it skips
+  the entire parse-and-upsert pipeline (thousands of rows) in favor of one
+  `pg_restore` call, no network involved at all. This is the concrete answer to
+  "store it somewhere so we don't have to hit the API to seed local environments."
+
+Tested the same way as the seed pipeline itself: dumped the scratch database
+(410KB for one season + FPL data — small enough that committing it to git
+outright, rather than a GitHub Release or external blob storage, is the right
+call for now), wiped all 12 tables with `migrate down`, restored from the dump,
+and confirmed identical row counts. The committed snapshot right now only has
+the 2023/24 Premier League season + FPL bootstrap (the only data this session
+could actually test against) — `docs/seeding-runbook.md` has the full step-by-step
+plan for running the real 3-competition, 3-season, full-lineup backfill on a
+machine with real internet access, and re-dumping once it's done.
+
+Added `npm run check:lineup-depth` — the empirical test flagged earlier (does
+API-Football's free tier serve lineup data for old fixtures at all?) as an
+actual runnable script rather than a manual instruction, so it's not something
+that quietly gets skipped before the real backfill starts.
+
+### Second follow-up, same day: golden records, expected-goals features, and player performance depth
+
+**Secrets, and a reminder of a real constraint.** Asked to paste a real
+`API_FOOTBALL_KEY` into chat so it could be committed to the branch — that's
+two things to never do: secrets never enter git history (that's the entire
+reason `.env` is gitignored and `.env.example` only has placeholders), and
+this cloud session's network policy blocks `v3.football.api-sports.io`
+outright (confirmed with a direct test — 403 at the proxy, same as
+football-data.co.uk), so it couldn't have been used here regardless. The key
+belongs in `backend/.env` on a machine with real internet access.
+
+**Golden records via deterministic hashing.** Proposed hashing team
+name+location and player name+position into a primary key. Landed somewhere
+close but adjusted both: teams hash name alone (a stadium/sponsor rename
+would otherwise silently change a team's key, which defeats the point of a
+*stable* identity), and players hash full name + date of birth instead of
+position (position isn't a fixed identity attribute and doesn't disambiguate
+same-name players anyway; DOB is on both FPL's and API-Football's profiles).
+Implemented as `natural_key`, a `GENERATED ALWAYS ... STORED` column on both
+`teams` and `players` (migration `1701000000013`) rather than a hash computed
+in TypeScript — the point being it's *impossible* for the key to drift out of
+sync with the row, since Postgres derives it from the row's own columns every
+time.
+
+This surfaced a real, useful error: Postgres requires a generated column's
+expression to be **immutable**, and two attempts failed that check before
+one worked --- pgcrypto's `digest()` (SHA-256) isn't marked immutable, and
+neither is casting `date` to `text` (depends on session `DateStyle`). Fixed
+with built-in `md5()` (immutable, and cryptographic strength isn't a
+requirement for a matching key, not a security one) and epoch-day integer
+arithmetic (`date_of_birth - date '1970-01-01'`, immutable) instead of a text
+cast. Concept worth keeping: **IMMUTABLE vs. STABLE vs. VOLATILE** is
+Postgres's classification of whether a function's output depends on
+anything beyond its literal arguments (session settings, the database,
+wall-clock time) --- generated columns, and function-based indexes, both
+require immutable expressions for the same reason: their stored/indexed
+value has to be reconstructible byte-for-byte from the row alone, forever.
+
+Also replaced the two source-specific player upsert functions
+(`upsertPlayerByFplId`, `upsertPlayerByApiFootballId`) with a single
+`upsertPlayerGoldenRecord` in `backend/seed/lib/db.ts`. This is the actual
+fix for the gap flagged in the previous message (FPL and API-Football
+creating two disconnected rows for the same real player): when a DOB is
+known, upsert against `natural_key` directly; when it isn't (the normal
+case for a player only seen via API-Football's lineup endpoint, which
+doesn't include birth date), fall back to a case-insensitive name match
+against an existing row first. Tested for real: seeded a player from FPL
+(with a real DOB), then simulated an API-Football sighting of the *same
+name* with no DOB and a fake external id --- it correctly reused the
+existing row (still one row for "Kepa Arrizabalaga Revuelta," not two),
+merging in the new `external_api_football_id` while keeping the original
+`external_fpl_id` and `date_of_birth`. Named honestly in the code: two
+genuinely different real players sharing an exact name and both missing a
+DOB would still incorrectly merge --- acceptable at Premier
+League/Championship scale, revisit only if FA Cup's lower-tier entrants
+make that collision observably real.
+
+**Scope update: predictions aren't Premier-League-only.** Clarified that
+match predictions should cover Premier League *and* Championship, plus FA
+Cup fixtures where both teams are in one of those two tiers (most FA Cup
+matchups from the Third Round on qualify); an FA Cup fixture against a
+lower-tier side gets a default logo and no prediction rather than a guess.
+Team dashboards/fantasy/betting stay Premier League only. Updated
+`docs/CLAUDE.md` and `docs/architecture.md` --- no schema change, this is
+purely a Phase 2 endpoint-filtering decision.
+
+**Expected-goals-style score predictions ("3.2 - 0.4") already just work.**
+`model_predictions.predicted_home_goals`/`predicted_away_goals` were already
+`numeric`, not `integer`, from the original Phase 1 design --- Postgres
+`numeric` stores exact decimals natively. Nothing to change; worth noting
+that the schema quietly already supported this because "numeric, not
+integer" was the right default the first time, not because it was designed
+for this specific ask.
+
+**`team_fixture_results`, a view, not a stored table.** Added to make
+season-level team stats (record, goal difference, form) easy to query
+without hand-written home-vs-away `CASE` logic every time --- it unpivots
+`fixtures` + `fixture_team_stats` into one row per team per fixture, always
+from that team's own perspective (`goals_for`/`goals_against`/`result`/
+`points`). Still a view, not a materialized/stored table, for the same
+reason there's no stored standings table: it's fully derivable from source
+data, so storing it separately would just be another place for staleness to
+creep in. Verified against real data, not just eyeballed: querying it for
+the 2023/24 season reproduces the actual final Premier League table exactly
+(Man City 91 points and champions, Arsenal 89, Liverpool 82, Aston Villa 68,
+Tottenham 66). Also added `fixture_team_stats.xg` (expected goals) as a
+nullable column --- a real gap (football-data.co.uk doesn't have it), source
+unconfirmed (API-Football's fixture-statistics endpoint, maybe), left
+unpopulated until that's confirmed.
+
+**`fixture_player_stats`: a deliberate scope reopening, not scope creep.**
+Until now, player data beyond identity was: who started/subbed
+(`fixture_lineups`, no performance detail) plus FPL's current-PL-season
+gameweek stats. For the historical Championship/FA Cup depth this project
+actually wants for the model, there was no goals/assists/cards/minutes at
+all. Flagged the real cost of closing that gap before building it: API-Football
+splits "who played" (lineups) from "how did they perform" (a *separate*
+per-fixture endpoint), so adding this doubles the backfill's daily-budget
+cost. Decision: accept the doubled cost, pay for a higher tier once this
+code is verified working, rather than wait out the free tier or skip it.
+Added `fixture_player_stats` (migration `1701000000015`) --- minutes played,
+rating, goals, assists, shots, passes, tackles, cards, penalties, saves,
+one row per player per fixture --- and `seedApiFootballPlayerStats` in
+`backend/seed/sources/api-football.ts`. `minutes_played` lives here now, not
+on `fixture_lineups`, since it comes from this endpoint specifically. The
+resumable backfill (`backfillLineupsForCompetitionSeason`) now checks each
+fixture for lineups and player stats *independently* and only fetches
+whichever is actually missing, so a fixture that already has lineups from an
+earlier run doesn't burn budget re-fetching them just because player stats
+arrived as a feature later. `npm run check:lineup-depth` now tests both
+endpoints against the same fixture and reports on each separately, since
+they could plausibly behave differently (one confirmed working, one not).
+
+**Recurring refresh jobs: designed now, deliberately not built yet.** Asked
+about keeping Postgres current after the initial historical backfill (new
+fixtures, results going final, FPL prices shifting daily). Agreed to design
+now, build once Phase 2's API actually exists to consume fresher data ---
+building a refresh job with nothing reading its output would be premature.
+The design (in `docs/architecture.md`) turned out to need zero new fetching
+logic: every seed source already does idempotent upserts, so "refresh" is
+just rerunning the existing functions scoped to the *current*
+competition-season instead of 3 years of history. Scheduling itself (cron
+locally, Azure Container Apps Jobs once deployed) is the same pattern
+already planned for the model service's batch job, not a new concept.
+
+Re-dumped `backend/seed/snapshot/mentat_fc_seed.dump` after each schema
+change in this session (golden-record keys, the view, `fixture_player_stats`)
+so the committed snapshot stays in sync with what the migrations actually
+produce.
