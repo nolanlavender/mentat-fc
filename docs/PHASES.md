@@ -61,10 +61,12 @@ not optional.
       there's an actual API/frontend consuming the data, not before
 
 ## Phase 3 — Frontend shell
-- [ ] React + TypeScript app scaffold
-- [ ] Team dashboard page
-- [ ] Team switcher (generalize to all 20 teams)
-- [ ] Explain: component structure, where state lives, client vs server state
+- [x] React + TypeScript app scaffold (routes/pages/components split, added
+      react-router-dom)
+- [x] Team dashboard page (table position, next match + prediction if one
+      exists, squad)
+- [x] Team switcher (all 20 Premier League teams)
+- [x] Explain: component structure, where state lives, client vs server state
 
 ## Phase 4 — FPL fantasy integration
 - [ ] Pull and normalize official FPL API data (players, prices, ownership,

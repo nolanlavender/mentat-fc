@@ -567,3 +567,69 @@ they don't know or care how that becomes an HTTP response.
   the raw CSV back in Phase 1. 404s and 400s (bad ID, non-numeric query
   param) checked directly against a running server, not assumed from
   reading the code.
+
+---
+
+## Phase 3 — Frontend shell (2026-07-29)
+
+### What we built
+
+Two pages in `frontend/src/`: a team list (`pages/TeamListPage.tsx`, the
+team switcher's home) and a team dashboard (`pages/TeamDashboardPage.tsx`),
+wired up with `react-router-dom` (`/` and `/teams/:id`). A shared
+`components/TeamSwitcher.tsx` (a team-picker dropdown that navigates on
+selection) appears on the dashboard page. `hooks/useFetch.ts` is a small
+custom hook wrapping `fetch` with loading/error state and a
+cancelled-request guard; `api/client.ts` + `api/types.ts` centralize the
+backend base URL and response shapes.
+
+### Concepts this taught
+
+- **Client state vs. server state, concretely, not just as a definition.**
+  `TeamSwitcher`'s `<select>` has both in the same ten lines: which option
+  is *currently rendered as selected* is server state (it's derived from
+  the `currentTeamId` prop, which came from the URL, which reflects
+  whatever team the dashboard is currently showing — backend-owned data by
+  way of the route). The act of choosing a new option and firing
+  `navigate(...)` is a momentary client-side interaction with no state of
+  its own worth keeping — React doesn't need a `useState` for "what the user
+  just clicked," the URL change *is* the new source of truth. The
+  distinction that actually matters in practice: server state needs
+  loading/error handling and can go stale; client state doesn't have either
+  of those problems because nothing external can invalidate it.
+- **Why a custom hook now, a library later.** `useFetch` duplicates what
+  TanStack Query would give for free (caching, dedup, refetch-on-focus) —
+  deliberately not pulled in for two pages. The tell for when to actually
+  reach for a library: the moment navigating *back* to a team you already
+  viewed should feel instant instead of showing a loading spinner again,
+  plain `useState`+`useEffect` can't do that without hand-rolling a cache,
+  and that's not worth building from scratch.
+- **The cancelled-request guard in `useFetch` is a real race condition, not
+  defensive-programming theater.** Click through teams quickly enough and
+  two fetches are in flight; without the `cancelled` flag, whichever
+  response arrives *second* wins, even if it was requested *first* — a user
+  looking at Team B's dashboard could briefly see Team A's data land on top
+  of it. The cleanup function returned from `useEffect` runs before the next
+  effect (i.e., before the next fetch starts), which is exactly when a
+  stale in-flight request needs to be told "ignore your result."
+
+### Decisions worth remembering
+
+- **Verified in an actual browser, not just `tsc --noEmit`.** Ran both dev
+  servers, drove Chromium via Playwright: the team list renders all 20 real
+  Premier League teams, clicking through to Arsenal's dashboard renders the
+  real 2023/24 final table (2nd, 89 pts, 91-29) and the real current squad
+  (Saka, Ødegaard, Rice, Saliba, ...), zero console errors. A fixed
+  screenshot mid-navigation initially caught a "Loading…" frame — not a bug,
+  just proof the loading state renders — recaptured after waiting for
+  content to confirm the fully-loaded page.
+- **A dependency vulnerability, read rather than reflexively patched.**
+  `react-router-dom` pulled in a "high severity" advisory (RSC-mode CSRF
+  bypass). Read what it actually requires: React Router's server-actions/RSC
+  framework mode, which this app doesn't use at all (plain client-side
+  `BrowserRouter`). Noted rather than force-downgrading to the suggested
+  fixed version, which would have meant an older release with unclear React
+  19 compatibility for a vector that doesn't apply to how this app is built.
+- **Cleaned up the default Vite template fully** (counter button, template
+  CSS, unused logo/hero assets) rather than leaving dead code alongside the
+  real app — same standard as removing anything else no longer used.
