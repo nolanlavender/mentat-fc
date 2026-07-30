@@ -51,3 +51,28 @@ export interface TeamDashboard {
   tablePosition?: TablePosition;
   squad: SquadPlayer[];
 }
+
+export interface MyTeamPlayer {
+  playerId: number;
+  fplPlayerId: number;
+  fullName: string;
+  position: string | null;
+  team: { id: number; name: string } | null;
+  squadPosition: number;
+  multiplier: number;
+  isCaptain: boolean;
+  isViceCaptain: boolean;
+  isStarting: boolean;
+}
+
+export interface MyTeam {
+  entryName: string;
+  managerName: string;
+  gameweek: number;
+  gameweekPoints: number;
+  totalPoints: number;
+  bank: number;
+  squadValue: number;
+  activeChip: string | null;
+  players: MyTeamPlayer[];
+}

@@ -17,3 +17,14 @@ export class NotFoundError extends AppError {
     super(`${resource} ${id} not found`, 404);
   }
 }
+
+// 502, not 500: this means "a service we depend on failed us," not "we have
+// a bug." Distinguishing them matters for a third-party API we don't
+// control (see docs/CLAUDE.md) -- the status code itself communicates
+// whose fault it is, which is useful both for the frontend (retry-worthy?)
+// and for us (nothing to fix in our own code when this fires).
+export class UpstreamError extends AppError {
+  constructor(message: string) {
+    super(message, 502);
+  }
+}

@@ -69,11 +69,17 @@ not optional.
 - [x] Explain: component structure, where state lives, client vs server state
 
 ## Phase 4 — FPL fantasy integration
-- [ ] Pull and normalize official FPL API data (players, prices, ownership,
-      live gameweek points)
-- [ ] Endpoints + UI to view my squad and gameweek scoring against real FPL
-      rules
-- [ ] Explain: consuming a third-party API we don't control (no key, but
+- [x] Pull and normalize official FPL API data (players, prices, ownership,
+      live gameweek points) -- per-gameweek player stats backfill built
+      (`seedFplPlayerGameweekHistory`), untestable in this cloud session
+      (network blocked, see learning-log); needs to run on a real machine
+- [x] Endpoints + UI to view my squad and gameweek scoring against real FPL
+      rules -- `GET /api/fpl/my-team`, live per-request (not batch-seeded,
+      see architecture.md), + a frontend page. Deliberately surfaces FPL's
+      own computed points rather than reimplementing scoring rules
+      ourselves. Untested against a real entry -- needs a real FPL_ENTRY_ID
+      and a machine with network access
+- [x] Explain: consuming a third-party API we don't control (no key, but
       also no SLA/support) and what that means for error handling
 
 ## Phase 5 — Prediction model service (match outcome)
