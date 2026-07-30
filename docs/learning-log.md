@@ -715,3 +715,65 @@ backend base URL and response shapes.
   and test `/api/fpl/my-team` against real data. Everything is built and
   its error paths are verified; the happy path is the one piece that needs
   your machine, your ID, and real network access to confirm.
+
+### Follow-up, same day: real-machine testing, a real bug found, and a local-dev pivot
+
+Got a real `FPL_ENTRY_ID` (2159850) and tried testing against it on a
+borrowed Mac. Several real things came out of this, worth recording
+separately from the code itself:
+
+**`entry.current_event` being `null` pre-season was confirmed for real, not
+just theorized.** The live call to `/entry/{id}/` succeeded and correctly
+reported no current gameweek — proof the entry/picks integration is
+fundamentally sound, just untested past that first call. Decided to add a
+gameweek-1 preview fallback (`isPreview` on `MyTeam`) rather than only
+saying "nothing to show": `fetchPicksOrNull` tries `/event/1/picks/` when
+there's no current event, distinguishing a 404 ("no picks saved yet,"
+expected pre-season, return a clean message) from any other failure (a
+genuine `UpstreamError`, still surfaced as one). Needed adding an
+`upstreamStatus` field to `UpstreamError` to make that distinction — a
+generic "something failed" 502 isn't enough information for a caller to
+decide whether a specific failure mode is expected.
+
+**A real Docker/Colima setup problem, diagnosed with actual signal.**
+`GET /api/teams` came back "Internal server error" — not a per-team bug the
+error location (the team *list* endpoint, not a specific dashboard)
+narrowed it down. The useful fact: **`/health` only ever proves the
+database is *reachable* (`SELECT 1`), never that migrations actually ran**
+— an empty, unmigrated database passes `/health` and then fails on every
+real query with something like `relation "teams" does not exist`. Traced
+back to Colima's VM not actually running (`docker compose exec` failed
+with the exact same "dial unix /var/run/docker.sock" error as the very
+first setup attempt) — Colima needs restarting after a reboot/sleep, it's
+not a one-time start.
+
+**Then hit a real hardware wall, not a config mistake:** this particular
+machine is on macOS 12, old enough that Homebrew's build toolchain
+(`meson`) refuses to build some of Colima's dependencies at all. Not
+something to debug further — some things are genuinely version walls, and
+recognizing "this isn't fixable by trying harder" is as important a skill
+as debugging itself.
+
+**Decision: hybrid local dev, not a premature full cloud deployment.**
+Considered standing up the real Render/Vercel/Neon stack right now instead
+of fighting Docker locally, and deliberately didn't: `backend`/`frontend`
+still run locally via `npm run dev` (that part was never broken — Node,
+npm, `tsc`, Vite all worked fine all along), only Postgres moves to a free
+Neon project. Full deployment means CI/CD, secrets across three platforms,
+and Render's free-tier cold starts on every test — real overhead that
+Phase 10 was deliberately sequenced last specifically to avoid taking on
+before the app's features are done. Documented the setup in
+`docs/seeding-runbook.md`'s new "No Docker available?" section: use
+`npm run db:seed` instead of `npm run db:restore` on a Docker-less
+machine, since `db:restore` shells out to `pg_dump`/`pg_restore` CLI
+binaries that may hit the exact same Homebrew wall, while `db:seed` is
+pure Node/`fetch` and needs nothing installed beyond what `npm install`
+already provides. Confirmed separately (browser test) that this machine
+*can* reach football-data.co.uk, so this path should actually work once
+set up.
+
+**Not done tonight — picking this up next session:** actually create the
+Neon project, set `DATABASE_URL`, and run `migrate:up` + `db:seed` for
+real. This would also be the first full historical seed run by anyone,
+cloud sandbox included — worth treating as a real milestone once it
+happens, not just "finally got local dev working."

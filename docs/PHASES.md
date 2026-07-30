@@ -81,6 +81,14 @@ not optional.
       and a machine with network access
 - [x] Explain: consuming a third-party API we don't control (no key, but
       also no SLA/support) and what that means for error handling
+- [ ] **Not done yet, pick up next session:** set up a free Neon Postgres
+      project and point `backend/.env`'s `DATABASE_URL` at it (local Docker/
+      Colima unavailable on the current dev machine -- unsupported macOS
+      version blocks the Homebrew build). Then `npm run migrate:up` and
+      `npm run db:seed` (not `db:restore` -- no local `pg_dump`/`pg_restore`
+      needed that way). See `docs/seeding-runbook.md`'s "No Docker
+      available?" section. This also becomes the actual first full
+      historical seed run, PL + Championship, 2024/25 and 2025/26 included.
 
 ## Phase 5 — Prediction model service (match outcome)
 - [ ] Stand up `/model-service` as a Python FastAPI project
