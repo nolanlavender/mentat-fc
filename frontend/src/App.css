@@ -26,6 +26,14 @@
   color: #d33;
 }
 
+.preview-banner {
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--accent-bg);
+  color: var(--text-h);
+  font-size: 0.9em;
+}
+
 .team-switcher {
   margin-bottom: 24px;
 }

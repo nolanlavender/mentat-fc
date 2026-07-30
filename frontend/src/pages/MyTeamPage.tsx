@@ -29,13 +29,21 @@ export function MyTeamPage() {
           <p>
             {data.entryName} — {data.managerName}
           </p>
+          {data.isPreview && (
+            <p className="preview-banner">
+              Preseason preview — gameweek {data.gameweek} hasn't started yet, so there's no live scoring. This is just
+              your saved squad.
+            </p>
+          )}
           <section>
             <h2>Gameweek {data.gameweek}</h2>
-            <p>
-              {data.gameweekPoints} points this gameweek · {data.totalPoints} total · £{data.squadValue.toFixed(1)}m squad
-              value · £{data.bank.toFixed(1)}m in the bank
-              {data.activeChip ? ` · ${data.activeChip} active` : ''}
-            </p>
+            {!data.isPreview && (
+              <p>
+                {data.gameweekPoints} points this gameweek · {data.totalPoints} total · £{data.squadValue.toFixed(1)}m
+                squad value · £{data.bank.toFixed(1)}m in the bank
+                {data.activeChip ? ` · ${data.activeChip} active` : ''}
+              </p>
+            )}
           </section>
 
           <section>

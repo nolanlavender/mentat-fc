@@ -75,4 +75,5 @@ export interface MyTeam {
   squadValue: number;
   activeChip: string | null;
   players: MyTeamPlayer[];
+  isPreview: boolean;
 }

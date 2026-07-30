@@ -11,9 +11,11 @@ const FPL_BASE = 'https://fantasy.premierleague.com/api';
 // there's no budget to protect here. Caching this would only reintroduce
 // staleness for something cheap enough to just fetch fresh every time.
 //
-// UNVERIFIED like the seed pipeline's FPL/API-Football modules: written
-// against FPL's publicly known entry/picks response shape, never run
-// against a live response in this environment (network blocked here too).
+// The /entry/{id}/ shape is now confirmed against a real response (tested
+// live during pre-season 2026-07-30: current_event correctly came back
+// null). The /entry/{id}/event/{event}/picks/ shape is still unverified
+// against a real response -- confirm it once a squad is actually saved for
+// gameweek 1 or the season starts.
 async function fetchFplLive<T>(path: string): Promise<T> {
   let res: Response;
   try {
@@ -22,7 +24,7 @@ async function fetchFplLive<T>(path: string): Promise<T> {
     throw new UpstreamError(`Couldn't reach the FPL API: ${(err as Error).message}`);
   }
   if (!res.ok) {
-    throw new UpstreamError(`FPL API returned ${res.status} for ${path}`);
+    throw new UpstreamError(`FPL API returned ${res.status} for ${path}`, res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -79,6 +81,26 @@ export interface MyTeam {
   squadValue: number;
   activeChip: string | null;
   players: MyTeamPlayer[];
+  // True when there's no "current" gameweek yet (pre-season) and this is
+  // your saved gameweek-1 squad instead -- no live scoring to report, just
+  // who's picked. The frontend should label this clearly rather than
+  // presenting it as real gameweek data.
+  isPreview: boolean;
+}
+
+// entry.current_event is null before the season's first deadline, but a
+// squad may already be saved for gameweek 1 -- try that as a preview
+// instead of only ever saying "nothing to show." A 404 here specifically
+// means "no picks saved for this event," which is expected pre-season, not
+// a real upstream failure -- anything else (5xx, network error) still
+// propagates as a genuine UpstreamError.
+async function fetchPicksOrNull(entryId: number, eventId: number): Promise<FplPicksResponse | null> {
+  try {
+    return await fetchFplLive<FplPicksResponse>(`/entry/${entryId}/event/${eventId}/picks/`);
+  } catch (err) {
+    if (err instanceof UpstreamError && err.upstreamStatus === 404) return null;
+    throw err;
+  }
 }
 
 export async function getMyTeam(): Promise<MyTeam> {
@@ -87,11 +109,16 @@ export async function getMyTeam(): Promise<MyTeam> {
   }
 
   const entry = await fetchFplLive<FplEntry>(`/entry/${env.fplEntryId}/`);
-  if (!entry.current_event) {
-    throw new AppError('This FPL entry has no current gameweek yet -- the season may not have started.', 400);
-  }
+  const isPreview = !entry.current_event;
+  const eventId = entry.current_event ?? 1;
 
-  const picksData = await fetchFplLive<FplPicksResponse>(`/entry/${env.fplEntryId}/event/${entry.current_event}/picks/`);
+  const picksData = isPreview
+    ? await fetchPicksOrNull(env.fplEntryId, eventId)
+    : await fetchFplLive<FplPicksResponse>(`/entry/${env.fplEntryId}/event/${eventId}/picks/`);
+
+  if (!picksData) {
+    throw new AppError('No squad saved for gameweek 1 yet -- pick your team on fantasy.premierleague.com first.', 400);
+  }
 
   // Join FPL's player ids (picksData.picks[].element) against our own
   // players table -- we already have names/positions/teams cached locally
@@ -127,12 +154,13 @@ export async function getMyTeam(): Promise<MyTeam> {
   return {
     entryName: entry.name,
     managerName: `${entry.player_first_name} ${entry.player_last_name}`,
-    gameweek: entry.current_event,
+    gameweek: eventId,
     gameweekPoints: picksData.entry_history.points,
     totalPoints: picksData.entry_history.total_points,
     bank: picksData.entry_history.bank / 10, // FPL reports in tenths of GBP million
     squadValue: picksData.entry_history.value / 10,
     activeChip: picksData.active_chip,
     players,
+    isPreview,
   };
 }

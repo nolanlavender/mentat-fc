@@ -24,7 +24,10 @@ export class NotFoundError extends AppError {
 // whose fault it is, which is useful both for the frontend (retry-worthy?)
 // and for us (nothing to fix in our own code when this fires).
 export class UpstreamError extends AppError {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    public readonly upstreamStatus?: number,
+  ) {
     super(message, 502);
   }
 }
