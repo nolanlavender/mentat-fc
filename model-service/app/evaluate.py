@@ -29,7 +29,14 @@ MIN_MATCHES_FOR_BACKTEST = 100
 # this file doubles as an experimentation sandbox (try a value here, compare
 # the backtest, only then change train.py's deployed value to match). If
 # you're evaluating a candidate half-life, this is the one to edit.
-HALF_LIFE_DAYS = 60
+#
+# 60 days was tried and measured worse than the 180-day default on real
+# 3-season data (PL 0.6682 vs 0.6517, Championship 0.6575 vs 0.6359 Brier) --
+# too short a half-life shrinks the effective sample per team to ~8-10
+# matches, which is noisier than the staleness it saves you from. Trying 120
+# as a middle ground between "recent form matters" and "don't overfit to a
+# handful of results."
+HALF_LIFE_DAYS = 120
 
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
