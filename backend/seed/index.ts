@@ -60,7 +60,7 @@ async function seedHistoricalResultsAndOdds(): Promise<void> {
  * yet (see docs/PHASES.md's Phase 2 "recurring refresh job" item), so for
  * now this just runs as part of a manual `npm run db:seed`.
  */
-async function seedCurrentSeasonFixtureLists(): Promise<void> {
+export async function seedCurrentSeasonFixtureLists(): Promise<void> {
   if (!process.env.API_FOOTBALL_KEY) {
     console.log(
       'Skipping current-season fixture lists (API_FOOTBALL_KEY not set) -- ' +
@@ -163,7 +163,12 @@ async function main(): Promise<void> {
   await pool.end();
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+// Guarded so importing individual functions from this module (e.g.
+// seed/current-season.ts importing seedCurrentSeasonFixtureLists) doesn't
+// also trigger the full pipeline as a side effect of the import.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

@@ -1068,3 +1068,19 @@ still ahead, idempotently, safe to rerun as the season progresses. This is
 a manual stand-in for the recurring refresh job `docs/PHASES.md`'s Phase 2
 already flagged and deliberately deferred -- not a replacement for it, see
 the updated note there.
+
+Also split it out as its own entry point (`npm run db:seed:current-season`,
+`backend/seed/current-season.ts`) rather than only being reachable through
+the full `npm run db:seed` -- the full pipeline re-walks 3 seasons of
+football-data.co.uk CSVs and the throttled FPL/lineup backfills every time,
+all of which are either already done or their own slow job, so forcing a
+full rerun just to pick up this week's fixture changes would be needless
+waiting (and, for the API-Football-backed steps, needless budget spend).
+Real gotcha caught before pushing: `index.ts`'s `main()` was called
+unconditionally at module scope, so importing `seedCurrentSeasonFixtureLists`
+from it for the new entry point would have silently run the *entire*
+pipeline as a side effect of the `import` statement, before the new file's
+own `main()` even started. Fixed by gating it behind
+`import.meta.url === file://${process.argv[1]}` -- the ESM equivalent of
+Python's `if __name__ == "__main__":` -- so the file is safe to import for
+just its individual exported functions.
