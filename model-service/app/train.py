@@ -31,11 +31,16 @@ MIN_MATCHES_TO_FIT = 50  # below this, per-team parameters are too noisy to trus
 # How many days back until a match's weight decays to half of a match
 # today's. Shorter = recent form dominates more, at the cost of a noisier
 # effective sample (a team plays ~4-5 matches/month, so going very short
-# means fitting on a handful of results). 60 days means a 90-day-old match
-# already carries ~35% weight and a year-old one ~1.5% -- tune this and
-# rerun app.evaluate to compare against a different value directly, rather
-# than guessing which is better.
-HALF_LIFE_DAYS = 60
+# means fitting on a handful of results) -- tune this and rerun app.evaluate
+# to compare against a different value directly, rather than guessing which
+# is better.
+#
+# Tested against real 3-season data (see docs/learning-log.md's Phase 5
+# entry): 180 beat both 120 and 60 in both leagues, monotonically --
+# shortening the half-life consistently hurt. Dixon-Coles is estimating
+# underlying team strength, which changes slowly, so discounting older
+# results costs more in sample size/noise than it gains from "freshness."
+HALF_LIFE_DAYS = 180
 
 
 def upsert_prediction(conn, fixture_id: int, prediction) -> None:

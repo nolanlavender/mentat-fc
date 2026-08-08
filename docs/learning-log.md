@@ -985,3 +985,37 @@ multi-season-old squad compositions) can't show up until there's more than
 one season's worth of history to discount. Real comparison needs rerunning
 `python -m app.evaluate` against the full 3-season Neon data and comparing
 to the 180-day baseline already recorded above.
+
+**The real result, against the full 3-season Neon data:**
+
+| Half-life | Premier League Brier | Championship Brier |
+|---|---|---|
+| 180 days (original default) | 0.6517 | 0.6359 |
+| 120 days | 0.6561 | 0.6409 |
+| 60 days | 0.6682 | 0.6575 |
+
+Monotonic in both leagues, no exceptions -- every step shorter made
+predictions worse. The instinct going in ("recent form should count for
+more") wasn't wrong exactly, it just doesn't apply the way it would to a
+form-tracking model. Dixon-Coles isn't scoring "how hot is this team right
+now" -- it's estimating each team's underlying attack/defense strength,
+a property that changes slowly (transfers, injuries, a new manager), not
+week to week. Shortening the half-life doesn't sharpen that estimate, it
+starves it: at 60 days the effective sample per team drops to roughly the
+last 8-10 matches, small enough that one freak scoreline or a lucky
+deflection swings the fitted parameters noticeably. The 180-day setting was
+already doing something like "smooth over a mini-season," and that
+smoothing turned out to matter more than the staleness it costs.
+
+Reverted `HALF_LIFE_DAYS` back to `180` in both `app/train.py` (the
+deployed value) and `app/evaluate.py` (the sandbox, now recording what's
+already been tried in its own comment) rather than shipping a config the
+real data said was worse. This is the actual point of having a real
+backtest instead of reasoning from intuition alone -- a plausible-sounding
+idea (weight recent form more) can be measured and found to not hold up,
+and that's a more useful outcome than either blindly shipping the instinct
+or never testing it at all. A natural follow-up worth trying later:
+whether an *even longer* half-life (e.g. 365 days) does better still, now
+that the direction of the trend is established -- not pursued now since
+the goal here was validating the specific "shorter is better" hypothesis,
+which the data answered.
