@@ -1019,3 +1019,52 @@ whether an *even longer* half-life (e.g. 365 days) does better still, now
 that the direction of the trend is established -- not pursued now since
 the goal here was validating the specific "shorter is better" hypothesis,
 which the data answered.
+
+### Reading a Brier score, and why it's meaningless without a baseline
+
+After the real backtest, worked through what the actual numbers (0.62-0.68)
+mean rather than just comparing them to each other. Brier score is the mean
+squared error between the predicted probability vector and the one-hot
+actual outcome -- 0 is perfect, and there's no other fixed "good" value,
+because it depends entirely on how hard the underlying prediction problem
+is. What makes a number meaningful is a baseline on the *same* matches:
+
+- Guessing uniformly (33/33/33 every time, no model at all) scores a fixed
+  **0.667** -- constant regardless of outcome, since the squared-error math
+  works out the same either way.
+- The model, across every half-life tried, scored **0.65-0.68** -- only
+  modestly ahead of blind guessing.
+- The market (bookmaker closing odds) scored **0.62-0.63** -- meaningfully
+  ahead of the model, expected since odds price in information (injuries,
+  suspensions, lineup news, market money flow) a goals-only Dixon-Coles fit
+  never sees.
+
+So "beats uniform guessing, loses to the market" is the honest, specific
+read of where a first-pass goals-only model actually stands -- not "0.65 is
+bad" or "0.65 is fine," which are both meaningless without the comparison.
+
+### Seeding the current season so there's something to predict
+
+First real run of `app.train` against the full 3-season data produced a
+correctly-fit model (`fitted on 1140 matches` for PL -- exactly 380 x 3, no
+drops) but wrote **zero predictions**. Not a bug: the three seeded seasons
+(2023/24, 2024/25, 2025/26) were all already fully played out by the time
+this ran, and `load_upcoming_fixtures` correctly found no fixture with a
+null score to predict.
+
+The fix needed a new seed step, not a code change to the model: football-
+data.co.uk's CSVs are structurally incapable of listing a fixture that
+hasn't been played yet (there's no "played" concept in a source that's
+purely a results feed), so getting an actual schedule of upcoming matches
+requires API-Football's fixture-list endpoint instead, which returns every
+fixture in a season -- played or not, with a status field, no score for the
+ones still to come. Added `seedCurrentSeasonFixtureLists` in
+`backend/seed/index.ts`, which pulls the full 2026/27 Premier League and
+Championship fixture list via the same `seedApiFootballFixtures` function
+already used for FA Cup, upserting against the same natural key the
+football-data.co.uk importer uses -- so it enriches already-played matches
+(adding venue/referee/external id) and inserts fresh rows for everything
+still ahead, idempotently, safe to rerun as the season progresses. This is
+a manual stand-in for the recurring refresh job `docs/PHASES.md`'s Phase 2
+already flagged and deliberately deferred -- not a replacement for it, see
+the updated note there.
