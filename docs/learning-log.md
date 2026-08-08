@@ -913,13 +913,41 @@ not a small fix. Documented as an explicit, deliberate deferral in
 predictions that would have been comparing apples to oranges, or silently
 dropping the FA Cup goal without saying so.
 
-### Still to do
+### The real, full-scale backtest (run by the user, on real Neon data)
 
-Only Premier League 2023/24 was available to test against in this session
-(the only data locally cached — see Phase 1's entry for why). Once the real
-Neon database has all 3 seasons and Championship data seeded, rerun
-`python -m app.train` and `python -m app.evaluate` for real and see whether
-the backtest result holds at a larger sample size, and whether Championship
-(a less-watched, plausibly less-efficient market — see the earlier
-discussion on where a model might actually find real disagreement with the
-market) tells a different story than Premier League did.
+Ran `python -m app.evaluate` against the fully seeded Neon database — 3
+seasons, both competitions. Match counts confirm the seed landed exactly
+right: Premier League 912 train / 228 test (1140 = 3 × 380, correct);
+Championship 1324 train / 332 test (1656 = 3 × 552, correct).
+
+Real result: Premier League model Brier 0.6517 vs. market 0.6300;
+Championship model 0.6359 vs. market 0.6204. Model still loses on both —
+still the expected, correct outcome — but the **gap narrowed** versus the
+single-season test (was ~0.05, now ~0.02/0.015), consistent with more
+training data producing more stable per-team estimates.
+
+Worth understanding *why* both scores got worse in absolute terms compared
+to the single-season backtest, since the instinct "more data should help"
+doesn't immediately explain it: the single-season test trained and tested
+*within the same season* (predict late-2023/24 from early-2023/24), where
+team strength barely shifts. The 3-season test's held-out slice spans a
+season boundary, so the model (and the market) now have to generalize
+across real squad turnover — transfers, promotions/relegations, manager
+changes — a genuinely harder problem, which is exactly why the *market's*
+score got worse too, not just the model's. The single-season number was
+also a noisier, smaller sample (76 matches vs. 228/332) — the larger result
+is the one worth trusting.
+
+**Championship's gap to the market (0.0155) is smaller than Premier
+League's (0.0217)** — a real, if modest, data point in favor of the
+"less-watched markets are less efficient" theory discussed earlier in this
+project, not proof of it. One backtest, worth watching rather than acting
+on.
+
+One tuning knob surfaced by thinking through this, not yet explored: the
+default time-decay half-life (180 days) means a 3-season-old match already
+carries ~2% of a recent match's weight, so "3 seasons of data" isn't really
+"3x the effective signal" — most of the model's influence still comes from
+roughly the last season regardless of how much history is loaded. Worth
+experimenting with different half-life values later if the model needs
+more signal from further back; not changed in this session.
