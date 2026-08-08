@@ -28,6 +28,15 @@ COMPETITIONS = ["Premier League", "Championship"]
 
 MIN_MATCHES_TO_FIT = 50  # below this, per-team parameters are too noisy to trust
 
+# How many days back until a match's weight decays to half of a match
+# today's. Shorter = recent form dominates more, at the cost of a noisier
+# effective sample (a team plays ~4-5 matches/month, so going very short
+# means fitting on a handful of results). 60 days means a 90-day-old match
+# already carries ~35% weight and a year-old one ~1.5% -- tune this and
+# rerun app.evaluate to compare against a different value directly, rather
+# than guessing which is better.
+HALF_LIFE_DAYS = 60
+
 
 def upsert_prediction(conn, fixture_id: int, prediction) -> None:
     with conn.cursor() as cur:
@@ -65,7 +74,7 @@ def run_for_competition(conn, competition_name: str) -> None:
         return
 
     model = DixonColesModel()
-    model.fit(matches)
+    model.fit(matches, half_life_days=HALF_LIFE_DAYS)
     print(f"{competition_name}: fitted on {model.fitted_on} matches, home_advantage={model.home_advantage:.3f}, rho={model.rho:.4f}")
 
     upcoming = load_upcoming_fixtures(conn, competition_name)

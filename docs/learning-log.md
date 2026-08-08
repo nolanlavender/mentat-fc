@@ -948,6 +948,40 @@ One tuning knob surfaced by thinking through this, not yet explored: the
 default time-decay half-life (180 days) means a 3-season-old match already
 carries ~2% of a recent match's weight, so "3 seasons of data" isn't really
 "3x the effective signal" — most of the model's influence still comes from
-roughly the last season regardless of how much history is loaded. Worth
-experimenting with different half-life values later if the model needs
-more signal from further back; not changed in this session.
+roughly the last season regardless of how much history is loaded.
+
+### Half-life, made concrete and tuned
+
+Worked through actual weight numbers rather than reasoning about "half-life"
+abstractly: at 180 days, a match from last month already carries ~89%
+weight (recency already mattered quite a bit by default) -- what a shorter
+half-life really buys isn't "recent games count," it's "everything *beyond*
+recent counts dramatically less." At 60 days, a 90-day-old match is down to
+35%, a year-old one to ~1.5%.
+
+The real tradeoff going shorter: a team plays ~4-5 matches a month, so a
+very short half-life fits two parameters (attack, defense) per team off an
+increasingly small, noisy effective sample -- the classic "form vs. true
+quality" tension in sports modeling, where chasing recent results too hard
+means chasing luck (a deflected goal, a red card) rather than tracking real
+changes (transfers, injuries, a new manager).
+
+Landed on 60 days as a starting point -- meaningfully shorter than the
+180-day default without collapsing to just the last handful of games.
+Pulled it out as a named `HALF_LIFE_DAYS` constant at the top of both
+`app/train.py` and `app/evaluate.py` (duplicated between the two on
+purpose, not shared from one module -- `evaluate.py` doubles as the
+experimentation sandbox for trying a candidate value, `train.py` is the
+deployed choice; keeping them separate means testing a new value doesn't
+silently change what's actually written to `model_predictions` until
+deliberately copied over).
+
+Tested the plumbing works locally (only Premier League 2023/24 available
+here) -- and honestly, it did *slightly worse* on that single-season test
+(Brier 0.5485 vs. 0.5416 at 180 days). Not a contradiction: with only one
+season to test against, a shorter half-life just shrinks the effective
+sample with nothing to gain -- the actual benefit (discounting stale,
+multi-season-old squad compositions) can't show up until there's more than
+one season's worth of history to discount. Real comparison needs rerunning
+`python -m app.evaluate` against the full 3-season Neon data and comparing
+to the 180-day baseline already recorded above.

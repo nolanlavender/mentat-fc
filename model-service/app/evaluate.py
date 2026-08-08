@@ -24,6 +24,13 @@ from app.dixon_coles import DixonColesModel
 TEST_FRACTION = 0.2
 MIN_MATCHES_FOR_BACKTEST = 100
 
+# Kept in sync with app.train.HALF_LIFE_DAYS by hand, not imported from a
+# shared module -- deliberately duplicated, not a shared constant, since
+# this file doubles as an experimentation sandbox (try a value here, compare
+# the backtest, only then change train.py's deployed value to match). If
+# you're evaluating a candidate half-life, this is the one to edit.
+HALF_LIFE_DAYS = 60
+
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
     """Mean squared error between predicted probability vectors and one-hot actual outcomes.
@@ -60,7 +67,7 @@ def run_for_competition(conn, competition_name: str) -> None:
     test_matches = matches.iloc[split_idx:]
 
     model = DixonColesModel()
-    model.fit(train_matches)
+    model.fit(train_matches, half_life_days=HALF_LIFE_DAYS)
 
     rows = []
     for m in test_matches.itertuples():
