@@ -91,17 +91,37 @@ not optional.
       historical seed run, PL + Championship, 2024/25 and 2025/26 included.
 
 ## Phase 5 — Prediction model service (match outcome)
-- [ ] Stand up `/model-service` as a Python FastAPI project
-- [ ] Load and clean historical data from football-data.co.uk
-- [ ] Pick and justify an approach: Poisson/Dixon-Coles vs. XGBoost
-      classification — explain the tradeoff before choosing
-- [ ] Train a first model on match outcome (score or win/draw/loss)
-- [ ] Batch job: model writes predictions to Postgres on a schedule
-      (e.g. ahead of each gameweek)
-- [ ] Explain: batch inference vs. real-time serving, and why we chose
-      batch here
-- [ ] Basic model evaluation: how do we know if it's any good? (backtesting
-      against past seasons, baseline comparison)
+- [x] Stand up `/model-service` as a Python FastAPI project (scaffolded
+      Phase 0; the FastAPI app itself stays a health-check stub -- the real
+      Phase 5 work is a batch script, not a live endpoint, per the
+      batch-vs-real-time decision below)
+- [x] Load and clean historical data from football-data.co.uk -- reads it
+      from Postgres (`model-service/app/data.py`), not raw CSVs directly;
+      "cleaning" already happened at seed time in Phase 1
+- [x] Pick and justify an approach: Dixon-Coles, chosen over XGBoost for
+      producing expected-goals output natively, fitting the data volume,
+      and being interpretable -- see `docs/learning-log.md`'s Phase 5 entry
+      for the full reasoning
+- [x] Train a first model on match outcome (`model-service/app/dixon_coles.py`)
+      -- fit and verified against real 2023/24 Premier League data: Man
+      City highest attack strength, Arsenal best defense, both matching
+      the real table that season
+- [x] Batch job: model writes predictions to Postgres (`app/train.py`,
+      `python -m app.train`) -- tested end-to-end (idempotent upsert
+      confirmed) against real data; run on a schedule once deployed
+      (Phase 10, GitHub Actions), not built yet
+- [x] Explain: batch inference vs. real-time serving, and why we chose
+      batch here -- documented in `docs/architecture.md` since Phase 1
+- [x] Basic model evaluation (`app/evaluate.py`): backtest vs. a held-out
+      portion of real matches, and vs. a closing-odds market baseline.
+      Real, honest result on the one season available to test with: the
+      model currently loses to the market (Brier 0.5416 vs. 0.4904) --
+      expected, not a bug, see the learning-log entry for why that's the
+      correct outcome to expect from a first pass
+- [ ] **New, not in the original plan:** FA Cup predictions need Premier
+      League and Championship team strengths reconciled onto one shared
+      scale (two independent per-competition fits don't give you that) --
+      deliberately deferred, real follow-on modeling work
 
 ## Phase 6 — Betting tracker
 - [ ] Endpoints + UI to log a bet: pick, odds, stake, fixture, result

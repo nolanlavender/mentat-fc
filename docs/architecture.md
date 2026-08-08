@@ -16,24 +16,35 @@ flowchart TD
     API --> EXT4[News / RSS source]
     API --> GROQ[Groq API\nexplainer feature]
     API --> CACHE[(Cache layer\nin-memory to start)]
-    MODEL[Python model service\nFastAPI] -- writes predictions --> DB
-    MODEL --> HIST[football-data.co.uk\nhistorical CSVs]
+    MODEL[Python model service\nDixon-Coles, batch script] -- reads results/odds --> DB
+    MODEL -- writes predictions --> DB
 ```
 
 Notes:
+- **The model reads from Postgres, not raw CSVs directly.** Earlier drafts of
+  this diagram showed the model pulling straight from football-data.co.uk —
+  in practice it reads the same already-seeded `fixtures`/`fixture_odds`
+  tables the backend does, via `model-service/app/data.py`. One source of
+  truth for match results, not two independent paths that could drift out
+  of sync with each other.
 - **Data scope is wider than the app's user-facing surface, but dashboards
   and predictions aren't PL-only.** The database holds Premier League +
   Championship + FA Cup, 3 seasons, including lineups/players. **Team
-  dashboards and match predictions cover Premier League and Championship,
-  plus FA Cup fixtures where both teams are in one of those two tiers** —
-  most FA Cup matchups from the Third Round on qualify. An FA Cup fixture
-  against a team outside PL/Championship (no historical data to model
-  against) gets a default logo and the team name, no score prediction.
-  Fantasy stays Premier League only (not a scope choice — FPL has no
-  Championship data to show), and so does the betting tracker for now. See
-  `docs/CLAUDE.md`'s "Data scope vs. app scope" for the full breakdown.
-  Phase 2's endpoint design should filter accordingly rather than exposing
-  every competition the schema supports.
+  dashboards cover Premier League and Championship.** Match predictions
+  currently cover **Premier League and Championship separately** — Dixon-
+  Coles is fit one competition at a time (see `docs/learning-log.md`'s
+  Phase 5 entry for why: each fit's attack/defense numbers are only
+  comparable to other teams in that same fit, not across competitions).
+  **FA Cup predictions are deliberately not attempted yet** — the original
+  plan ("predict FA Cup fixtures where both teams are PL/Championship")
+  needs a way to put Premier League and Championship team strengths on one
+  shared scale first, which two independent single-competition fits don't
+  give you. Real follow-on work, not solved by default. Fantasy stays
+  Premier League only (not a scope choice — FPL has no Championship data to
+  show), and so does the betting tracker for now. See `docs/CLAUDE.md`'s
+  "Data scope vs. app scope" for the full breakdown. Phase 2's endpoint
+  design should filter accordingly rather than exposing every competition
+  the schema supports.
 - The **model service is separate from the Node backend on purpose** — it
   trains on historical data and writes predictions to Postgres on a
   schedule (batch inference). The Express API just reads predictions like

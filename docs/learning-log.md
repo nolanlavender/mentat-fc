@@ -777,3 +777,149 @@ Neon project, set `DATABASE_URL`, and run `migrate:up` + `db:seed` for
 real. This would also be the first full historical seed run by anyone,
 cloud sandbox included — worth treating as a real milestone once it
 happens, not just "finally got local dev working."
+
+---
+
+## Phase 5 — Prediction model service, match outcome (2026-07-30/08-08)
+
+### What we built
+
+`model-service/app/`: `dixon_coles.py` (the actual model — fit + predict),
+`data.py` (loads results/odds from Postgres into pandas), `train.py` (batch
+job: fit, predict every upcoming fixture, upsert into `model_predictions`),
+`evaluate.py` (backtest against a held-out season slice and a closing-odds
+baseline). Added `numpy`, `scipy`, `pandas`, `psycopg[binary]` to
+`requirements.txt` (frozen via `pip freeze`, same lockfile discipline as
+Phase 0). Tested end-to-end against a scratch Postgres seeded with the real
+2023/24 Premier League season — the only real data available to test
+against in this session.
+
+### Why odds are a baseline, never a training input
+
+Worked through this as a design discussion before writing any code: feeding
+betting odds into the model as a feature would be *leakage* — odds are
+themselves an extremely strong, market-tested prediction, so a model trained
+on them would mostly just learn to echo the market instead of learning
+anything from the underlying football data. Worse, it would make the
+model's opinion structurally incapable of *disagreeing* with the market,
+which defeats the entire point of the betting-comparison feature this
+project wants. Odds belong exactly one place: `evaluate.py` converts closing
+`fixture_odds` prices to implied probabilities (`1/price`, renormalized to
+remove the bookmaker's built-in margin) purely as a benchmark to score the
+model against, never as something the model sees during fitting.
+
+### Why Dixon-Coles specifically, and what it actually does
+
+Goals fit a Poisson distribution (discrete counts of relatively rare,
+roughly independent events over a fixed window) — the whole modeling
+problem reduces to estimating one number, λ (expected goals), per team per
+match. The base version (sometimes called the Maher model): each team gets
+an attack strength and a defense weakness, `λ_home = attack_home ×
+defense_away × home_advantage`, fit by maximum likelihood across all
+historical matches at once. Dixon & Coles (1997) added two real
+refinements: a correlation correction (`rho`) for the four low-scoring
+cells (0-0, 1-0, 0-1, 1-1), since a plain independent-Poisson model
+systematically underestimates how often real football produces those
+scorelines; and time-weighting, so a result from a year ago counts for less
+than one from last month (implemented as exponential decay off a
+configurable half-life, `_time_weight` in `dixon_coles.py`).
+
+Chosen over XGBoost for three concrete reasons, not just "it's the classic
+approach": it produces the "3.2 - 0.4" expected-goals output the project
+explicitly wanted *natively* (λ is the number, not something derived
+after the fact); it's parameter-efficient for a modest dataset (one
+attack + one defense number per team, versus XGBoost's much larger
+hypothesis space, which risks overfitting on a few thousand matches); and
+it's interpretable — "Arsenal's attack strength is 1.50" is something you
+can sanity-check by eye against the real table, which mattered for trusting
+the result during testing (see below).
+
+### A real bug caught by verifying against known facts, not just "it ran"
+
+The first version of `predict()` had `prob_home_win` and `prob_away_win`
+swapped — an easy mistake, since `numpy.triu`/`numpy.tril` name their
+triangles by matrix position (upper/lower), not by football meaning, and
+it's not obvious at a glance which one corresponds to "home goals greater
+than away goals" in a grid indexed `[home_goals, away_goals]`. Caught it
+with a three-line numpy sanity check *before* trusting a full model run —
+built a tiny grid with a known single result and confirmed which numpy
+function actually summed it correctly, rather than reasoning about matrix
+triangles from memory and hoping. Once fixed, the model's real output
+matched real history exactly: Manchester City had the highest fitted attack
+strength (1.61) and were 2023/24's actual champions and top scorers;
+Arsenal had the best fitted defense (0.63) and had the league's actual best
+defensive record that season; Sheffield United (relegated, bottom of the
+table) had the *worst* fitted attack strength. This is the same lesson as
+Phase 1's `getOrCreateCompetition` bug and Phase 2's team-dashboard
+verification: a script completing without an exception proves nothing by
+itself — checking the actual numbers against known reality is what catches
+a bug like a swapped triangle, which would otherwise have silently flipped
+every single prediction the model ever made.
+
+### Two smaller real bugs, also only found by running real data through it
+
+- **Identifiability**: the raw fit has a one-parameter ridge of equivalent
+  solutions — you can add a constant to every team's log-attack and
+  subtract it from every team's log-defense and every prediction stays
+  identical (the algebra: `(a_i+c) + (d_j-c) = a_i+d_j`). This isn't a bug
+  in the sense of wrong predictions, but it means the raw fitted numbers
+  landing wherever the optimizer's starting point happens to put them
+  isn't meaningful for interpretation. Fixed with a post-fit
+  renormalization (recenter so `mean(log_attack) == 0`, i.e. "1.0" means
+  exactly league-average) — doesn't touch a single prediction, just makes
+  the numbers a human can actually read.
+- **`decimal.Decimal` vs. `float`**: `1.0 / price` on odds pulled from
+  Postgres threw `TypeError: unsupported operand type(s) for /: 'float'
+  and 'decimal.Decimal'` — psycopg returns Postgres `numeric` columns as
+  Python `Decimal`, not `float`, and the two don't mix in arithmetic
+  without an explicit cast. `fixture_odds.price` is `numeric` (Phase 1's
+  schema), so this was always going to happen the first time real odds
+  data actually flowed through this code path — fixed with an explicit
+  `.astype(float)` right after loading. Also swapped `pandas.read_sql`
+  (which only officially supports SQLAlchemy connections and prints a
+  `UserWarning` against a raw psycopg connection on every call) for a small
+  cursor-based helper, avoiding both problems in one pass rather than
+  suppressing a warning that was actually pointing at something real.
+
+### The honest backtest result, and why it's the correct one to get
+
+`evaluate.py` holds out the most recent 20% of a season's matches by date,
+fits on the rest, and scores both the model and the closing-odds baseline
+with Brier score and log-loss on the same held-out matches. Real result,
+2023/24 Premier League, 76 held-out matches: model Brier 0.5416 vs. market
+0.4904 (lower is better) — the model lost. Exactly what was predicted in
+the design discussion before any code was written: a model trained purely
+on historical goals, with no injury news, no lineup news, no market money
+flow, isn't expected to beat an efficient closing line. Getting this result
+honestly, and having the mechanism to *know* it rather than assume, is the
+actual point of building the evaluation step — a model that silently looked
+great with no baseline to check against would have been far more worrying
+than one that loses to the market and shows its work.
+
+### A scope gap found by writing the training loop, not by planning ahead
+
+Building `train.py` surfaced a real limitation the original phase plan
+didn't anticipate: Dixon-Coles is fit **per competition** (one full
+optimization for Premier League, a separate one for Championship), because
+attack/defense numbers are only meaningful relative to the other teams in
+the same fit. That means FA Cup — the plan's own stated goal was "predict
+fixtures where both teams are Premier League/Championship sides" — can't
+actually be predicted yet: a Premier League team's fitted strength and a
+Championship team's fitted strength live on two different, incomparable
+scales. Making them comparable (a joint fit, or a bridging adjustment
+between the two competitions' scales) is real additional modeling work,
+not a small fix. Documented as an explicit, deliberate deferral in
+`docs/PHASES.md` and `docs/CLAUDE.md` rather than silently shipping FA Cup
+predictions that would have been comparing apples to oranges, or silently
+dropping the FA Cup goal without saying so.
+
+### Still to do
+
+Only Premier League 2023/24 was available to test against in this session
+(the only data locally cached — see Phase 1's entry for why). Once the real
+Neon database has all 3 seasons and Championship data seeded, rerun
+`python -m app.train` and `python -m app.evaluate` for real and see whether
+the backtest result holds at a larger sample size, and whether Championship
+(a less-watched, plausibly less-efficient market — see the earlier
+discussion on where a model might actually find real disagreement with the
+market) tells a different story than Premier League did.
