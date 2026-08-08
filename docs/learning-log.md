@@ -633,3 +633,147 @@ backend base URL and response shapes.
 - **Cleaned up the default Vite template fully** (counter button, template
   CSS, unused logo/hero assets) rather than leaving dead code alongside the
   real app — same standard as removing anything else no longer used.
+
+---
+
+## Phase 4 — FPL fantasy integration (2026-07-30)
+
+### What we built
+
+- **`seedFplPlayerGameweekHistory`** (`backend/seed/sources/fpl.ts`): one
+  call per player to FPL's `element-summary` endpoint, filling in
+  `fpl_player_gameweek_stats` (goals/assists/bonus/bps/minutes per player
+  per gameweek) — the table existed since Phase 1's schema design but was
+  never populated until now. Cached and resumable the same way as
+  API-Football's backfill; throttled with a small delay between requests
+  even though FPL documents no rate limit, since ~700+ rapid requests
+  against someone else's free API is worth being polite about regardless.
+- **`GET /api/fpl/my-team`**: the first backend service that calls an
+  external API live, per request, instead of only reading Postgres — see
+  the "one deliberate exception" note in `docs/architecture.md`. Calls
+  FPL's public `entry` and `entry/.../picks` endpoints (no login needed,
+  just the entry ID), joins the results against players we already have
+  cached locally for names/positions/teams.
+- A **`UpstreamError`** type (`src/lib/errors.ts`, extends `AppError`,
+  status 502) distinct from our own 500s — see below.
+- A "My Team" frontend page plus a small persistent nav bar (the first
+  thing on every page, not just the dashboard) so it's reachable from
+  anywhere.
+
+### Concepts this taught
+
+- **Why `getMyTeam()` doesn't recompute FPL's scoring rules.** The
+  temptation with "gameweek scoring against real FPL rules" is to
+  reimplement the points formula from raw stats (goals by position,
+  assists, bonus, etc.). We don't: FPL's own `picks` response already
+  includes `entry_history.points` — their own computed total for that
+  gameweek, plus each pick's `multiplier` (0/1/2/3 for bench/normal/
+  captain/triple-captain). Consuming the source's own computed result is
+  both less code and structurally can't be wrong the way a from-scratch
+  reimplementation of a fairly detailed scoring system could be. The real
+  logic we do own is *interpretation*: `squadPosition <= 11` means
+  starting XI, `multiplier` distinguishes captain from a benched player.
+- **502 vs. 500, and why the distinction is worth a dedicated error type.**
+  `UpstreamError` (502) means "a service we depend on failed us"; the
+  existing generic 500 path means "we have a bug." They're different
+  failure modes with different fixes — one you can't do anything about
+  except wait or retry, the other means opening the code. Making this a
+  distinct type (not just picking status 502 inline) means the distinction
+  is enforced everywhere the type is used, not just wherever someone
+  remembered to.
+- **Confirmed, not assumed: this container can't reach `fantasy.premierleague.com`
+  either** (403 at the proxy, same as football-data.co.uk and
+  API-Football, tested directly). Every FPL-touching piece built this phase
+  is therefore "written correctly, unverified against a live response" —
+  same honesty standard as `sources/api-football.ts` from Phase 1. What
+  *was* verified for real, live in a browser: the "not configured" error
+  path (`FPL_ENTRY_ID` unset → 400, clear message) and the "configured but
+  unreachable" path (set to a placeholder ID → live fetch attempted → 403
+  from the proxy → correctly surfaced as a 502, not a crash) both trace
+  cleanly through service → error middleware → frontend `useFetch` → a
+  readable message on the page. The one thing that still needs a real
+  `FPL_ENTRY_ID` and a machine with real network access: the actual
+  success path with real squad data.
+- **`selected_by_percent` is honestly left null for historical per-gameweek
+  rows.** `element-summary`'s `history` gives a raw ownership *count* at
+  that point in time, not the percent `bootstrap-static` reports for the
+  live snapshot. Rather than fake a percentage from a count without
+  knowing that gameweek's total manager count, the column just stays null
+  for rows from this source — an honest gap, not a wrong number.
+
+### Decisions worth remembering
+
+- **Not every service reads Postgres, and that's fine when it's
+  deliberate.** `getMyTeam()` breaks the "services only read Postgres"
+  pattern established in Phase 2 on purpose — single-user, low-volume,
+  changes weekly, no rate-limit budget to protect. Worth restating: the
+  pattern was never "services must never call external APIs," it was
+  "don't call external APIs live from a request handler when the data is
+  bulk/historical and would benefit from batch pre-loading." Squad picks
+  fail that test in the other direction.
+- **Still waiting on a real `FPL_ENTRY_ID`** to actually run the backfill
+  and test `/api/fpl/my-team` against real data. Everything is built and
+  its error paths are verified; the happy path is the one piece that needs
+  your machine, your ID, and real network access to confirm.
+
+### Follow-up, same day: real-machine testing, a real bug found, and a local-dev pivot
+
+Got a real `FPL_ENTRY_ID` (2159850) and tried testing against it on a
+borrowed Mac. Several real things came out of this, worth recording
+separately from the code itself:
+
+**`entry.current_event` being `null` pre-season was confirmed for real, not
+just theorized.** The live call to `/entry/{id}/` succeeded and correctly
+reported no current gameweek — proof the entry/picks integration is
+fundamentally sound, just untested past that first call. Decided to add a
+gameweek-1 preview fallback (`isPreview` on `MyTeam`) rather than only
+saying "nothing to show": `fetchPicksOrNull` tries `/event/1/picks/` when
+there's no current event, distinguishing a 404 ("no picks saved yet,"
+expected pre-season, return a clean message) from any other failure (a
+genuine `UpstreamError`, still surfaced as one). Needed adding an
+`upstreamStatus` field to `UpstreamError` to make that distinction — a
+generic "something failed" 502 isn't enough information for a caller to
+decide whether a specific failure mode is expected.
+
+**A real Docker/Colima setup problem, diagnosed with actual signal.**
+`GET /api/teams` came back "Internal server error" — not a per-team bug the
+error location (the team *list* endpoint, not a specific dashboard)
+narrowed it down. The useful fact: **`/health` only ever proves the
+database is *reachable* (`SELECT 1`), never that migrations actually ran**
+— an empty, unmigrated database passes `/health` and then fails on every
+real query with something like `relation "teams" does not exist`. Traced
+back to Colima's VM not actually running (`docker compose exec` failed
+with the exact same "dial unix /var/run/docker.sock" error as the very
+first setup attempt) — Colima needs restarting after a reboot/sleep, it's
+not a one-time start.
+
+**Then hit a real hardware wall, not a config mistake:** this particular
+machine is on macOS 12, old enough that Homebrew's build toolchain
+(`meson`) refuses to build some of Colima's dependencies at all. Not
+something to debug further — some things are genuinely version walls, and
+recognizing "this isn't fixable by trying harder" is as important a skill
+as debugging itself.
+
+**Decision: hybrid local dev, not a premature full cloud deployment.**
+Considered standing up the real Render/Vercel/Neon stack right now instead
+of fighting Docker locally, and deliberately didn't: `backend`/`frontend`
+still run locally via `npm run dev` (that part was never broken — Node,
+npm, `tsc`, Vite all worked fine all along), only Postgres moves to a free
+Neon project. Full deployment means CI/CD, secrets across three platforms,
+and Render's free-tier cold starts on every test — real overhead that
+Phase 10 was deliberately sequenced last specifically to avoid taking on
+before the app's features are done. Documented the setup in
+`docs/seeding-runbook.md`'s new "No Docker available?" section: use
+`npm run db:seed` instead of `npm run db:restore` on a Docker-less
+machine, since `db:restore` shells out to `pg_dump`/`pg_restore` CLI
+binaries that may hit the exact same Homebrew wall, while `db:seed` is
+pure Node/`fetch` and needs nothing installed beyond what `npm install`
+already provides. Confirmed separately (browser test) that this machine
+*can* reach football-data.co.uk, so this path should actually work once
+set up.
+
+**Not done tonight — picking this up next session:** actually create the
+Neon project, set `DATABASE_URL`, and run `migrate:up` + `db:seed` for
+real. This would also be the first full historical seed run by anyone,
+cloud sandbox included — worth treating as a real milestone once it
+happens, not just "finally got local dev working."

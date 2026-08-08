@@ -41,12 +41,45 @@ which competitions Phase 2's endpoints filter to.
    migrations to have been run first so the extensions/table shapes match
    what the dump expects to load into.
 
-## Step-by-step plan
+## No Docker available? Use Neon instead of local Postgres
 
-Run this on a machine with normal internet access (this cloud session's
-network policy blocks both football-data.co.uk and API-Football — steps 1-3
-below were already verified there against a small sample, but the full
-multi-season/multi-competition pull needs your own machine).
+Hit this for real on a machine where Colima/Docker Desktop couldn't be
+installed at all (Homebrew build failures on an unsupported/old macOS
+version) — rather than fight the local toolchain, skip Docker entirely and
+point the app at a free hosted Postgres instead. This isn't "deploying" —
+`backend`/`frontend` still run locally with `npm run dev` exactly as
+before; only the database is remote. It's also literally the same database
+this project already plans to use in production (Phase 10), so setting it
+up now is time spent on the real thing, not a throwaway workaround.
+
+1. Sign up at [neon.tech](https://neon.tech) (free tier) and create a
+   project — it gives you a `postgresql://...` connection string
+   immediately.
+2. Put that in `backend/.env` as `DATABASE_URL`, replacing the local
+   Docker Compose one. Skip `docker compose up -d` entirely.
+3. `npm run migrate:up` — pure Node (`pg` package), no native binaries
+   needed, works the same against Neon as against local Postgres.
+4. Use **`npm run db:seed`, not `npm run db:restore`**, as the first seed.
+   `db:restore` shells out to the `pg_dump`/`pg_restore` CLI binaries,
+   which may not be installed (and may hit the same Homebrew build wall
+   that blocked Docker) — `db:seed` is pure Node/`fetch`, no local Postgres
+   client tools required at all. As a bonus, if this machine has real
+   internet access (confirm with something like `curl -I
+   https://www.football-data.co.uk` first), this becomes the actual first
+   full historical seed run rather than the single-season snapshot.
+5. `npm run dev` for both `backend` and `frontend`, same as always.
+
+**Not done yet, pick this up next session:** actually creating the Neon
+project and running through these steps — this section documents the plan,
+not a completed setup.
+
+## Step-by-step plan (local Docker Postgres)
+
+Run this on a machine with normal internet access and a working Docker
+setup (this cloud session's network policy blocks both football-data.co.uk
+and API-Football — steps 1-3 below were already verified there against a
+small sample, but the full multi-season/multi-competition pull needs your
+own machine).
 
 1. **Fast path first, always try this before anything else:**
    ```

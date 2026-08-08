@@ -402,6 +402,88 @@ export async function upsertFixturePlayerStats(pool: Pool, s: FixturePlayerStats
   );
 }
 
+export interface FplPlayerGameweekStatsInput {
+  playerId: number;
+  gameweekId: number;
+  nowCost?: number;
+  totalPoints?: number;
+  minutes?: number;
+  goalsScored?: number;
+  assists?: number;
+  cleanSheets?: number;
+  goalsConceded?: number;
+  ownGoals?: number;
+  penaltiesSaved?: number;
+  penaltiesMissed?: number;
+  yellowCards?: number;
+  redCards?: number;
+  saves?: number;
+  bonus?: number;
+  bps?: number;
+  influence?: number;
+  creativity?: number;
+  threat?: number;
+  ictIndex?: number;
+}
+
+// selected_by_percent is deliberately never set here -- FPL's per-gameweek
+// element-summary endpoint only gives a raw ownership *count* at that point
+// in time, not the percent bootstrap-static reports for the current
+// snapshot. Left null for historical rows rather than faked from a count
+// without knowing that gameweek's total manager count.
+export async function upsertFplPlayerGameweekStats(pool: Pool, s: FplPlayerGameweekStatsInput): Promise<void> {
+  await pool.query(
+    `INSERT INTO fpl_player_gameweek_stats (
+       player_id, gameweek_id, now_cost, total_points, minutes, goals_scored, assists,
+       clean_sheets, goals_conceded, own_goals, penalties_saved, penalties_missed,
+       yellow_cards, red_cards, saves, bonus, bps, influence, creativity, threat, ict_index
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+     ON CONFLICT (player_id, gameweek_id) DO UPDATE SET
+       now_cost = EXCLUDED.now_cost,
+       total_points = EXCLUDED.total_points,
+       minutes = EXCLUDED.minutes,
+       goals_scored = EXCLUDED.goals_scored,
+       assists = EXCLUDED.assists,
+       clean_sheets = EXCLUDED.clean_sheets,
+       goals_conceded = EXCLUDED.goals_conceded,
+       own_goals = EXCLUDED.own_goals,
+       penalties_saved = EXCLUDED.penalties_saved,
+       penalties_missed = EXCLUDED.penalties_missed,
+       yellow_cards = EXCLUDED.yellow_cards,
+       red_cards = EXCLUDED.red_cards,
+       saves = EXCLUDED.saves,
+       bonus = EXCLUDED.bonus,
+       bps = EXCLUDED.bps,
+       influence = EXCLUDED.influence,
+       creativity = EXCLUDED.creativity,
+       threat = EXCLUDED.threat,
+       ict_index = EXCLUDED.ict_index`,
+    [
+      s.playerId,
+      s.gameweekId,
+      s.nowCost ?? null,
+      s.totalPoints ?? null,
+      s.minutes ?? null,
+      s.goalsScored ?? null,
+      s.assists ?? null,
+      s.cleanSheets ?? null,
+      s.goalsConceded ?? null,
+      s.ownGoals ?? null,
+      s.penaltiesSaved ?? null,
+      s.penaltiesMissed ?? null,
+      s.yellowCards ?? null,
+      s.redCards ?? null,
+      s.saves ?? null,
+      s.bonus ?? null,
+      s.bps ?? null,
+      s.influence ?? null,
+      s.creativity ?? null,
+      s.threat ?? null,
+      s.ictIndex ?? null,
+    ],
+  );
+}
+
 export async function findFixtureId(
   pool: Pool,
   competitionSeasonId: number,

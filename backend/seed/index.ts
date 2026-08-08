@@ -1,6 +1,6 @@
 import { pool } from '../src/db/pool.js';
 import { seedFootballDataSeason } from './sources/football-data-co-uk.js';
-import { seedFplBootstrap } from './sources/fpl.js';
+import { seedFplBootstrap, seedFplPlayerGameweekHistory } from './sources/fpl.js';
 import {
   seedApiFootballFixtures,
   backfillLineupsForCompetitionSeason,
@@ -99,6 +99,11 @@ async function backfillLineups(): Promise<void> {
 async function main(): Promise<void> {
   await seedHistoricalResultsAndOdds();
   await seedFplBootstrap(pool);
+
+  console.log('Seeding FPL per-gameweek player stats (one call per player, throttled)...');
+  const gwHistoryResult = await seedFplPlayerGameweekHistory(pool);
+  console.log(`FPL per-gameweek stats: ${gwHistoryResult.done} players done, ${gwHistoryResult.skipped} skipped (fetch errors).`);
+
   await seedFaCupFixtures();
   await backfillLineups();
   await pool.end();

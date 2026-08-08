@@ -61,6 +61,11 @@ colima start               # starts the Colima VM (once per machine reboot)
 docker compose up -d       # starts Postgres, per docker-compose.yml
 ```
 
+No Docker on this machine (e.g. Colima/Homebrew won't build on an old macOS
+version)? Skip this section and point `backend/.env`'s `DATABASE_URL` at a
+free [Neon](https://neon.tech) project instead — see
+`docs/seeding-runbook.md`'s "No Docker available?" section.
+
 ### Backend
 
 ```bash
