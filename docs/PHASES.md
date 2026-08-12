@@ -126,6 +126,15 @@ not optional.
       League and Championship team strengths reconciled onto one shared
       scale (two independent per-competition fits don't give you that) --
       deliberately deferred, real follow-on modeling work
+- [ ] **New, not in the original plan:** live predictions are blocked on a
+      real `API_FOOTBALL_KEY` -- `app.train` fits correctly against the
+      full historical data but has no upcoming fixtures to predict until
+      `npm run db:seed:current-season` (in `backend/`) has pulled the
+      current season's fixture list. Once a key exists: run
+      `npm run db:seed:current-season`, then `python -m app.train`,
+      manually, as often as you like. Wiring both steps into a recurring,
+      unattended job is Phase 10's "GitHub Actions scheduled workflow for
+      the model service" item below -- not duplicated here
 
 ## Phase 6 — Betting tracker
 - [ ] Endpoints + UI to log a bet: pick, odds, stake, fixture, result
@@ -166,7 +175,12 @@ not optional.
       full reasoning.
 - [ ] GitHub Actions CI/CD pipeline for frontend + backend
 - [ ] GitHub Actions scheduled workflow for the model service (batch
-      inference, no hosted compute needed -- see architecture.md)
+      inference, no hosted compute needed -- see architecture.md). Two
+      steps in sequence, both already built and manually runnable as of
+      Phase 5: `npm run db:seed:current-season` (`backend/`) to refresh the
+      fixture list, then `python -m app.train` (`model-service/`) to
+      refit and write predictions. This item is "put those two commands on
+      a schedule," not build them from scratch
 - [ ] Document the next scaling step for each component
 - [ ] Load-check against the 50-concurrent-user target
 
