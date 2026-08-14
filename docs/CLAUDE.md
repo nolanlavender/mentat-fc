@@ -107,15 +107,19 @@ The database holds **Premier League + Championship + FA Cup**, 3 seasons,
 full player/lineup depth. What the app actually shows is narrower, but not
 PL-only:
 
-- **Team dashboards and match predictions:** Premier League **and**
-  Championship, plus FA Cup fixtures — but only where the model can
-  actually say something. Most FA Cup matchups from the Third Round onward
-  are PL/Championship sides playing each other, so those get a dashboard
-  and a real prediction like any other fixture. When an FA Cup fixture
-  involves a team from outside those two tiers (a League One/Two or
-  non-league side, no historical data to model against), the UI shows a
-  default logo and the team name with **no score prediction** — degrade
-  gracefully instead of guessing.
+- **Team dashboards:** Premier League **and** Championship.
+- **Match predictions:** Premier League and Championship, **fit and
+  predicted as two separate competitions** — Dixon-Coles estimates each
+  team's attack/defense strength relative to the other teams in the same
+  fit, so a Premier League team's numbers aren't on the same scale as a
+  Championship team's. **FA Cup predictions are explicitly deferred**, not
+  silently missing: the original intent (predict FA Cup fixtures where
+  both teams are PL/Championship sides) needs the two competitions' team
+  strengths reconciled onto one shared scale first, which two independent
+  single-competition fits don't give you — real follow-on modeling work,
+  see `docs/learning-log.md`'s Phase 5 entry. Until then, FA Cup fixtures
+  show a default logo and the team name, no score prediction, regardless
+  of who's playing — degrade gracefully instead of guessing.
 - **Fantasy:** Premier League only — not a scope choice, just what FPL is.
   There's no Championship fantasy data to show.
 - **Betting tracker:** Premier League only for now — unchanged, revisit

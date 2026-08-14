@@ -777,3 +777,310 @@ Neon project, set `DATABASE_URL`, and run `migrate:up` + `db:seed` for
 real. This would also be the first full historical seed run by anyone,
 cloud sandbox included — worth treating as a real milestone once it
 happens, not just "finally got local dev working."
+
+---
+
+## Phase 5 — Prediction model service, match outcome (2026-07-30/08-08)
+
+### What we built
+
+`model-service/app/`: `dixon_coles.py` (the actual model — fit + predict),
+`data.py` (loads results/odds from Postgres into pandas), `train.py` (batch
+job: fit, predict every upcoming fixture, upsert into `model_predictions`),
+`evaluate.py` (backtest against a held-out season slice and a closing-odds
+baseline). Added `numpy`, `scipy`, `pandas`, `psycopg[binary]` to
+`requirements.txt` (frozen via `pip freeze`, same lockfile discipline as
+Phase 0). Tested end-to-end against a scratch Postgres seeded with the real
+2023/24 Premier League season — the only real data available to test
+against in this session.
+
+### Why odds are a baseline, never a training input
+
+Worked through this as a design discussion before writing any code: feeding
+betting odds into the model as a feature would be *leakage* — odds are
+themselves an extremely strong, market-tested prediction, so a model trained
+on them would mostly just learn to echo the market instead of learning
+anything from the underlying football data. Worse, it would make the
+model's opinion structurally incapable of *disagreeing* with the market,
+which defeats the entire point of the betting-comparison feature this
+project wants. Odds belong exactly one place: `evaluate.py` converts closing
+`fixture_odds` prices to implied probabilities (`1/price`, renormalized to
+remove the bookmaker's built-in margin) purely as a benchmark to score the
+model against, never as something the model sees during fitting.
+
+### Why Dixon-Coles specifically, and what it actually does
+
+Goals fit a Poisson distribution (discrete counts of relatively rare,
+roughly independent events over a fixed window) — the whole modeling
+problem reduces to estimating one number, λ (expected goals), per team per
+match. The base version (sometimes called the Maher model): each team gets
+an attack strength and a defense weakness, `λ_home = attack_home ×
+defense_away × home_advantage`, fit by maximum likelihood across all
+historical matches at once. Dixon & Coles (1997) added two real
+refinements: a correlation correction (`rho`) for the four low-scoring
+cells (0-0, 1-0, 0-1, 1-1), since a plain independent-Poisson model
+systematically underestimates how often real football produces those
+scorelines; and time-weighting, so a result from a year ago counts for less
+than one from last month (implemented as exponential decay off a
+configurable half-life, `_time_weight` in `dixon_coles.py`).
+
+Chosen over XGBoost for three concrete reasons, not just "it's the classic
+approach": it produces the "3.2 - 0.4" expected-goals output the project
+explicitly wanted *natively* (λ is the number, not something derived
+after the fact); it's parameter-efficient for a modest dataset (one
+attack + one defense number per team, versus XGBoost's much larger
+hypothesis space, which risks overfitting on a few thousand matches); and
+it's interpretable — "Arsenal's attack strength is 1.50" is something you
+can sanity-check by eye against the real table, which mattered for trusting
+the result during testing (see below).
+
+### A real bug caught by verifying against known facts, not just "it ran"
+
+The first version of `predict()` had `prob_home_win` and `prob_away_win`
+swapped — an easy mistake, since `numpy.triu`/`numpy.tril` name their
+triangles by matrix position (upper/lower), not by football meaning, and
+it's not obvious at a glance which one corresponds to "home goals greater
+than away goals" in a grid indexed `[home_goals, away_goals]`. Caught it
+with a three-line numpy sanity check *before* trusting a full model run —
+built a tiny grid with a known single result and confirmed which numpy
+function actually summed it correctly, rather than reasoning about matrix
+triangles from memory and hoping. Once fixed, the model's real output
+matched real history exactly: Manchester City had the highest fitted attack
+strength (1.61) and were 2023/24's actual champions and top scorers;
+Arsenal had the best fitted defense (0.63) and had the league's actual best
+defensive record that season; Sheffield United (relegated, bottom of the
+table) had the *worst* fitted attack strength. This is the same lesson as
+Phase 1's `getOrCreateCompetition` bug and Phase 2's team-dashboard
+verification: a script completing without an exception proves nothing by
+itself — checking the actual numbers against known reality is what catches
+a bug like a swapped triangle, which would otherwise have silently flipped
+every single prediction the model ever made.
+
+### Two smaller real bugs, also only found by running real data through it
+
+- **Identifiability**: the raw fit has a one-parameter ridge of equivalent
+  solutions — you can add a constant to every team's log-attack and
+  subtract it from every team's log-defense and every prediction stays
+  identical (the algebra: `(a_i+c) + (d_j-c) = a_i+d_j`). This isn't a bug
+  in the sense of wrong predictions, but it means the raw fitted numbers
+  landing wherever the optimizer's starting point happens to put them
+  isn't meaningful for interpretation. Fixed with a post-fit
+  renormalization (recenter so `mean(log_attack) == 0`, i.e. "1.0" means
+  exactly league-average) — doesn't touch a single prediction, just makes
+  the numbers a human can actually read.
+- **`decimal.Decimal` vs. `float`**: `1.0 / price` on odds pulled from
+  Postgres threw `TypeError: unsupported operand type(s) for /: 'float'
+  and 'decimal.Decimal'` — psycopg returns Postgres `numeric` columns as
+  Python `Decimal`, not `float`, and the two don't mix in arithmetic
+  without an explicit cast. `fixture_odds.price` is `numeric` (Phase 1's
+  schema), so this was always going to happen the first time real odds
+  data actually flowed through this code path — fixed with an explicit
+  `.astype(float)` right after loading. Also swapped `pandas.read_sql`
+  (which only officially supports SQLAlchemy connections and prints a
+  `UserWarning` against a raw psycopg connection on every call) for a small
+  cursor-based helper, avoiding both problems in one pass rather than
+  suppressing a warning that was actually pointing at something real.
+
+### The honest backtest result, and why it's the correct one to get
+
+`evaluate.py` holds out the most recent 20% of a season's matches by date,
+fits on the rest, and scores both the model and the closing-odds baseline
+with Brier score and log-loss on the same held-out matches. Real result,
+2023/24 Premier League, 76 held-out matches: model Brier 0.5416 vs. market
+0.4904 (lower is better) — the model lost. Exactly what was predicted in
+the design discussion before any code was written: a model trained purely
+on historical goals, with no injury news, no lineup news, no market money
+flow, isn't expected to beat an efficient closing line. Getting this result
+honestly, and having the mechanism to *know* it rather than assume, is the
+actual point of building the evaluation step — a model that silently looked
+great with no baseline to check against would have been far more worrying
+than one that loses to the market and shows its work.
+
+### A scope gap found by writing the training loop, not by planning ahead
+
+Building `train.py` surfaced a real limitation the original phase plan
+didn't anticipate: Dixon-Coles is fit **per competition** (one full
+optimization for Premier League, a separate one for Championship), because
+attack/defense numbers are only meaningful relative to the other teams in
+the same fit. That means FA Cup — the plan's own stated goal was "predict
+fixtures where both teams are Premier League/Championship sides" — can't
+actually be predicted yet: a Premier League team's fitted strength and a
+Championship team's fitted strength live on two different, incomparable
+scales. Making them comparable (a joint fit, or a bridging adjustment
+between the two competitions' scales) is real additional modeling work,
+not a small fix. Documented as an explicit, deliberate deferral in
+`docs/PHASES.md` and `docs/CLAUDE.md` rather than silently shipping FA Cup
+predictions that would have been comparing apples to oranges, or silently
+dropping the FA Cup goal without saying so.
+
+### The real, full-scale backtest (run by the user, on real Neon data)
+
+Ran `python -m app.evaluate` against the fully seeded Neon database — 3
+seasons, both competitions. Match counts confirm the seed landed exactly
+right: Premier League 912 train / 228 test (1140 = 3 × 380, correct);
+Championship 1324 train / 332 test (1656 = 3 × 552, correct).
+
+Real result: Premier League model Brier 0.6517 vs. market 0.6300;
+Championship model 0.6359 vs. market 0.6204. Model still loses on both —
+still the expected, correct outcome — but the **gap narrowed** versus the
+single-season test (was ~0.05, now ~0.02/0.015), consistent with more
+training data producing more stable per-team estimates.
+
+Worth understanding *why* both scores got worse in absolute terms compared
+to the single-season backtest, since the instinct "more data should help"
+doesn't immediately explain it: the single-season test trained and tested
+*within the same season* (predict late-2023/24 from early-2023/24), where
+team strength barely shifts. The 3-season test's held-out slice spans a
+season boundary, so the model (and the market) now have to generalize
+across real squad turnover — transfers, promotions/relegations, manager
+changes — a genuinely harder problem, which is exactly why the *market's*
+score got worse too, not just the model's. The single-season number was
+also a noisier, smaller sample (76 matches vs. 228/332) — the larger result
+is the one worth trusting.
+
+**Championship's gap to the market (0.0155) is smaller than Premier
+League's (0.0217)** — a real, if modest, data point in favor of the
+"less-watched markets are less efficient" theory discussed earlier in this
+project, not proof of it. One backtest, worth watching rather than acting
+on.
+
+One tuning knob surfaced by thinking through this, not yet explored: the
+default time-decay half-life (180 days) means a 3-season-old match already
+carries ~2% of a recent match's weight, so "3 seasons of data" isn't really
+"3x the effective signal" — most of the model's influence still comes from
+roughly the last season regardless of how much history is loaded.
+
+### Half-life, made concrete and tuned
+
+Worked through actual weight numbers rather than reasoning about "half-life"
+abstractly: at 180 days, a match from last month already carries ~89%
+weight (recency already mattered quite a bit by default) -- what a shorter
+half-life really buys isn't "recent games count," it's "everything *beyond*
+recent counts dramatically less." At 60 days, a 90-day-old match is down to
+35%, a year-old one to ~1.5%.
+
+The real tradeoff going shorter: a team plays ~4-5 matches a month, so a
+very short half-life fits two parameters (attack, defense) per team off an
+increasingly small, noisy effective sample -- the classic "form vs. true
+quality" tension in sports modeling, where chasing recent results too hard
+means chasing luck (a deflected goal, a red card) rather than tracking real
+changes (transfers, injuries, a new manager).
+
+Landed on 60 days as a starting point -- meaningfully shorter than the
+180-day default without collapsing to just the last handful of games.
+Pulled it out as a named `HALF_LIFE_DAYS` constant at the top of both
+`app/train.py` and `app/evaluate.py` (duplicated between the two on
+purpose, not shared from one module -- `evaluate.py` doubles as the
+experimentation sandbox for trying a candidate value, `train.py` is the
+deployed choice; keeping them separate means testing a new value doesn't
+silently change what's actually written to `model_predictions` until
+deliberately copied over).
+
+Tested the plumbing works locally (only Premier League 2023/24 available
+here) -- and honestly, it did *slightly worse* on that single-season test
+(Brier 0.5485 vs. 0.5416 at 180 days). Not a contradiction: with only one
+season to test against, a shorter half-life just shrinks the effective
+sample with nothing to gain -- the actual benefit (discounting stale,
+multi-season-old squad compositions) can't show up until there's more than
+one season's worth of history to discount. Real comparison needs rerunning
+`python -m app.evaluate` against the full 3-season Neon data and comparing
+to the 180-day baseline already recorded above.
+
+**The real result, against the full 3-season Neon data:**
+
+| Half-life | Premier League Brier | Championship Brier |
+|---|---|---|
+| 180 days (original default) | 0.6517 | 0.6359 |
+| 120 days | 0.6561 | 0.6409 |
+| 60 days | 0.6682 | 0.6575 |
+
+Monotonic in both leagues, no exceptions -- every step shorter made
+predictions worse. The instinct going in ("recent form should count for
+more") wasn't wrong exactly, it just doesn't apply the way it would to a
+form-tracking model. Dixon-Coles isn't scoring "how hot is this team right
+now" -- it's estimating each team's underlying attack/defense strength,
+a property that changes slowly (transfers, injuries, a new manager), not
+week to week. Shortening the half-life doesn't sharpen that estimate, it
+starves it: at 60 days the effective sample per team drops to roughly the
+last 8-10 matches, small enough that one freak scoreline or a lucky
+deflection swings the fitted parameters noticeably. The 180-day setting was
+already doing something like "smooth over a mini-season," and that
+smoothing turned out to matter more than the staleness it costs.
+
+Reverted `HALF_LIFE_DAYS` back to `180` in both `app/train.py` (the
+deployed value) and `app/evaluate.py` (the sandbox, now recording what's
+already been tried in its own comment) rather than shipping a config the
+real data said was worse. This is the actual point of having a real
+backtest instead of reasoning from intuition alone -- a plausible-sounding
+idea (weight recent form more) can be measured and found to not hold up,
+and that's a more useful outcome than either blindly shipping the instinct
+or never testing it at all. A natural follow-up worth trying later:
+whether an *even longer* half-life (e.g. 365 days) does better still, now
+that the direction of the trend is established -- not pursued now since
+the goal here was validating the specific "shorter is better" hypothesis,
+which the data answered.
+
+### Reading a Brier score, and why it's meaningless without a baseline
+
+After the real backtest, worked through what the actual numbers (0.62-0.68)
+mean rather than just comparing them to each other. Brier score is the mean
+squared error between the predicted probability vector and the one-hot
+actual outcome -- 0 is perfect, and there's no other fixed "good" value,
+because it depends entirely on how hard the underlying prediction problem
+is. What makes a number meaningful is a baseline on the *same* matches:
+
+- Guessing uniformly (33/33/33 every time, no model at all) scores a fixed
+  **0.667** -- constant regardless of outcome, since the squared-error math
+  works out the same either way.
+- The model, across every half-life tried, scored **0.65-0.68** -- only
+  modestly ahead of blind guessing.
+- The market (bookmaker closing odds) scored **0.62-0.63** -- meaningfully
+  ahead of the model, expected since odds price in information (injuries,
+  suspensions, lineup news, market money flow) a goals-only Dixon-Coles fit
+  never sees.
+
+So "beats uniform guessing, loses to the market" is the honest, specific
+read of where a first-pass goals-only model actually stands -- not "0.65 is
+bad" or "0.65 is fine," which are both meaningless without the comparison.
+
+### Seeding the current season so there's something to predict
+
+First real run of `app.train` against the full 3-season data produced a
+correctly-fit model (`fitted on 1140 matches` for PL -- exactly 380 x 3, no
+drops) but wrote **zero predictions**. Not a bug: the three seeded seasons
+(2023/24, 2024/25, 2025/26) were all already fully played out by the time
+this ran, and `load_upcoming_fixtures` correctly found no fixture with a
+null score to predict.
+
+The fix needed a new seed step, not a code change to the model: football-
+data.co.uk's CSVs are structurally incapable of listing a fixture that
+hasn't been played yet (there's no "played" concept in a source that's
+purely a results feed), so getting an actual schedule of upcoming matches
+requires API-Football's fixture-list endpoint instead, which returns every
+fixture in a season -- played or not, with a status field, no score for the
+ones still to come. Added `seedCurrentSeasonFixtureLists` in
+`backend/seed/index.ts`, which pulls the full 2026/27 Premier League and
+Championship fixture list via the same `seedApiFootballFixtures` function
+already used for FA Cup, upserting against the same natural key the
+football-data.co.uk importer uses -- so it enriches already-played matches
+(adding venue/referee/external id) and inserts fresh rows for everything
+still ahead, idempotently, safe to rerun as the season progresses. This is
+a manual stand-in for the recurring refresh job `docs/PHASES.md`'s Phase 2
+already flagged and deliberately deferred -- not a replacement for it, see
+the updated note there.
+
+Also split it out as its own entry point (`npm run db:seed:current-season`,
+`backend/seed/current-season.ts`) rather than only being reachable through
+the full `npm run db:seed` -- the full pipeline re-walks 3 seasons of
+football-data.co.uk CSVs and the throttled FPL/lineup backfills every time,
+all of which are either already done or their own slow job, so forcing a
+full rerun just to pick up this week's fixture changes would be needless
+waiting (and, for the API-Football-backed steps, needless budget spend).
+Real gotcha caught before pushing: `index.ts`'s `main()` was called
+unconditionally at module scope, so importing `seedCurrentSeasonFixtureLists`
+from it for the new entry point would have silently run the *entire*
+pipeline as a side effect of the `import` statement, before the new file's
+own `main()` even started. Fixed by gating it behind
+`import.meta.url === file://${process.argv[1]}` -- the ESM equivalent of
+Python's `if __name__ == "__main__":` -- so the file is safe to import for
+just its individual exported functions.

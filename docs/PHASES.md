@@ -58,7 +58,11 @@ not optional.
 - [ ] Recurring refresh job to keep current-season data current (new
       fixtures/results, FPL prices/ownership) -- designed in Phase 1, see
       `docs/architecture.md`'s "Keeping data current" section; build it once
-      there's an actual API/frontend consuming the data, not before
+      there's an actual API/frontend consuming the data, not before. Phase 5
+      added a manual path in the meantime (`seedCurrentSeasonFixtureLists`
+      in `backend/seed/index.ts`, runs as part of `npm run db:seed`) so
+      `app.train` has real upcoming fixtures to predict -- this item is
+      about turning that into an actual schedule, not a from-scratch build
 
 ## Phase 3 — Frontend shell
 - [x] React + TypeScript app scaffold (routes/pages/components split, added
@@ -91,17 +95,46 @@ not optional.
       historical seed run, PL + Championship, 2024/25 and 2025/26 included.
 
 ## Phase 5 — Prediction model service (match outcome)
-- [ ] Stand up `/model-service` as a Python FastAPI project
-- [ ] Load and clean historical data from football-data.co.uk
-- [ ] Pick and justify an approach: Poisson/Dixon-Coles vs. XGBoost
-      classification — explain the tradeoff before choosing
-- [ ] Train a first model on match outcome (score or win/draw/loss)
-- [ ] Batch job: model writes predictions to Postgres on a schedule
-      (e.g. ahead of each gameweek)
-- [ ] Explain: batch inference vs. real-time serving, and why we chose
-      batch here
-- [ ] Basic model evaluation: how do we know if it's any good? (backtesting
-      against past seasons, baseline comparison)
+- [x] Stand up `/model-service` as a Python FastAPI project (scaffolded
+      Phase 0; the FastAPI app itself stays a health-check stub -- the real
+      Phase 5 work is a batch script, not a live endpoint, per the
+      batch-vs-real-time decision below)
+- [x] Load and clean historical data from football-data.co.uk -- reads it
+      from Postgres (`model-service/app/data.py`), not raw CSVs directly;
+      "cleaning" already happened at seed time in Phase 1
+- [x] Pick and justify an approach: Dixon-Coles, chosen over XGBoost for
+      producing expected-goals output natively, fitting the data volume,
+      and being interpretable -- see `docs/learning-log.md`'s Phase 5 entry
+      for the full reasoning
+- [x] Train a first model on match outcome (`model-service/app/dixon_coles.py`)
+      -- fit and verified against real 2023/24 Premier League data: Man
+      City highest attack strength, Arsenal best defense, both matching
+      the real table that season
+- [x] Batch job: model writes predictions to Postgres (`app/train.py`,
+      `python -m app.train`) -- tested end-to-end (idempotent upsert
+      confirmed) against real data; run on a schedule once deployed
+      (Phase 10, GitHub Actions), not built yet
+- [x] Explain: batch inference vs. real-time serving, and why we chose
+      batch here -- documented in `docs/architecture.md` since Phase 1
+- [x] Basic model evaluation (`app/evaluate.py`): backtest vs. a held-out
+      portion of real matches, and vs. a closing-odds market baseline.
+      Real, honest result on the one season available to test with: the
+      model currently loses to the market (Brier 0.5416 vs. 0.4904) --
+      expected, not a bug, see the learning-log entry for why that's the
+      correct outcome to expect from a first pass
+- [ ] **New, not in the original plan:** FA Cup predictions need Premier
+      League and Championship team strengths reconciled onto one shared
+      scale (two independent per-competition fits don't give you that) --
+      deliberately deferred, real follow-on modeling work
+- [ ] **New, not in the original plan:** live predictions are blocked on a
+      real `API_FOOTBALL_KEY` -- `app.train` fits correctly against the
+      full historical data but has no upcoming fixtures to predict until
+      `npm run db:seed:current-season` (in `backend/`) has pulled the
+      current season's fixture list. Once a key exists: run
+      `npm run db:seed:current-season`, then `python -m app.train`,
+      manually, as often as you like. Wiring both steps into a recurring,
+      unattended job is Phase 10's "GitHub Actions scheduled workflow for
+      the model service" item below -- not duplicated here
 
 ## Phase 6 — Betting tracker
 - [ ] Endpoints + UI to log a bet: pick, odds, stake, fixture, result
@@ -142,7 +175,12 @@ not optional.
       full reasoning.
 - [ ] GitHub Actions CI/CD pipeline for frontend + backend
 - [ ] GitHub Actions scheduled workflow for the model service (batch
-      inference, no hosted compute needed -- see architecture.md)
+      inference, no hosted compute needed -- see architecture.md). Two
+      steps in sequence, both already built and manually runnable as of
+      Phase 5: `npm run db:seed:current-season` (`backend/`) to refresh the
+      fixture list, then `python -m app.train` (`model-service/`) to
+      refit and write predictions. This item is "put those two commands on
+      a schedule," not build them from scratch
 - [ ] Document the next scaling step for each component
 - [ ] Load-check against the 50-concurrent-user target
 
