@@ -137,12 +137,28 @@ not optional.
       the model service" item below -- not duplicated here
 
 ## Phase 6 — Betting tracker
-- [ ] Endpoints + UI to log a bet: pick, odds, stake, fixture, result
-- [ ] ROI / record tracking over time
-- [ ] Surface model prediction next to my logged bet and the market odds —
-      where do they disagree?
-- [ ] Explain: what "value" means when comparing model probability to
-      market odds
+- [x] Endpoints + UI to log a bet: pick, odds, stake, fixture, result --
+      `POST/GET/PATCH/DELETE /api/bets`, `GET /api/bets/summary`, and a
+      `/bets` frontend page (log form + table + settle/delete). Verified
+      end-to-end against a real scratch Postgres (migration round-trip,
+      full CRUD via curl, and a real browser session via Playwright).
+      Premier League only, per CLAUDE.md's data-scope note
+- [x] ROI / record tracking over time -- `GET /api/bets/summary`: staked,
+      returned, net profit, ROI%, win rate, all computed from settled bets
+      only (pending bets have no known outcome yet)
+- [x] Surface model prediction next to my logged bet and the market odds —
+      where do they disagree? -- each bet response includes your own
+      implied probability (`1/odds_decimal`), the model's probability for
+      that exact selection (when one exists), and their difference
+      (`edge`). Live market odds deliberately deferred (see below)
+- [x] Explain: what "value" means when comparing model probability to
+      market odds -- see `docs/learning-log.md`'s Phase 6 entry
+- [ ] **New, not in the original plan:** live market-odds comparison (The
+      Odds API) was deliberately deferred -- you already know the odds you
+      got when you log a bet, so for now the comparison is your bet's own
+      odds vs. the model, not a live market feed. Revisit if pre-bet odds
+      shopping (seeing the market's current line *before* placing a bet)
+      becomes something actually wanted
 
 ## Phase 7 — Goal scorer prediction
 - [ ] Extend the model service to predict likely goal scorers

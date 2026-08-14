@@ -25,6 +25,7 @@ erDiagram
     fpl_gameweeks ||--o{ fpl_player_gameweek_stats : has
     players ||--o{ fpl_player_gameweek_stats : has
     fixtures ||--o{ model_predictions : has
+    fixtures ||--o{ bets : has
 
     competitions {
         int id PK
@@ -175,6 +176,17 @@ erDiagram
         numeric predicted_home_goals
         numeric predicted_away_goals
     }
+    bets {
+        int id PK
+        int fixture_id FK
+        text market "e.g. match_winner"
+        text selection "e.g. home | draw | away"
+        numeric odds_decimal
+        numeric stake
+        text result "pending | won | lost | void"
+        timestamptz placed_at
+        timestamptz settled_at
+    }
 ```
 
 ## Design decisions worth remembering
@@ -262,12 +274,16 @@ erDiagram
   it populates this column — but only for Premier League players (FPL has
   no Championship data). Championship squads stay empty until lineups are
   backfilled; a known, documented gap, not a bug in the dashboard endpoint.
-- **No `bets` table yet.** PHASES.md schedules the betting tracker at
-  Phase 6. It'll look roughly like
+- **`bets`**, added Phase 6:
   `bets(id, fixture_id, market, selection, odds_decimal, stake, result, placed_at, settled_at)`
   — deliberately with **no `user_id`**, since CLAUDE.md describes this as a
   single-user personal tracker throughout, not "waiting on Phase 9 auth."
-  Add a `user_id` later only if that assumption changes.
+  Add a `user_id` later only if that assumption changes. `market`/
+  `selection` are free text (mirroring `fixture_odds`'s `market`/`outcome`
+  shape) rather than an enum, so a new bet type never needs a migration.
+  `result` is a Postgres `CHECK` constraint, not a foreign-keyed lookup
+  table — four fixed values (`pending`/`won`/`lost`/`void`) that never grow,
+  unlike `market`/`selection`.
 - **Migrations are plain SQL** (`backend/migrations/*.sql`, run via
   `node-pg-migrate`), not an ORM's schema DSL. The point of this phase is
   to actually read and write real DDL, not have it generated — `.sql`-mode

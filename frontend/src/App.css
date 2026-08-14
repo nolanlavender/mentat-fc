@@ -84,3 +84,53 @@ section {
     columns: 1;
   }
 }
+
+.bet-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+}
+
+.bet-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9em;
+}
+
+.bet-form select,
+.bet-form input {
+  font: inherit;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+.bet-form button {
+  height: fit-content;
+}
+
+.bets-table {
+  width: 100%;
+  overflow-x: auto;
+  display: block;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+.bets-table th,
+.bets-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.bets-table button {
+  font-size: 0.85em;
+  padding: 3px 8px;
+  margin-right: 4px;
+}

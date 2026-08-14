@@ -65,6 +65,45 @@ export interface MyTeamPlayer {
   isStarting: boolean;
 }
 
+export type BetResult = 'pending' | 'won' | 'lost' | 'void';
+
+export interface Bet {
+  id: number;
+  fixtureId: number;
+  market: string;
+  selection: string;
+  oddsDecimal: number;
+  stake: number;
+  result: BetResult;
+  placedAt: string;
+  settledAt: string | null;
+  fixture: {
+    kickoffAt: string;
+    status: string;
+    homeScore: number | null;
+    awayScore: number | null;
+    competitionName: string;
+    homeTeam: string;
+    awayTeam: string;
+  };
+  yourImpliedProbability: number;
+  modelProbability: number | null;
+  edge: number | null;
+}
+
+export interface BetsRoiSummary {
+  totalBets: number;
+  pending: number;
+  won: number;
+  lost: number;
+  void: number;
+  totalStakedSettled: number;
+  totalReturnedSettled: number;
+  netProfitSettled: number;
+  roiPercent: number | null;
+  winRatePercent: number | null;
+}
+
 export interface MyTeam {
   entryName: string;
   managerName: string;
