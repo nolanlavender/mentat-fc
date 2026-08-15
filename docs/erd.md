@@ -25,6 +25,9 @@ erDiagram
     fpl_gameweeks ||--o{ fpl_player_gameweek_stats : has
     players ||--o{ fpl_player_gameweek_stats : has
     fixtures ||--o{ model_predictions : has
+    fixtures ||--o{ bet_legs : has
+    users ||--o{ bets : places
+    bets ||--o{ bet_legs : "has (1 leg = straight bet, 2+ = parlay)"
 
     competitions {
         int id PK
@@ -175,6 +178,28 @@ erDiagram
         numeric predicted_home_goals
         numeric predicted_away_goals
     }
+    users {
+        int id PK
+        text email UK
+        text password_hash
+        timestamptz created_at
+    }
+    bets {
+        int id PK
+        int user_id FK
+        numeric stake
+        timestamptz placed_at
+    }
+    bet_legs {
+        int id PK
+        int bet_id FK
+        int fixture_id FK
+        text market "e.g. match_winner"
+        text selection "e.g. home | draw | away"
+        numeric odds_decimal
+        text result "pending | won | lost | void"
+        timestamptz settled_at
+    }
 ```
 
 ## Design decisions worth remembering
@@ -262,12 +287,28 @@ erDiagram
   it populates this column — but only for Premier League players (FPL has
   no Championship data). Championship squads stay empty until lineups are
   backfilled; a known, documented gap, not a bug in the dashboard endpoint.
-- **No `bets` table yet.** PHASES.md schedules the betting tracker at
-  Phase 6. It'll look roughly like
-  `bets(id, fixture_id, market, selection, odds_decimal, stake, result, placed_at, settled_at)`
-  — deliberately with **no `user_id`**, since CLAUDE.md describes this as a
-  single-user personal tracker throughout, not "waiting on Phase 9 auth."
-  Add a `user_id` later only if that assumption changes.
+- **`users`/`bets`/`bet_legs`**, added Phase 6. Originally designed
+  single-user with no `user_id` at all (see git history); revised
+  mid-Phase-6 once real multi-user login was actually wanted, pulling
+  Phase 9's auth work forward rather than building it twice.
+  `bets(id, user_id FK, stake, placed_at)` is just the container — who
+  placed it, how much. The picks themselves live in
+  `bet_legs(id, bet_id FK, fixture_id FK, market, selection, odds_decimal,
+  result, settled_at)`, one row per leg: a straight bet is a bet with
+  exactly one leg, a parlay has several. `bets` deliberately has **no**
+  `result`, `odds_decimal`, or `settled_at` column — the overall result,
+  combined odds, and payout are *derived* from the legs at query time
+  (any lost leg loses the whole bet; a void leg is dropped from the
+  combined price, same rule a real sportsbook uses), not stored
+  redundantly, the same "derive, don't duplicate" reasoning already behind
+  `team_fixture_results` being a view rather than a table. `market`/
+  `selection` stay free text (mirroring `fixture_odds`'s `market`/`outcome`
+  shape) so a new bet type never needs a migration. `result` is a Postgres
+  `CHECK` constraint, not a foreign-keyed lookup table — four fixed values
+  (`pending`/`won`/`lost`/`void`) that never grow, unlike `market`/
+  `selection`. `users.password_hash` is a bcrypt hash, never a plaintext
+  password — one-way by design, verified at login via `bcrypt.compare`,
+  never decrypted.
 - **Migrations are plain SQL** (`backend/migrations/*.sql`, run via
   `node-pg-migrate`), not an ORM's schema DSL. The point of this phase is
   to actually read and write real DDL, not have it generated — `.sql`-mode

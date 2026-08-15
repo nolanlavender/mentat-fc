@@ -1084,3 +1084,163 @@ own `main()` even started. Fixed by gating it behind
 `import.meta.url === file://${process.argv[1]}` -- the ESM equivalent of
 Python's `if __name__ == "__main__":` -- so the file is safe to import for
 just its individual exported functions.
+
+## Phase 6 — Betting tracker (2026-08-14)
+
+### What "value" actually means
+
+Every decimal odds number implies a probability: `1/odds`. Add up all three
+match-winner outcomes' implied probabilities and they sum to *more* than
+100% -- the bookmaker's margin, the "overround" (the exact same
+renormalization already used in `model-service/app/data.py`'s market
+baseline for backtesting). A bet has **value** when your own probability
+estimate for an outcome is meaningfully higher than what the odds imply --
+e.g. the model says 45%, the odds you got imply 35%. That gap is the actual
+edge a personal model gives you over betting on instinct: any single bet's
+outcome is luck either way, but making value bets consistently is what
+should show up as positive ROI over a large enough sample. This is also
+*why* the phase's checklist wants the model's prediction sitting right next
+to a logged bet -- that comparison, not just recording wins and losses, is
+the actual point of the feature.
+
+### Schema: free text over enums, again
+
+`bets.market`/`bets.selection` follow the same shape as `fixture_odds`'s
+`market`/`outcome` columns from Phase 1 -- plain text, not a Postgres enum
+or a foreign-keyed lookup table. A new bet type (an Asian handicap, an
+over/under line, a player prop) is then just a new string value the
+frontend knows how to render, never a migration. `result`, by contrast, got
+a `CHECK` constraint (`pending`/`won`/`lost`/`void`) -- those four values
+are closed and never grow, the opposite situation from `market`/`selection`,
+so the tradeoff runs the other way: a `CHECK` catches a typo'd result at
+insert time for free, which an open text column wouldn't.
+
+Deliberately **no `user_id`** column -- `docs/CLAUDE.md` describes the
+betting tracker as a single-user personal tracker throughout, not a
+"waiting on Phase 9 auth" placeholder. `docs/erd.md` already had this
+sketched out since Phase 1; Phase 6 just built it.
+
+### Deferred: live market odds (The Odds API)
+
+`docs/CLAUDE.md` names The Odds API as the intended live-odds source, but
+integrating it got deliberately deferred this phase after weighing it out:
+when you log a bet, you already know the odds you got -- you just placed
+it. So the comparison that actually matters day-to-day is *your bet's own
+odds vs. the model's probability*, which needs nothing beyond what's
+already in the `bets` row. A live odds feed would matter for a different
+feature -- shopping for the best line *before* placing a bet -- which
+wasn't asked for and would add a new $29/mo-tier API, its own caching
+design, and rate-limit handling for a comparison the app doesn't need yet.
+Each `bets` API response still computes `edge` (model probability minus
+your own implied probability) so the value-betting comparison works today,
+just against your own logged odds rather than a live line.
+
+### Testing this for real, not just "no exception thrown"
+
+Backend: spun up a scratch local Postgres (`initdb`/`pg_ctl`, since this
+sandbox has no Docker -- same approach used throughout this project),
+restored the seed snapshot, ran the new migration on top of it, then
+exercised every endpoint with real `curl` calls against real fixtures from
+the snapshot -- not just checking success responses, but checking the
+actual numbers: a bet at odds 1.35 settled `won` returned exactly
+`20 * 1.35 = 27`, ROI summed correctly across a mixed won/lost pair
+(`-22.857%`, hand-verified), and a manually-inserted `model_predictions`
+row correctly flowed through to a bet's `modelProbability`/`edge` fields
+for the right outcome (`away`, matching `prob_away_win`). Validation paths
+(bad odds, bad stake, unknown fixture, unknown result, double-delete) all
+returned the expected 400/404s.
+
+Frontend: ran the actual Vite dev server against the actual Express
+backend in a real browser (Playwright, headless Chromium, this sandbox's
+pre-installed browser), not just a typecheck -- logged a real bet through
+the UI form, watched the record/ROI summary update after settling it, and
+confirmed zero console/page errors. One thing worth remembering for next
+time: a Playwright full-page screenshot taken immediately after a state
+update can catch the page mid-reflow and clip content that's actually
+fine in the DOM (a table cell's text looked truncated in one screenshot;
+`textContent()` on the actual element proved the data was correct all
+along) -- a lesson in trusting the DOM over a screenshot's exact pixels
+when the two disagree.
+
+### Revisiting the design: real auth and parlays (2026-08-15)
+
+The single-user, no-`user_id` design above was a deliberate call at the
+time, made explicit back in Phase 1 -- but "deliberate" isn't the same as
+"permanent." Once real multi-user login was actually wanted, and parlays
+came up as a real feature (not hypothetical), both got built into Phase 6
+directly rather than staying deferred. Two design threads worth recording:
+
+**Pulling Phase 9's auth forward, not duplicating it.** JWT auth was
+already on the roadmap for Phase 9; building it now instead of a
+Phase-6-specific shortcut means Phase 9 doesn't rebuild it later. What a
+JWT actually is: a signed, self-contained token (`header.payload.signature`,
+base64url) proving "this is user X" without a server-side session lookup on
+every request -- the payload (e.g. `{userId: 5, exp: ...}`) is plainly
+readable (it's encoding, not encryption), but unforgeable, because the
+signature is an HMAC of the payload using a secret only the server holds;
+changing one byte of the payload produces a completely different signature.
+Login exchanges a bcrypt-verified password for a signed token; every
+request after that carries it as `Authorization: Bearer <token>`, and a
+small `requireAuth` middleware verifies the signature and attaches
+`req.userId` before the route handler runs. The alternative, server-side
+sessions (a cookie + a sessions table looked up per request), is more
+instantly revocable but needs shared session storage -- JWT was picked
+because it needs nothing beyond Postgres, which the app already has.
+Deliberately scoped `requireAuth` to just the `/api/bets` router, not the
+whole API: bets are the only genuinely per-user data in this app so far
+(teams, fixtures, `/my-team` are shared/public reads) -- gating everything
+behind login would have been scope creep past what multi-user actually
+requires today.
+
+**Parlays forced a real schema rethink, not just new columns.** The
+original `bets` table had `market`/`selection`/`odds_decimal`/`fixture_id`
+directly on it -- one pick per bet, by construction. A parlay is a
+different shape: one bet, several picks, a combined price, and a result
+that only resolves once every pick does. Rather than bolt on a
+`bet_type`/`parent_bet_id` special case, `bets` got split into a thin
+container (`id`, `user_id`, `stake`, `placed_at`) and a new `bet_legs`
+table holding the actual picks -- a straight bet is simply a bet with one
+leg, not a separate code path from a parlay. This is the same "unify the
+single case into the general case" move as treating a scalar as a
+one-element array elsewhere in programming: it means `createBet` and the
+settle/list logic only have one shape to handle, not two. Since the
+original single-table `bets` migration hadn't been run anywhere but a
+disposable scratch database (nothing shipped to the real Neon DB yet), it
+was safe to directly edit/renumber the unmerged migration files rather
+than layer an `ALTER TABLE` on top -- a real, deliberate exception to
+"migrations are append-only," justified specifically by nothing external
+depending on the old shape yet.
+
+Overall result and combined odds are **derived from the legs, not
+stored** -- the same reasoning already used for `team_fixture_results` as
+a view instead of a stored table back in Phase 1. Rules, matching how a
+real sportsbook settles an accumulator: any leg that loses fails the whole
+bet; any leg still pending keeps the whole bet pending; a *void* leg (the
+match was postponed, a market got scrapped, etc.) is dropped entirely --
+removed from both the combined odds calculation and the required-to-win
+set -- so a 3-leg parlay with one void leg becomes, in effect, a 2-leg
+parlay. If every leg is void, the whole bet is void (stake returned, no
+profit). The model-vs-market "edge" comparison generalizes to parlays by
+taking the *product* of each non-void leg's own model probability --
+which assumes the legs' outcomes are statistically independent. That's a
+real, named simplification, not strictly true (two matches on the same
+day can be weakly correlated by things like weather or refereeing
+tendencies league-wide), but it's the standard approach and worth stating
+plainly rather than quietly baking in.
+
+**Verified for real again, not just typechecked:** the full flow --
+register, duplicate-email rejection, wrong-password rejection, JWT
+issuance, `requireAuth` blocking unauthenticated requests, parlay combined
+odds (`1.90 x 2.50 = 4.75`), void-leg exclusion recalculating combined
+odds down to `1.90` and the model-probability product down to a single
+leg's value, cross-user isolation (a second user probing the first user's
+bet/leg ids gets a 404, not a 403 -- doesn't even confirm the id exists),
+and the season/team breakdown filters -- all against a real scratch
+Postgres via `curl`, plus a real registered-user session through the
+actual UI in headless Chromium (register -> build a 2-leg parlay -> settle
+both legs -> watch the record/ROI summary update to 1-0, +375% ROI, exact
+match for `stake x combinedOdds`). One real UX bug caught by that browser
+run and fixed before merging: the fixture picker didn't exclude fixtures
+already added as a leg, so building a multi-leg parlay could silently
+re-offer the same fixture and trip the duplicate-leg guard -- filtering
+already-added fixtures out of the dropdown fixed it.
