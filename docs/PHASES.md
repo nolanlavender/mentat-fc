@@ -311,6 +311,26 @@ choice rather than introducing a new ML paradigm.
       pure CSS/typography pass. Verified in an actual browser, both light
       and dark, not just typechecked -- screenshotted 4 real pages with
       real seeded data via Playwright before calling this done
+- [x] Whitespace fix + team logos/player headshots -- built 2026-08-15 as
+      two follow-up units to the design-system pass above. `.page`'s
+      max-width widened 720px -> 1080px (was leaving large dead margins on
+      wide viewports); auth forms get a new `.page-narrow` modifier instead
+      of inheriting the wider width, so login/register stays compact and
+      centered rather than stranded on the left. Logos/headshots: added
+      `teams.logo_url` / `players.photo_url` (migration 022), wired capture
+      into the seed pipeline from fields API-Football's fixtures/lineups/
+      fixtures-players responses already return (zero extra API calls),
+      threaded both through every backend service that returns a team or
+      player (teams, fixtures, fpl), and added `Crest`/`PlayerPhoto`
+      frontend components that render nothing -- not a broken-image icon --
+      when a URL is missing or fails to load, since API-Football's crest/
+      photo coverage is real but not universal outside the Premier League.
+      Verified three ways: a real scratch-Postgres round-trip through the
+      actual `getOrCreateTeam`/`upsertPlayerGoldenRecord` seed functions
+      (new team logo captured, existing logo preserved when a later call
+      has none, same for player photo), migration up/down/up, and real
+      Playwright screenshots (light + dark) showing a real crest, a missing
+      crest, and a deliberately-broken URL all rendering correctly.
 - [ ] Explain: what's worth testing vs not, test pyramid basics
 
 ## Phase 10 — Deployment & scaling plan

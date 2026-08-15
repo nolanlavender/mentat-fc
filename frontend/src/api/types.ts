@@ -7,6 +7,7 @@ export interface Team {
   id: number;
   name: string;
   shortName: string | null;
+  logoUrl: string | null;
 }
 
 export interface Prediction {
@@ -21,6 +22,7 @@ export interface Prediction {
 export interface ScorerPrediction {
   playerId: number;
   playerName: string;
+  playerPhotoUrl: string | null;
   teamId: number;
   expectedGoals: number;
   probScores: number;
@@ -32,8 +34,8 @@ export interface NextMatch {
   status: string;
   round: string | null;
   competitionName: string;
-  homeTeam: { id: number; name: string };
-  awayTeam: { id: number; name: string };
+  homeTeam: { id: number; name: string; logoUrl: string | null };
+  awayTeam: { id: number; name: string; logoUrl: string | null };
   prediction: Prediction | null;
 }
 
@@ -46,8 +48,8 @@ export interface FixtureSummary {
   awayScore: number | null;
   competitionName: string;
   seasonLabel: string;
-  homeTeam: { id: number; name: string };
-  awayTeam: { id: number; name: string };
+  homeTeam: { id: number; name: string; logoUrl: string | null };
+  awayTeam: { id: number; name: string; logoUrl: string | null };
   prediction: Prediction | null;
   topScorers: ScorerPrediction[];
 }
@@ -66,6 +68,7 @@ export interface SquadPlayer {
   id: number;
   fullName: string;
   position: string | null;
+  photoUrl: string | null;
 }
 
 export interface TeamDashboard {
@@ -80,7 +83,8 @@ export interface MyTeamPlayer {
   fplPlayerId: number;
   fullName: string;
   position: string | null;
-  team: { id: number; name: string } | null;
+  photoUrl: string | null;
+  team: { id: number; name: string; logoUrl: string | null } | null;
   squadPosition: number;
   multiplier: number;
   isCaptain: boolean;

@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { useFetch } from '../hooks/useFetch';
 import { apiUrl } from '../api/client';
 import type { Team } from '../api/types';
+import { Crest } from '../components/Crest';
 
 export function TeamListPage() {
   const { data: teams, loading, error } = useFetch<Team[]>(apiUrl('/api/teams'));
@@ -18,7 +19,10 @@ export function TeamListPage() {
         <ul className="team-list">
           {teams.map((team) => (
             <li key={team.id}>
-              <Link to={`/teams/${team.id}`}>{team.name}</Link>
+              <Link to={`/teams/${team.id}`}>
+                <Crest src={team.logoUrl} alt="" />
+                {team.name}
+              </Link>
             </li>
           ))}
         </ul>

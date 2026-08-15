@@ -55,6 +55,7 @@ erDiagram
         int id PK
         text name
         text short_name
+        text logo_url "from API-Football's fixtures/lineups responses"
         text natural_key UK "generated: md5(lower(trim(name)))"
         int external_api_football_id UK
         int external_fpl_id UK
@@ -65,6 +66,7 @@ erDiagram
         date date_of_birth
         text nationality
         text position
+        text photo_url "from API-Football's fixtures/players response"
         int current_team_id FK "from FPL, PL players only"
         text natural_key UK "generated: md5(name + date_of_birth)"
         int external_api_football_id UK
@@ -346,3 +348,15 @@ erDiagram
   version) for the same reason: backtesting needs history, not just the
   latest run. See `model-service/app/goal_scorer.py` and
   `docs/learning-log.md`'s Phase 7 entry for the full reasoning.
+- **`teams.logo_url` / `players.photo_url`** (2026-08-15) — sourced
+  entirely from API-Football's own responses (`teams.home/away.logo` on
+  the fixtures endpoint, `player.photo` on the fixtures/players endpoint),
+  both of which the seed pipeline already fetches for other reasons, so
+  capturing these two extra fields costs zero additional calls against the
+  daily API-Football budget. Deliberately not scraped from anywhere else:
+  API-Football is the licensed, already-paid-for source for this data, and
+  its coverage is real but not universal outside the Premier League, so
+  both columns are nullable and the frontend renders nothing (not a
+  broken-image icon) when a URL is missing or fails to load, the same
+  "degrade gracefully" pattern used for missing predictions/squad data
+  elsewhere in the app.

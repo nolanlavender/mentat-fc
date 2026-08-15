@@ -3,6 +3,7 @@ import { useFetch } from '../hooks/useFetch';
 import { apiUrl } from '../api/client';
 import type { TeamDashboard } from '../api/types';
 import { TeamSwitcher } from '../components/TeamSwitcher';
+import { Crest, PlayerPhoto } from '../components/Crest';
 
 export function TeamDashboardPage() {
   const { id } = useParams<{ id: string }>();
@@ -17,7 +18,10 @@ export function TeamDashboardPage() {
 
       {data && (
         <>
-          <h1>{data.team.name}</h1>
+          <h1 className="team-dashboard-heading">
+            <Crest src={data.team.logoUrl} alt="" size={36} />
+            {data.team.name}
+          </h1>
 
           {data.tablePosition && (
             <section>
@@ -36,8 +40,12 @@ export function TeamDashboardPage() {
             <h2>Next match</h2>
             {data.nextMatch ? (
               <>
-                <p>
-                  {data.nextMatch.homeTeam.name} vs {data.nextMatch.awayTeam.name} —{' '}
+                <p className="fixture-teams">
+                  <Crest src={data.nextMatch.homeTeam.logoUrl} alt="" />
+                  {data.nextMatch.homeTeam.name} vs
+                  <Crest src={data.nextMatch.awayTeam.logoUrl} alt="" />
+                  {data.nextMatch.awayTeam.name}
+                  {' — '}
                   {new Date(data.nextMatch.kickoffAt).toLocaleString()} ({data.nextMatch.competitionName})
                 </p>
                 {data.nextMatch.prediction ? (
@@ -63,6 +71,7 @@ export function TeamDashboardPage() {
               <ul className="squad-list">
                 {data.squad.map((player) => (
                   <li key={player.id}>
+                    <PlayerPhoto src={player.photoUrl} alt="" />
                     {player.fullName}
                     {player.position ? ` (${player.position})` : ''}
                   </li>

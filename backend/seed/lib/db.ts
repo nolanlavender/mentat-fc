@@ -90,15 +90,20 @@ export async function getOrCreateCompetitionSeason(
 // concurrently during a seed run, so caching here is safe, not just fast.
 const teamIdCache = new Map<string, number>();
 
-export async function getOrCreateTeam(pool: Pool, name: string): Promise<number> {
+// logoUrl is optional and only ever fills a gap (COALESCE), never
+// overwrites -- the fixtures-list call sees every team many times per
+// season, but teamIdCache means only the first sighting per process run
+// actually reaches this query, so there's no point re-sending it on every
+// cache hit.
+export async function getOrCreateTeam(pool: Pool, name: string, logoUrl?: string): Promise<number> {
   const cached = teamIdCache.get(name);
   if (cached !== undefined) return cached;
 
   const { rows } = await pool.query<{ id: number }>(
-    `INSERT INTO teams (name) VALUES ($1)
-     ON CONFLICT (natural_key) DO UPDATE SET name = teams.name
+    `INSERT INTO teams (name, logo_url) VALUES ($1, $2)
+     ON CONFLICT (natural_key) DO UPDATE SET name = teams.name, logo_url = COALESCE(teams.logo_url, EXCLUDED.logo_url)
      RETURNING id`,
-    [name],
+    [name, logoUrl ?? null],
   );
   teamIdCache.set(name, rows[0].id);
   return rows[0].id;
@@ -126,6 +131,7 @@ export interface PlayerInput {
   dateOfBirth?: string;
   nationality?: string;
   position?: string;
+  photoUrl?: string;
 }
 
 /**
@@ -179,9 +185,10 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
            date_of_birth = COALESCE(date_of_birth, $2),
            nationality = COALESCE($3, nationality),
            position = COALESCE($4, position),
-           external_fpl_id = COALESCE($5, external_fpl_id)
+           external_fpl_id = COALESCE($5, external_fpl_id),
+           photo_url = COALESCE(photo_url, $6)
          WHERE id = $1`,
-        [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null],
+        [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.photoUrl ?? null],
       );
       return id;
     }
@@ -189,15 +196,16 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
 
   if (p.dateOfBirth) {
     const { rows } = await pool.query<{ id: number }>(
-      `INSERT INTO players (full_name, date_of_birth, nationality, position, external_fpl_id, external_api_football_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO players (full_name, date_of_birth, nationality, position, external_fpl_id, external_api_football_id, photo_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (natural_key) DO UPDATE SET
          nationality = COALESCE(EXCLUDED.nationality, players.nationality),
          position = COALESCE(EXCLUDED.position, players.position),
          external_fpl_id = COALESCE(EXCLUDED.external_fpl_id, players.external_fpl_id),
-         external_api_football_id = COALESCE(EXCLUDED.external_api_football_id, players.external_api_football_id)
+         external_api_football_id = COALESCE(EXCLUDED.external_api_football_id, players.external_api_football_id),
+         photo_url = COALESCE(players.photo_url, EXCLUDED.photo_url)
        RETURNING id`,
-      [p.fullName, p.dateOfBirth, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null],
+      [p.fullName, p.dateOfBirth, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
     );
     return rows[0].id;
   }
@@ -211,22 +219,24 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
       `UPDATE players SET
          position = COALESCE($2, position),
          external_fpl_id = COALESCE($3, external_fpl_id),
-         external_api_football_id = COALESCE($4, external_api_football_id)
+         external_api_football_id = COALESCE($4, external_api_football_id),
+         photo_url = COALESCE(photo_url, $5)
        WHERE id = $1`,
-      [id, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null],
+      [id, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
     );
     return id;
   }
 
   const inserted = await pool.query<{ id: number }>(
-    `INSERT INTO players (full_name, nationality, position, external_fpl_id, external_api_football_id)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO players (full_name, nationality, position, external_fpl_id, external_api_football_id, photo_url)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (natural_key) DO UPDATE SET
        position = COALESCE(EXCLUDED.position, players.position),
        external_fpl_id = COALESCE(EXCLUDED.external_fpl_id, players.external_fpl_id),
-       external_api_football_id = COALESCE(EXCLUDED.external_api_football_id, players.external_api_football_id)
+       external_api_football_id = COALESCE(EXCLUDED.external_api_football_id, players.external_api_football_id),
+       photo_url = COALESCE(players.photo_url, EXCLUDED.photo_url)
      RETURNING id`,
-    [p.fullName, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null],
+    [p.fullName, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
   );
   return inserted.rows[0].id;
 }

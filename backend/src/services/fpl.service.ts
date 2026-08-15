@@ -63,7 +63,8 @@ export interface MyTeamPlayer {
   fplPlayerId: number;
   fullName: string;
   position: string | null;
-  team: { id: number; name: string } | null;
+  photoUrl: string | null;
+  team: { id: number; name: string; logoUrl: string | null } | null;
   squadPosition: number;
   multiplier: number;
   isCaptain: boolean;
@@ -125,7 +126,7 @@ export async function getMyTeam(): Promise<MyTeam> {
   // from seedFplBootstrap, no reason to ask FPL for that again here.
   const fplPlayerIds = picksData.picks.map((p) => p.element);
   const { rows: ourPlayers } = await pool.query(
-    `SELECT p.id, p.external_fpl_id, p.full_name, p.position, t.id AS team_id, t.name AS team_name
+    `SELECT p.id, p.external_fpl_id, p.full_name, p.position, p.photo_url, t.id AS team_id, t.name AS team_name, t.logo_url AS team_logo_url
      FROM players p
      LEFT JOIN teams t ON t.id = p.current_team_id
      WHERE p.external_fpl_id = ANY($1)`,
@@ -141,7 +142,8 @@ export async function getMyTeam(): Promise<MyTeam> {
         fplPlayerId: pick.element,
         fullName: row?.full_name ?? `Unknown player (FPL id ${pick.element})`,
         position: row?.position ?? null,
-        team: row?.team_id ? { id: row.team_id, name: row.team_name } : null,
+        photoUrl: row?.photo_url ?? null,
+        team: row?.team_id ? { id: row.team_id, name: row.team_name, logoUrl: row.team_logo_url ?? null } : null,
         squadPosition: pick.position,
         multiplier: pick.multiplier,
         isCaptain: pick.is_captain,

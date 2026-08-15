@@ -2341,3 +2341,76 @@ re-screenshotted the predictions page with `colorScheme: 'dark'` to
 confirm the dark-mode palette actually works, not just that it was
 written. Both held up: real contrast, real gold rule under headings in
 both themes, no broken layouts.
+
+## 2026-08-15 -- Whitespace fix, team logos, player headshots
+
+Two quick follow-ups from screenshots of the design-system pass above:
+the layout had a lot of dead space on a normal-width screen, and logos/
+headshots were explicitly deferred there as their own units. Both landed
+together.
+
+**The whitespace bug** was `.page`'s `max-width: 720px` -- reasonable for
+a single column of prose, but the team-list grid and the prediction rows
+both had real content that could use more width, and on anything wider
+than ~760px the page just left a huge empty margin on both sides. Widened
+to 1080px. The one thing that *would* have broken from a blanket widen:
+the login/register form uses an inline `maxWidth: 320` style deliberately
+(a wide text-input form looks bad), so simply widening `.page` would have
+left it stranded on the far left with a huge gap to its right instead of
+centered. Added a `.page-narrow` modifier class instead and applied it
+only to `LoginPage`, so the width choice is explicit per page rather than
+one global number trying to serve both a data-dense list page and a
+three-field form.
+
+**Team logos and player headshots**, the deferred work: this turned out
+to be a "wire up data already being paid for" problem, not a "go get new
+data" problem. API-Football's `/fixtures` response includes each team's
+crest URL directly on the `teams.home`/`teams.away` objects, and its
+`/fixtures/players` response includes each player's photo URL on the
+`player` object -- both endpoints the seed pipeline was already calling
+for lineups and player stats, so capturing two more fields off responses
+already in hand costs nothing against the daily API-Football budget. Two
+new nullable columns (`teams.logo_url`, `players.photo_url`, migration
+022) and both fields threaded through the existing golden-record upsert
+functions (`getOrCreateTeam` gained an optional `logoUrl` param;
+`upsertPlayerGoldenRecord`'s `PlayerInput` gained `photoUrl`) using the
+same `COALESCE(existing, new)` pattern every other enrichable field on
+those functions already uses -- a later sighting of a team/player without
+image data never blanks out a URL a previous sighting already captured.
+
+**Why nullable and not required**: API-Football's crest/photo coverage is
+real but not complete, especially outside the Premier League (same
+messiness already seen with lineup data on lower-profile competitions).
+Rather than have the frontend guess or show a broken-image icon when a
+URL is missing or 404s, built two small components (`Crest`,
+`PlayerPhoto`) that render nothing at all in either case -- a `useState`
+flag flipped by the `<img>`'s `onError` handler. This is the same
+degrade-gracefully instinct already used for missing predictions/squad
+data elsewhere in the app, just applied to images: absence is a normal,
+expected state, not an error to visibly complain about.
+
+**What got touched**: every backend service that returns a team or player
+object now threads the new columns through -- `teams.service` (team list,
+team-by-id, next-match home/away teams, squad players), `fixtures.service`
+(fixture list and fixture detail's home/away teams and top-scorer
+entries), and `fpl.service` (My Team's players and their current club).
+On the frontend: `TeamListPage`, `TeamDashboardPage`, `PredictionsPage`,
+and `MyTeamPage` all render crests/photos now, with the same graceful-
+absence behavior everywhere.
+
+**Verified three separate ways, not just "it typechecks"**: (1) a real
+scratch-Postgres round-trip calling the actual seed-pipeline functions
+directly (`getOrCreateTeam`/`upsertPlayerGoldenRecord`), confirming a new
+sighting captures a URL and a later sighting without one doesn't erase
+it; (2) the migration's up/down/up round-trip; (3) real Playwright
+screenshots, light and dark, showing a team with a real (data-URI, since
+this sandbox has no network access to the real API-Football) logo
+rendering correctly, a team with no logo rendering cleanly with no gap,
+and a team with a deliberately-broken logo URL falling back the same way
+as "no logo" rather than showing a broken-image glyph. The real API-
+Football field names (`teams.home.logo`, `player.photo`) are documented
+API-Football v3 response fields, not guessed, but still worth confirming
+against a real `npm run db:seed` run before fully trusting the frontend
+result -- unlike most of this project's verification, this one piece
+couldn't be checked against real API-Football data from inside this
+sandbox.

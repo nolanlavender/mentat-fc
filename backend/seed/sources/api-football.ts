@@ -136,7 +136,7 @@ interface ApiFootballFixturesResponse {
   response: Array<{
     fixture: { id: number; date: string; referee: string | null; venue: { name: string | null }; status: { short: string } };
     league: { round: string };
-    teams: { home: { id: number; name: string }; away: { id: number; name: string } };
+    teams: { home: { id: number; name: string; logo: string | null }; away: { id: number; name: string; logo: string | null } };
     goals: { home: number | null; away: number | null };
     score: { halftime: { home: number | null; away: number | null } };
   }>;
@@ -164,8 +164,8 @@ export async function seedApiFootballFixtures(pool: Pool, spec: CompetitionSeaso
   );
 
   for (const item of data.response) {
-    const homeTeamId = await getOrCreateTeam(pool, canonicalTeamName(item.teams.home.name));
-    const awayTeamId = await getOrCreateTeam(pool, canonicalTeamName(item.teams.away.name));
+    const homeTeamId = await getOrCreateTeam(pool, canonicalTeamName(item.teams.home.name), item.teams.home.logo ?? undefined);
+    const awayTeamId = await getOrCreateTeam(pool, canonicalTeamName(item.teams.away.name), item.teams.away.logo ?? undefined);
     const kickoffAt = new Date(item.fixture.date);
 
     await upsertFixture(pool, {
@@ -197,16 +197,16 @@ export async function seedApiFootballFixtures(pool: Pool, spec: CompetitionSeaso
 // so every array read from this response needs to tolerate null, not
 // assume the docs' happy-path shape.
 interface ApiFootballLineupEntry {
-  team: { id: number; name: string };
+  team: { id: number; name: string; logo?: string | null };
   startXI: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }> | null;
   substitutes: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }> | null;
 }
 
 interface ApiFootballPlayerStatsEntry {
-  team: { id: number; name: string };
+  team: { id: number; name: string; logo?: string | null };
   players:
     | Array<{
-        player: { id: number; name: string };
+        player: { id: number; name: string; photo?: string | null };
         statistics: Array<{
           games: { minutes: number | null; rating: string | null; position: string | null };
           shots: { total: number | null; on: number | null };
@@ -239,7 +239,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
   );
 
   for (const teamLineup of data.response) {
-    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name));
+    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name), teamLineup.team.logo ?? undefined);
 
     for (const { player } of teamLineup.startXI ?? []) {
       const playerId = await upsertPlayerGoldenRecord(pool, {
@@ -293,7 +293,7 @@ export async function seedApiFootballPlayerStats(pool: Pool, fixtureExternalId: 
   );
 
   for (const teamEntry of data.response) {
-    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name));
+    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name), teamEntry.team.logo ?? undefined);
 
     for (const { player, statistics } of teamEntry.players ?? []) {
       const stats = statistics[0]; // one fixture -> one stat block per player
@@ -303,6 +303,7 @@ export async function seedApiFootballPlayerStats(pool: Pool, fixtureExternalId: 
         externalApiFootballId: player.id,
         fullName: player.name,
         position: stats.games.position ?? undefined,
+        photoUrl: player.photo ?? undefined,
       });
 
       await upsertFixturePlayerStats(pool, {
@@ -400,7 +401,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
     if (fixtureId === undefined) continue; // the API only ever echoes back ids we asked for, but guard anyway
 
     for (const teamLineup of item.lineups ?? []) {
-      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name));
+      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name), teamLineup.team.logo ?? undefined);
 
       for (const { player } of teamLineup.startXI ?? []) {
         const playerId = await upsertPlayerGoldenRecord(pool, {
@@ -421,7 +422,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
     }
 
     for (const teamEntry of item.players ?? []) {
-      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name));
+      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name), teamEntry.team.logo ?? undefined);
 
       for (const { player, statistics } of teamEntry.players ?? []) {
         const stats = statistics[0]; // one fixture -> one stat block per player
@@ -431,6 +432,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
           externalApiFootballId: player.id,
           fullName: player.name,
           position: stats.games.position ?? undefined,
+          photoUrl: player.photo ?? undefined,
         });
 
         playerStatsRows.push({
