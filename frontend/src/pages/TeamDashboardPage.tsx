@@ -12,7 +12,7 @@ export function TeamDashboardPage() {
     <div className="page">
       <TeamSwitcher currentTeamId={id ? Number(id) : undefined} />
 
-      {loading && <p>Loading…</p>}
+      {loading && <p>Hang about…</p>}
       {error && <p className="error">Couldn't load this team: {error.message}</p>}
 
       {data && (
@@ -51,14 +51,14 @@ export function TeamDashboardPage() {
                 )}
               </>
             ) : (
-              <p>No upcoming fixture scheduled.</p>
+              <p>Nothing on the fixture list just yet.</p>
             )}
           </section>
 
           <section>
             <h2>Squad</h2>
             {data.squad.length === 0 ? (
-              <p>Squad data isn't available for this team yet.</p>
+              <p>No squad news in for this lot yet.</p>
             ) : (
               <ul className="squad-list">
                 {data.squad.map((player) => (
