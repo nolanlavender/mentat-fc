@@ -123,6 +123,53 @@ async function seedFaCupFixtures(): Promise<void> {
 }
 
 /**
+ * One-time catch-up, discovered for real 2026-08-15 by a verification
+ * query showing 5 of 7 historical competition-seasons with zero backfill
+ * candidates -- not "0 remaining because done", but "external_api_football_id
+ * was never set on a single one of these fixtures". seedApiFootballFixtures
+ * (the only thing that sets it) was only ever called for the *current*
+ * season (seedCurrentSeasonFixtureLists) and FA Cup (seedFaCupFixtures) --
+ * Premier League 2024/25, 2025/26 and all 3 Championship historical seasons
+ * were seeded purely from football-data.co.uk CSVs, which have no concept
+ * of an API-Football id at all. Without this, backfillLineupsForCompetitionSeason
+ * can never see those fixtures as candidates, no matter how many times it
+ * runs -- this isn't a data-availability gap like FA Cup's lower rounds,
+ * it's a real pipeline gap.
+ *
+ * Idempotent and cache-backed exactly like every other seedApiFootballFixtures
+ * call (upserts against the same natural key football-data.co.uk already
+ * used, enriching those rows rather than duplicating them), so safe to
+ * leave in the regular pipeline permanently even though it only ever does
+ * real work once per historical season.
+ */
+async function linkHistoricalSeasonsToApiFootball(): Promise<void> {
+  if (!process.env.API_FOOTBALL_KEY) return; // already logged by the caller
+
+  const historicalSeasonCodes = SEASON_CODES.slice(0, -1); // exclude current -- seedCurrentSeasonFixtureLists's job, refreshed every run
+  const leagues: Array<{ name: string; externalLeagueId: number }> = [
+    { name: 'Premier League', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.premierLeague },
+    { name: 'Championship', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.championship },
+  ];
+
+  for (const seasonCode of historicalSeasonCodes) {
+    const seasonLabel = `20${seasonCode.slice(0, 2)}/${seasonCode.slice(2, 4)}`;
+    const externalSeasonYear = Number(`20${seasonCode.slice(0, 2)}`);
+    for (const league of leagues) {
+      console.log(`Linking ${league.name} ${seasonLabel} fixtures to API-Football (attaching external ids for the lineup backfill)...`);
+      await seedApiFootballFixtures(pool, {
+        competitionName: league.name,
+        competitionType: 'league',
+        externalLeagueId: league.externalLeagueId,
+        seasonLabel,
+        externalSeasonYear,
+        seasonStart: `${externalSeasonYear}-08-01`,
+        seasonEnd: `${externalSeasonYear + 1}-06-30`,
+      });
+    }
+  }
+}
+
+/**
  * Exported so seed/backfill-lineups.ts can run just this stage on its own.
  * "Resume where it stopped" doesn't need a saved position or a --from flag:
  * backfillLineupsForCompetitionSeason (sources/api-football.ts) always
@@ -136,6 +183,8 @@ export async function backfillLineups(): Promise<void> {
     console.log('Skipping lineup + player-stats backfill (API_FOOTBALL_KEY not set).');
     return;
   }
+
+  await linkHistoricalSeasonsToApiFootball();
 
   const competitions: Array<{ name: string; type: 'league' | 'cup' }> = [
     { name: 'Premier League', type: 'league' },

@@ -14,6 +14,7 @@ import {
   upsertFixturePlayerStats,
   upsertFixturePlayerStatsBatch,
   upsertPlayerGoldenRecord,
+  markFixturesLineupsChecked,
   type FixturePlayerStatsInput,
 } from '../lib/db.js';
 
@@ -470,6 +471,22 @@ export async function seedApiFootballLineupsAndStatsBulk(
 
   await upsertFixtureLineupsBatch(pool, dedupedLineupRows);
   await upsertFixturePlayerStatsBatch(pool, dedupedPlayerStatsRows);
+
+  // Mark every fixture in this chunk as checked, win or lose -- a fixture
+  // that contributed zero rows (real, common for lower-tier FA Cup matches
+  // API-Football has no lineup data for at all) needs this exactly as much
+  // as one that succeeded, otherwise backfillLineupsForCompetitionSeason
+  // keeps re-attempting it forever. The caller only ever passes finished
+  // fixtures in here (see its status = 'finished' filter), so this can't
+  // wrongly mark a not-yet-played match as permanently unavailable.
+  const emptyFixtureCount = fixtures.length - new Set([...dedupedLineupRows.map((r) => r.fixtureId), ...dedupedPlayerStatsRows.map((r) => r.fixtureId)]).size;
+  if (emptyFixtureCount > 0) {
+    console.log(`${emptyFixtureCount}/${fixtures.length} fixture(s) in this chunk had no lineup/player-stats data available (marked checked, won't retry).`);
+  }
+  await markFixturesLineupsChecked(
+    pool,
+    fixtures.map((f) => f.fixtureId),
+  );
 }
 
 function dedupeByFixturePlayer<T extends { fixtureId: number; playerId: number }>(rows: T[], label: string): T[] {
@@ -502,6 +519,17 @@ function dedupeByFixturePlayer<T extends { fixtureId: number; playerId: number }
  * fetchCached's cache key is the joined id list, so a run that dies partway
  * through and gets rerun hits the same cache files instead of building
  * different 20-fixture groupings each time.
+ *
+ * status = 'finished' matters for more than "don't bother, nothing's
+ * happened yet": fetchCached's cache key is just the chunk's id list, with
+ * no expiry. A not-yet-played fixture bundled into a chunk today would get
+ * its (necessarily empty) lineup response cached under that id list
+ * forever -- so a rerun after the match is actually played could still
+ * read the stale pre-match cache file and never see the real data. Only
+ * ever considering finished fixtures means that situation can't arise: a
+ * fixture only enters a chunk once the match has actually happened, so
+ * whatever comes back is the real result, not a too-early snapshot.
+ * lineups_checked_at IS NULL is the other half -- see markFixturesLineupsChecked.
  */
 export async function backfillLineupsForCompetitionSeason(
   pool: Pool,
@@ -512,6 +540,8 @@ export async function backfillLineupsForCompetitionSeason(
      FROM fixtures f
      WHERE f.competition_season_id = $1
        AND f.external_api_football_id IS NOT NULL
+       AND f.status = 'finished'
+       AND f.lineups_checked_at IS NULL
        AND (
          NOT EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id)
          OR NOT EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id)

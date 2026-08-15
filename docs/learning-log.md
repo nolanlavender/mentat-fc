@@ -1869,3 +1869,86 @@ resumability from scratch."
   recognized as already done) and exactly **one** for FA Cup (the only
   competition still missing data), landing all 15 fixtures' lineups
   total.
+
+## "We're loaded" wasn't true -- a real verification query said so (2026-08-15)
+
+Asked "where do we go now, and how does this stay fresh daily" after the
+backfill looked finished. Ran the honest check instead of taking "the last
+run said 0 remaining" at face value -- a query grouping `fixtures` by
+competition/season and counting ones still missing lineups or player
+stats. The real result exposed two separate problems, not one:
+
+**Bug 1 -- most historical seasons were never linkable at all.** Premier
+League 2024/25, 2025/26 and all 3 Championship historical seasons didn't
+show up in the query's results *at all* -- not "0 missing", genuinely
+absent, because zero fixtures in those seasons had an
+`external_api_football_id`. Traced it in the actual code:
+`seedApiFootballFixtures` (the only thing that ever sets that column) was
+only ever called for the *current* season (`seedCurrentSeasonFixtureLists`)
+and FA Cup (`seedFaCupFixtures`) -- the 3 historical PL/Championship
+seasons were seeded purely from football-data.co.uk CSVs, which have no
+concept of an API-Football id. `backfillLineupsForCompetitionSeason`
+requires that column to be non-null before it'll even look at a fixture,
+so those seasons were structurally invisible to the whole backfill, not
+"done." Fixed with a new `linkHistoricalSeasonsToApiFootball` (`seed/index.ts`),
+run automatically at the start of `backfillLineups()` -- one cheap
+`seedApiFootballFixtures` call per historical PL/Championship season
+(6 total), idempotent and cache-backed like every other call of that
+function, so safe to leave in the pipeline permanently even though it only
+ever does real work once. Verified for real: seeded a fixture the exact
+way football-data.co.uk would (no external id at all), confirmed
+`backfillLineups()` both attached a real external id to it *and* backfilled
+its lineup data in the same run.
+
+**Bug 2 -- FA Cup's "0 remaining" didn't mean what it sounded like.**
+`backfillLineupsForCompetitionSeason` counted a fixture as done just for
+being *attempted* (`done += chunk.length`), not for actually landing rows
+in `fixture_lineups`/`fixture_player_stats` -- and a large share of FA
+Cup's early-round fixtures are non-league clubs API-Football has no
+lineup data for at all (confirmed earlier via `check-bulk-fixtures-endpoint.ts`).
+Every rerun re-attempted the same permanently-empty fixtures, and
+`remaining: 0` just meant "finished iterating the list captured at the
+start of this call," never re-checking whether those fixtures actually
+got data. Fixed with a new `fixtures.lineups_checked_at` column
+(migration `1701000000020`) and `markFixturesLineupsChecked`, set for
+every fixture in a processed chunk regardless of outcome -- the missing
+piece needed to tell "genuinely unavailable" apart from "not yet tried."
+
+**The subtle part: this column is only safe because of a second, related
+fix.** A fixture that hasn't been played yet legitimately has no lineup
+data too -- for a completely different reason (the match hasn't happened),
+one that should absolutely be retried once it has. Marking those the same
+way as a permanently-empty FA Cup match would be wrong. Worse, there was
+a real caching bug lurking here too: `callApiFootball`'s disk cache never
+expires, keyed only on the chunk's id list -- a not-yet-played fixture
+bundled into a chunk today would cache its (necessarily empty) response
+*forever*, so a rerun after the match is actually played could still read
+the stale pre-match cache file and never see the real result. Both
+problems share one fix: `backfillLineupsForCompetitionSeason`'s candidate
+query now requires `status = 'finished'`, so a fixture only ever enters a
+chunk (and only ever gets checked) once the match has actually happened --
+a not-yet-played fixture can never be marked and never gets a premature
+cache entry. Verified for real against a scratch Postgres: a finished
+fixture with genuinely no lineup data got marked checked and correctly
+skipped on a second run (zero fetch calls); a scheduled fixture in the
+same test never got touched or marked at all, confirmed it stays a real
+candidate.
+
+**Then, the actual daily-refresh question.** The design already existed
+(`docs/architecture.md`'s "Keeping data current," written in Phase 1) but
+was never built -- "premature before something reads the data" was true
+then, isn't now. Built `backend/scripts/daily-refresh.sh`: refreshes
+current-season fixtures, backfills newly-finished ones' lineups (order
+matters -- the backfill only sees `status = 'finished'` fixtures, so the
+fixture refresh has to run first), then refits the Dixon-Coles model on
+the fresh data. Wired to local `cron`/`launchd` rather than GitHub
+Actions, since the app isn't deployed yet (that's still Phase 10, same
+commands, different scheduler). football-data.co.uk and FPL bootstrap are
+deliberately left out of the daily job -- the former never has anything
+new to say about a match that's already been played, and the latter
+changes slowly enough that a manual `npm run db:seed` rerun covers it.
+
+Every fix here got the same treatment as the earlier crash fixes: verified
+against a real scratch Postgres with fetches shaped like the real,
+confirmed data (not just typechecked), not assumed correct because the
+code "looked right."

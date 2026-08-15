@@ -67,35 +67,40 @@ Notes:
   request handler reaches out to a third party directly, and it's
   deliberate, not a crack in the pattern.
 
-## Keeping data current (designed in Phase 1, built in Phase 2)
+## Keeping data current (designed in Phase 1, built locally 2026-08-15)
 
-The seed pipeline (`backend/seed/`) populates historical data once. Once
-Phase 2's API exists and the app has an actual reason to see fresh data,
-something needs to keep the *current* season current: new fixtures as
-they're scheduled, results as they go final, FPL prices/ownership (which
-shift daily in-season). This is deliberately not built yet — a refresh job
-with nothing reading its output is premature — but the shape is settled:
+The seed pipeline (`backend/seed/`) populates historical data once, but the
+*current* season keeps moving: new fixtures get scheduled, results go
+final, and the model's predictions go stale without a refit. This is now
+built locally, not just designed:
 
 - **No new fetching logic needed.** Every seed source module already does
   idempotent upserts (`ON CONFLICT ... DO UPDATE`), so "refresh" is just
   rerunning the existing functions scoped to the *current* competition-season
   only, instead of all 3 historical seasons:
-  - `seedFootballDataSeason` for the current PL/Championship season (results
-    + odds go final match by match).
-  - `seedFplBootstrap` — always current-season by nature of what FPL is.
   - `seedApiFootballFixtures` for the current competition-season (one cheap
-    call, picks up newly scheduled/completed fixtures) followed by
-    `backfillLineupsForCompetitionSeason` — already resumable, and already
-    skips fixtures that haven't changed, so pointing it at "this week's
-    matches" instead of "3 years of history" is the same function, smaller
-    input.
-- **Scheduling**: locally, a cron entry or manual periodic run is enough.
-  Once deployed (Phase 10), this is the same pattern as the model service's
-  scheduled batch job — a GitHub Actions scheduled workflow, not a new
-  architectural concept.
-- **What this explicitly doesn't cover yet**: live/in-play score updates
-  (this app is not building a live-score ticker) and live betting odds
-  (Phase 6, The Odds API, a separate concern from historical odds).
+    call, picks up newly scheduled/completed fixtures and updates `status`)
+    followed by `backfillLineupsForCompetitionSeason` — already resumable,
+    and now only ever considers `status = 'finished'` fixtures, so a match
+    that went final since the last run becomes a real backfill candidate
+    the moment its status is refreshed.
+  - `python -m app.train` (model-service) refits Dixon-Coles on the fresh
+    data and writes new predictions.
+  - football-data.co.uk and FPL bootstrap are *not* part of the daily
+    refresh — football-data.co.uk's CSV only ever reflects matches already
+    played (nothing "current" to re-pull daily) and FPL's bootstrap-static
+    changes slowly enough that a manual `npm run db:seed` rerun covers it.
+- **`backend/scripts/daily-refresh.sh`** runs `npm run db:seed:current-season`
+  → `npm run db:seed:backfill-lineups` → `python -m app.train`, in that
+  order (order matters: the backfill only sees a fixture as a candidate
+  once its status says `finished`, so the fixture-list refresh has to run
+  first). Wired into the local machine's `cron`/`launchd` (see the script's
+  header comment for setup) rather than GitHub Actions, since the app isn't
+  deployed yet — Phase 10 replaces this with the equivalent scheduled
+  workflow once it is, same commands, different scheduler.
+- **What this explicitly doesn't cover**: live/in-play score updates (this
+  app is not building a live-score ticker) and live betting odds (Phase 6,
+  The Odds API, a separate concern from historical odds).
 
 ## Local development
 

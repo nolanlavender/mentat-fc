@@ -643,6 +643,22 @@ export async function upsertFixturePlayerStatsBatch(pool: Pool, entries: Fixture
   );
 }
 
+/**
+ * Records "we asked API-Football about these fixtures' lineups/stats" --
+ * regardless of whether the response actually had any rows to write.
+ * Without this, backfillLineupsForCompetitionSeason's "still missing"
+ * query has no way to tell "genuinely no data available" (a real, common
+ * outcome for lower-tier FA Cup matches) apart from "haven't tried yet",
+ * so every rerun re-attempts the same permanently-empty fixtures forever.
+ * Only ever called for fixtures already confirmed status = 'finished' by
+ * the caller -- marking a not-yet-played fixture here would wrongly make
+ * it look permanently unavailable instead of "ask again once it's played".
+ */
+export async function markFixturesLineupsChecked(pool: Pool, fixtureIds: number[]): Promise<void> {
+  if (fixtureIds.length === 0) return;
+  await pool.query(`UPDATE fixtures SET lineups_checked_at = now() WHERE id = ANY($1::int[])`, [fixtureIds]);
+}
+
 export interface FplPlayerGameweekStatsInput {
   playerId: number;
   gameweekId: number;
