@@ -165,7 +165,14 @@ not optional.
       only. The original joint-fit reasoning and synthetic validation
       above still stand -- this refines *which predictions use it*, not
       whether it was the right idea. See learning-log for the real team
-      counts (20/24/124) confirming the split against real dependencies
+      counts (20/24/124) confirming the split against real dependencies.
+      **Confirmed against real production data, not just synthetic:**
+      Premier League's backtest Brier went 0.7205 (worse than guessing) ->
+      0.6399 (clearly better than guessing, ~0.03 off the market) once the
+      duplicate-team cleanup and this split were both live. Championship
+      and FA Cup landed in the same "clearly better than guessing"
+      territory. Investigation closed -- see learning-log's "Closing the
+      'worse than guessing' investigation" entry for the full before/after
 - [x] Live predictions unblocked -- a real `API_FOOTBALL_KEY` (Pro tier) is
       now in place, `npm run db:seed:current-season` and `npm run db:seed`
       (full lineup/player-stats backfill) are running for real

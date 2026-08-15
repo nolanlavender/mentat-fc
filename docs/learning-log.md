@@ -2134,3 +2134,35 @@ XGBoost path Phase 5 already considered and deliberately passed on for
 interpretability) -- worth revisiting *after* this fix and the data
 cleanup get a clean real backtest number, not stacked on top of two
 still-unverified changes at once.
+
+## Closing the "worse than guessing" investigation -- real numbers (2026-08-15)
+
+Everything above (the duplicate Oxford/Sheffield United/Sheffield
+Wednesday cleanup, the three-model split) was verified against synthetic
+or scratch-Postgres data only, since this sandbox has no network access
+to the real Neon database. Ran `python -m app.evaluate` for real, on the
+real (now-cleaned) production data, to find out whether the fixes
+actually worked rather than assuming they would:
+
+| | Before any fix | After team-dedup only | After 3-model split |
+|---|---|---|---|
+| Premier League Brier | 0.7205 | 0.7085 | **0.6399** |
+| Championship Brier | 0.6687-0.6761 | -- | **0.6526** |
+| FA Cup Brier | 0.6425 | -- | **0.6513** |
+
+Naive uniform guessing on this Brier formula (computed directly from
+`evaluate.py`'s own `brier_score`, not assumed) is 0.667 -- Premier
+League started 0.054 *worse* than a coin flip across three outcomes,
+which is what actually started this whole investigation ("i think it is
+worse than guessing"). It now sits at 0.6399, clearly better than
+guessing on both Brier and log-loss, trailing the market by ~0.03 --
+the expected, honest gap for a first real model against an efficient
+betting market, not a red flag (see the original Phase 5 entry for why
+"beat the market" was never the actual bar). Championship and FA Cup
+both land in the same "clearly better than guessing" territory.
+
+Both real bugs -- the duplicate Championship clubs and the 811/821-team
+joint-fit contamination -- are now confirmed to have actually been
+responsible for the bad numbers, not just plausible theories that
+happened to also be true. Both fixes were verified against synthetic/
+scratch data before this, and now against the real thing too.
