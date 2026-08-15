@@ -465,11 +465,15 @@ export async function upsertFixtureLineup(
  * One multi-row INSERT for every lineup row (startXI + substitutes, both
  * teams) coming out of a single bulk /fixtures?ids=... call -- up to 20
  * fixtures' worth (~800 rows) in one round-trip instead of one per row.
- * Safe against the same-row-twice ON CONFLICT restriction the odds batch
- * above already reasons about: a real player is either in the startXI or
- * the substitutes for a match, never both, so (fixture_id, player_id) can't
- * repeat within one fixture's rows, and fixture_id itself differs across
- * fixtures in the batch.
+ *
+ * Callers MUST dedupe by (fixture_id, player_id) before calling this --
+ * Postgres rejects a multi-row ON CONFLICT DO UPDATE outright if the same
+ * conflict target appears twice in one statement. The original assumption
+ * here ("a player is either starting or a sub, never both, so this can't
+ * happen") was real-world-wrong: API-Football has been observed repeating
+ * a player within one fixture's lineups[] on at least one messy
+ * lower-profile competition. See sources/api-football.ts's
+ * dedupeByFixturePlayer, the caller responsible for this.
  */
 export async function upsertFixtureLineupsBatch(
   pool: Pool,
@@ -579,8 +583,8 @@ export async function upsertFixturePlayerStats(pool: Pool, s: FixturePlayerStats
  * Same batching as upsertFixtureLineupsBatch, for the fixture_player_stats
  * side of one bulk /fixtures?ids=... call -- one INSERT for up to ~800
  * rows (20 fixtures x ~40 players) instead of one round-trip per player.
- * Same (fixture_id, player_id) uniqueness reasoning applies: API-Football's
- * players[] array has one entry per player per fixture.
+ * Same caller-must-dedupe-first requirement applies (see
+ * upsertFixtureLineupsBatch's comment).
  */
 export async function upsertFixturePlayerStatsBatch(pool: Pool, entries: FixturePlayerStatsInput[]): Promise<void> {
   if (entries.length === 0) return;

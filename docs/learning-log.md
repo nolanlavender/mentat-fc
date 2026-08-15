@@ -1701,3 +1701,66 @@ against a real scratch Postgres:
   clear thrown error instead of hanging a 6th time. Before this fix,
   that scenario never would have thrown anything -- it just wouldn't
   have finished, ever.
+
+## API-Football repeats a player within one fixture's data (2026-08-15)
+
+Real crash, further into the same real backfill run: right after
+Championship 2026/27 finished cleanly (552 fixtures), the next chunk threw
+`ON CONFLICT DO UPDATE command cannot affect row a second time` from
+`upsertFixtureLineupsBatch`. This is exactly the Postgres restriction the
+batch-upsert design already had to reason about for `fixture_odds` --
+Postgres refuses a multi-row `ON CONFLICT DO UPDATE` outright if the same
+conflict target `(fixture_id, player_id)` shows up twice in one `INSERT`.
+The comment on `upsertFixtureLineupsBatch` had reasoned this couldn't
+happen ("a player is either starting or a sub, never both"), and real
+production data proved that reasoning wrong.
+
+Worked through what *could* actually produce two identical
+`(fixture_id, player_id)` rows in one chunk, ruling hypotheses out with
+what's actually enforced in the schema rather than guessing:
+- Two different fixtures landing on the same `fixture_id` in the chunk?
+  Impossible -- `fixtures.id` is the primary key, and the chunk-building
+  query selects distinct rows by it.
+- Two different *DB rows* secretly sharing the same
+  `external_api_football_id`, so the same fixture got requested twice in
+  one `ids=` call? Ruled out by `fixtures_external_api_football_id_idx`,
+  a real partial unique index (`migrations/1701000000006_create-fixtures.sql`)
+  that's been enforced on every insert since Phase 1, not just checked
+  once.
+- Two different real players colliding on the same golden-record id?
+  Ruled out the same way -- `players.external_api_football_id` is
+  `UNIQUE`, and `upsertPlayerGoldenRecord` already resolves by that id
+  first before any name-based matching.
+
+That leaves one real explanation: API-Football itself returned the same
+player twice within one fixture's `lineups[]` (or, same risk, `players[]`)
+-- observed here on a lower-profile competition (FA Cup), consistent with
+the messier data already seen there (the empty-lineups false-negative from
+the bulk-endpoint check). Free-tier and even paid sports-data feeds aren't
+guaranteed internally consistent; code that assumes a source is clean
+because it's *usually* clean is exactly what broke here.
+
+Fixed with a `dedupeByFixturePlayer` helper in `seed/sources/api-football.ts`,
+run on both the lineup rows and the player-stats rows right before their
+batch upserts -- last entry wins, and a duplicate is logged
+(`... repeated N (fixture, player) pair(s) ... deduped before upserting`)
+rather than silently dropped, so a future occurrence is visible instead of
+invisible. `upsertFixtureLineupsBatch`/`upsertFixturePlayerStatsBatch`'s
+comments in `lib/db.ts` were corrected to state the real contract: callers
+must dedupe first, this isn't guaranteed by the data.
+
+No cleanup needed on the already-run pipeline: the batch `INSERT` that
+crashed is one atomic statement, so the failing chunk's fixtures never got
+any lineup or player-stats rows written at all (not a partial write) --
+they're still correctly flagged as "missing" and will be retried
+automatically (and now successfully) on the next `npm run db:seed`.
+
+**Verified against the real failure, not a hypothetical:** reproduced the
+exact crash first -- a fake fixture with the same player id listed twice
+in one team's `startXI` -- against a real scratch Postgres on the
+pre-fix code, and got the identical error message
+(`ON CONFLICT DO UPDATE command cannot affect row a second time`),
+confirming the test actually exercises the real bug rather than a
+different one. Reran the same test against the fix: no crash, the
+duplicate got logged and deduped, and both the real player and the
+duplicated one landed as exactly one row each.
