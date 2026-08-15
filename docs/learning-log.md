@@ -1799,3 +1799,73 @@ real one (one team's `startXI`/`substitutes` both `null`, the whole
 fixture cleanly -- the team with null data contributes nothing (correctly
 skipped, not crashed), and the other team's real player still lands as
 expected.
+
+## Resuming the backfill without a saved position, and a dropped DB connection (2026-08-15)
+
+Two related things from the same real run. First, a new crash: `Error:
+Connection terminated unexpectedly` from `pg`, mid-backfill. Different
+class of failure from the last three (those were all API-Football data/
+network issues) -- this is the Postgres *client* connection itself dying.
+The likely mechanism: `backend/src/db/pool.ts`'s `Pool` had no TCP
+keepalive configured, and the backfill's own retry/backoff sleeps (API-
+Football's 429 handling, the fetch timeout fix) leave a checked-out pooled
+connection sitting idle for anywhere from seconds to minutes at a time --
+long enough for Neon's pooler or an intermediate network hop to silently
+close the socket. The next query on that connection then fails with
+exactly this error, with no warning beforehand.
+
+Two-part fix, matching the "prevent it, but also survive it" approach
+already used for the timeout fix:
+- `pool.ts` now sets `keepAlive: true` -- periodic TCP-level pings that
+  stop most idle connections from being silently dropped in the first
+  place. This is the actual fix for the root cause.
+- `backfillLineupsForCompetitionSeason` also wraps each chunk in a bounded
+  retry (reusing `MAX_CALL_RETRIES`) for connection-loss-shaped errors
+  (`Connection terminated`, `ECONNRESET`, `ETIMEDOUT`), same backoff shape
+  as the API-Football retry. Safe to retry the whole chunk wholesale:
+  `callApiFootball`'s disk cache means a retry doesn't re-spend an API
+  call, and every DB write inside is an idempotent upsert -- there's
+  nothing to double-write.
+
+Second, a real request: after a run interrupted three separate times in
+one session (data quirks, now a dropped connection), rerunning the *whole*
+`npm run db:seed` pipeline every time to get back to the backfill was
+wasteful -- football-data.co.uk and FPL bootstrap are cheap/cached
+rerunning, but not free, and every rerun risks hitting a *new* transient
+failure in an earlier stage that has nothing to do with what actually
+needs finishing.
+
+The interesting part: the actual resume mechanism already existed and
+didn't need building. `backfillLineupsForCompetitionSeason` always
+re-queries the database for fixtures still missing lineups/player stats
+before doing any work -- the database *is* the checkpoint, not something
+held in memory or a progress file. Calling it again after any interruption
+already only does the fixtures that are still missing, at zero extra cost,
+because of how it was written for the original resumable-backfill design
+in Phase 1. What was actually missing was a way to invoke *just* that
+stage -- `npm run db:seed` always runs the historical-CSV, FPL, and FA-Cup-
+fixture-list stages first. Fixed by exporting `backfillLineups` from
+`seed/index.ts` and adding `seed/backfill-lineups.ts`, a standalone entry
+point exactly mirroring the existing `seed/current-season.ts` pattern
+(same idea: pull one stage out so it can run alone), wired up as
+`npm run db:seed:backfill-lineups`.
+
+No new flag, parameter, or saved position needed -- the fix is "let the
+DB-driven resume logic that already existed run on its own," not "build
+resumability from scratch."
+
+**Verified against real scenarios, not just typechecked:**
+- Reproduced the connection-drop crash for real: monkeypatched `pool.query`
+  to throw the exact `Connection terminated unexpectedly` message on one
+  specific call in the middle of a chunk's processing (not the outer
+  "what's missing" query), confirmed it retries and the chunk still
+  completes successfully against a real scratch Postgres.
+- Proved the resume behavior end to end: backfilled Premier League and
+  Championship for real (via `backfillLineupsForCompetitionSeason`
+  directly, simulating "the process stopped here"), left FA Cup
+  completely untouched, then called the same `backfillLineups()` a second
+  time -- exactly what the new entry point invokes. The second run made
+  **zero** real fetch calls for Premier League/Championship (correctly
+  recognized as already done) and exactly **one** for FA Cup (the only
+  competition still missing data), landing all 15 fixtures' lineups
+  total.

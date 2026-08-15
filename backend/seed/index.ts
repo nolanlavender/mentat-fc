@@ -122,7 +122,16 @@ async function seedFaCupFixtures(): Promise<void> {
   }
 }
 
-async function backfillLineups(): Promise<void> {
+/**
+ * Exported so seed/backfill-lineups.ts can run just this stage on its own.
+ * "Resume where it stopped" doesn't need a saved position or a --from flag:
+ * backfillLineupsForCompetitionSeason (sources/api-football.ts) always
+ * re-queries the DB for fixtures still missing lineups/player stats, so
+ * calling this again after any crash -- API-Football flakiness, a dropped
+ * DB connection, anything -- naturally skips everything already written
+ * and continues from there. The DB itself is the checkpoint.
+ */
+export async function backfillLineups(): Promise<void> {
   if (!process.env.API_FOOTBALL_KEY) {
     console.log('Skipping lineup + player-stats backfill (API_FOOTBALL_KEY not set).');
     return;
