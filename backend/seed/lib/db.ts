@@ -100,20 +100,61 @@ export interface PlayerInput {
  * One golden-record entry point for both sources, instead of a separate
  * upsert per external ID (which is what let the same real player get two
  * disconnected rows -- one from FPL, one from API-Football -- with no link
- * between them). players.natural_key (full name + date of birth, generated
- * column) is the merge target when we know a DOB.
+ * between them). Match priority, most reliable identifier first:
  *
- * When we don't know a DOB -- the normal case for a player only seen via
- * API-Football's lineup endpoint, which gives a name and shirt number but
- * not a birth date -- we reconcile by name against an existing row (e.g.
- * one FPL already seeded with a real DOB) before falling back to inserting
- * under the DOB-less natural_key. That fallback isn't perfect: two
- * genuinely different real players sharing an exact name and both missing
- * a DOB would incorrectly merge. Acceptable at Premier League/Championship
- * scale; revisit if FA Cup's lower-tier entrants make that collision
- * observably real.
+ * 1. external_api_football_id, if we have one -- a stable numeric id from
+ *    the source itself, so it's checked before any name-based logic. Two
+ *    different API-Football endpoints (lineups vs. player stats) don't
+ *    always spell the same player's name identically, which is exactly
+ *    what made this the right first check, not an optimization: without
+ *    it, the same real player calling in with two name spellings across
+ *    two endpoint calls for one fixture produced two INSERTs racing for
+ *    the same external id and a unique-constraint violation.
+ * 2. players.natural_key (full name + date of birth, generated column),
+ *    the merge target when we know a DOB -- normally an FPL-sourced call.
+ * 3. An exact case-insensitive name match against an existing row, for the
+ *    common case of a player only seen via API-Football's lineup endpoint
+ *    (a name and shirt number, no birth date) who's already in the table
+ *    from FPL with a real DOB. Falls back to inserting under a DOB-less
+ *    natural_key if nothing matches. Not perfect: two genuinely different
+ *    real players sharing an exact name and both missing a DOB (and
+ *    neither having an external_api_football_id yet) would incorrectly
+ *    merge. Acceptable at Premier League/Championship scale; revisit if
+ *    FA Cup's lower-tier entrants make that collision observably real.
  */
 export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Promise<number> {
+  // Check the reliable external id first, before any name-based matching.
+  // Real bug this fixed: API-Football's lineups endpoint and its
+  // fixtures/players (stats) endpoint don't always spell the same player's
+  // name identically (accents, abbreviations) -- the lineup call inserts
+  // the player under external_api_football_id X, then the stats call for
+  // the same fixture fails the name match, falls through to INSERT, and
+  // collides on players_external_api_football_id_key since it's genuinely
+  // the same real player. A numeric id from the source is more trustworthy
+  // than a name string from the same source, so it's checked first.
+  if (p.externalApiFootballId !== undefined) {
+    const existingById = await pool.query<{ id: number }>(`SELECT id FROM players WHERE external_api_football_id = $1`, [
+      p.externalApiFootballId,
+    ]);
+    if (existingById.rows[0]) {
+      const id = existingById.rows[0].id;
+      await pool.query(
+        // full_name intentionally left untouched -- whichever call created
+        // this row first set the canonical spelling (and natural_key is
+        // generated from it); a differently-formatted name from a later
+        // call enriches other fields but never overwrites the name.
+        `UPDATE players SET
+           date_of_birth = COALESCE(date_of_birth, $2),
+           nationality = COALESCE($3, nationality),
+           position = COALESCE($4, position),
+           external_fpl_id = COALESCE($5, external_fpl_id)
+         WHERE id = $1`,
+        [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null],
+      );
+      return id;
+    }
+  }
+
   if (p.dateOfBirth) {
     const { rows } = await pool.query<{ id: number }>(
       `INSERT INTO players (full_name, date_of_birth, nationality, position, external_fpl_id, external_api_football_id)
