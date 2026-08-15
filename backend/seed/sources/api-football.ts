@@ -443,8 +443,38 @@ export async function seedApiFootballLineupsAndStatsBulk(
     }
   }
 
-  await upsertFixtureLineupsBatch(pool, lineupRows);
-  await upsertFixturePlayerStatsBatch(pool, playerStatsRows);
+  // Real production data proved this wrong: a chunk crashed with Postgres's
+  // "ON CONFLICT DO UPDATE command cannot affect row a second time" --
+  // meaning the same (fixture_id, player_id) pair really did appear twice
+  // within one batch. The DB's unique constraints (fixtures.external_api_
+  // football_id, players.external_api_football_id) rule out this being two
+  // different fixtures or two different real players colliding; the
+  // remaining explanation is API-Football itself occasionally repeating a
+  // player within lineups[]/players[] for one fixture (seen so far only on
+  // lower-profile competitions, e.g. a messy FA Cup round). Deduping here
+  // -- last entry wins -- turns that from a hard crash into a harmless,
+  // logged no-op instead of assuming it can't happen.
+  const dedupedLineupRows = dedupeByFixturePlayer(lineupRows, 'fixture_lineups');
+  const dedupedPlayerStatsRows = dedupeByFixturePlayer(playerStatsRows, 'fixture_player_stats');
+
+  await upsertFixtureLineupsBatch(pool, dedupedLineupRows);
+  await upsertFixturePlayerStatsBatch(pool, dedupedPlayerStatsRows);
+}
+
+function dedupeByFixturePlayer<T extends { fixtureId: number; playerId: number }>(rows: T[], label: string): T[] {
+  const byKey = new Map<string, T>();
+  let duplicates = 0;
+  for (const row of rows) {
+    const key = `${row.fixtureId}:${row.playerId}`;
+    if (byKey.has(key)) duplicates++;
+    byKey.set(key, row); // last entry wins -- API-Football's own response order, not something we control
+  }
+  if (duplicates > 0) {
+    console.log(
+      `${label}: API-Football's response repeated ${duplicates} (fixture, player) pair(s) within one chunk -- deduped before upserting.`,
+    );
+  }
+  return [...byKey.values()];
 }
 
 /**
