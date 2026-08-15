@@ -1290,3 +1290,40 @@ script to run against *one* fixture before trusting a multi-day backfill
 -- this bug would otherwise have surfaced 1 fixture in either way, but
 finding it on fixture 1 instead of fixture 500 of a live backfill is the
 whole point of that ordering.
+
+## Upgraded to API-Football's Pro tier, added rate-limit retry (2026-08-15)
+
+Raised `DAILY_BUDGET` from 100 to 7,500/day to match a real Pro-tier
+account (confirmed on the api-sports.io dashboard, not assumed from
+memory of pricing pages -- pricing/limits are exactly the kind of thing
+that goes stale, so asking for the real number beat guessing).
+
+More important than the bigger number: the *daily* cap was never the only
+limit. Every tier also has a *per-minute* rate limit, and the backfill
+fires thousands of sequential requests -- at 7,500/day instead of 100,
+hitting that per-minute ceiling during a real run went from "basically
+never happens" to "will definitely happen eventually." Before this, a 429
+response wasn't handled specially at all -- it just threw the same generic
+`API-Football request failed: 429 ...` error as any other failure, which
+would crash the entire `npm run db:seed` process. Not catastrophic (the
+fetch-if-absent cache and the "still missing lineups/stats" backfill query
+mean a rerun just resumes where it left off), but a multi-week unattended
+backfill shouldn't need a human to notice a crash and manually restart it
+every time it gets rate-limited.
+
+Added a retry loop inside `callApiFootball`: on a 429, honor the
+`Retry-After` header if the response includes one, otherwise fall back to
+exponential backoff (1s, 2s, 4s, ...), up to 5 attempts before giving up
+for real. Deliberately placed *inside* the per-call cache/budget wrapper
+rather than around the whole backfill loop -- a retry is the same logical
+call arriving late, not a new one, so it shouldn't double-count against
+the daily budget tracker.
+
+Verified against the actual exported function, not a reimplementation of
+the retry logic in isolation: monkeypatched `globalThis.fetch` to return a
+429 with `retry-after: 1` on the first call and a real fixture payload on
+the second, called `seedApiFootballFixtures` for real against a scratch
+Postgres, and confirmed all of it -- exactly 2 fetch calls, elapsed time
+respected the 1-second `Retry-After` header, the budget counter only
+incremented once (the failed attempt didn't count), and the fixture data
+from the eventually-successful call landed correctly in Postgres.
