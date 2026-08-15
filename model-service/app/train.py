@@ -1,10 +1,10 @@
 """
-Batch job: fit a single joint Dixon-Coles model across every competition's
-finished matches, predict every upcoming (unplayed) fixture in each
-competition, write results to model_predictions. This is the scheduled
-batch-inference job described in docs/architecture.md -- run on a schedule
-(a GitHub Actions workflow once deployed, per Phase 10's plan), not called
-live from the backend API.
+Batch job: fit three Dixon-Coles models (Premier League, Championship, and
+one joint fit for FA Cup), predict every upcoming (unplayed) fixture in
+each competition, write results to model_predictions. This is the
+scheduled batch-inference job described in docs/architecture.md -- run on
+a schedule (a GitHub Actions workflow once deployed, per Phase 10's plan),
+not called live from the backend API.
 
 Usage: python -m app.train
 """
@@ -19,26 +19,28 @@ from app.dixon_coles import DixonColesModel
 
 MODEL_VERSION = "dixon-coles-v1"
 
-# All three fit together, not three separate per-competition fits. A
-# Premier League team's attack/defense numbers and a Championship team's
-# aren't comparable on their own -- each competition-only fit lands on an
-# arbitrary, independent scale (see the identifiability note in
-# dixon_coles.py). FA Cup fixtures are what make a *joint* fit meaningful:
-# they're the only matches where a Premier League side and a Championship
-# (or lower-tier) side play each other, so they're the actual data that
-# ties the two leagues' scales together. Without them, fitting everything
-# in one call would still be two disconnected, independently-arbitrary
-# scales wearing one shared home_advantage/rho -- the FA Cup matches are
-# the load-bearing part of this, not an incidental inclusion.
+# Revised 2026-08-15: originally one joint fit across all three
+# competitions, used for every prediction. Real data exposed the cost of
+# that: the joint fit's team count came back at 821 -- Premier League and
+# Championship are ~20-25 clubs each, so the overwhelming majority were
+# one-off FA Cup entrants from the Extra Preliminary Round upward, most of
+# them non-league clubs a Premier League team never plays and that have
+# almost no data of their own. Those ~800 near-unconstrained parameters
+# still pull on the fit's shared home_advantage/rho and the recentering
+# constant every team's attack/defense gets shifted by (see dixon_coles.py's
+# identifiability note) -- contaminating Premier League and Championship's
+# OWN predictions for no benefit, since cross-league comparability is only
+# ever needed for a cross-league prediction.
+#
+# The original reasoning for a joint fit was correct, just applied too
+# broadly: FA Cup fixtures really are the only matches where a Premier
+# League side and a Championship (or lower-tier) side play each other, so
+# they're genuinely necessary for predicting an FA Cup tie between two
+# sides from different divisions. A pure Premier-League-vs-Premier-League
+# or Championship-vs-Championship prediction never needs that connection at
+# all. So: two single-competition fits for Premier League and Championship
+# predictions, and the joint (all three) fit kept, but used only for FA Cup.
 JOINT_FIT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
-
-# Predictions get written for all three now that the joint fit makes FA Cup
-# comparisons meaningful -- fulfills the original Phase 5 intent (predict
-# FA Cup fixtures where both teams are PL/Championship sides) that a
-# single-competition fit couldn't support. The app's frontend still only
-# ever displays Premier League and Championship (see docs/CLAUDE.md's data
-# scope note); writing FA Cup predictions here doesn't change that, it just
-# makes them exist for whenever that's picked up.
 PREDICT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
 
 MIN_MATCHES_TO_FIT = 50  # below this, per-team parameters are too noisy to trust
@@ -108,6 +110,19 @@ def predict_for_competition(conn, model: DixonColesModel, competition_name: str)
     print(f"{competition_name}: wrote {predicted} predictions, skipped {skipped} (team not in training data).")
 
 
+def fit_and_report(matches, label: str) -> DixonColesModel | None:
+    if len(matches) < MIN_MATCHES_TO_FIT:
+        print(f"Only {len(matches)} finished matches for {label}, skipping (need {MIN_MATCHES_TO_FIT}+).")
+        return None
+    model = DixonColesModel()
+    model.fit(matches, half_life_days=HALF_LIFE_DAYS)
+    print(
+        f"{label} fit on {model.fitted_on} matches, {len(model.teams)} teams, "
+        f"home_advantage={model.home_advantage:.3f}, rho={model.rho:.4f}"
+    )
+    return model
+
+
 def main() -> None:
     conn = get_connection()
     try:
@@ -116,14 +131,26 @@ def main() -> None:
             print(f"Only {len(matches)} finished matches across {JOINT_FIT_COMPETITIONS}, skipping (need {MIN_MATCHES_TO_FIT}+).")
             return
 
-        model = DixonColesModel()
-        model.fit(matches, half_life_days=HALF_LIFE_DAYS)
-        print(
-            f"Joint fit on {model.fitted_on} matches across {', '.join(JOINT_FIT_COMPETITIONS)}, "
-            f"{len(model.teams)} teams, home_advantage={model.home_advantage:.3f}, rho={model.rho:.4f}"
-        )
+        pl_matches = matches[matches["competition_name"] == "Premier League"]
+        championship_matches = matches[matches["competition_name"] == "Championship"]
 
+        pl_model = fit_and_report(pl_matches, "Premier League")
+        championship_model = fit_and_report(championship_matches, "Championship")
+        # Joint fit reuses every competition's matches, including FA Cup's --
+        # it's the only one of the three that needs the cross-league
+        # connection, so it's the only one that gets predicted from this model.
+        joint_model = fit_and_report(matches, "Joint (Premier League + Championship + FA Cup, for FA Cup predictions)")
+
+        models_by_competition = {
+            "Premier League": pl_model,
+            "Championship": championship_model,
+            "FA Cup": joint_model,
+        }
         for competition_name in PREDICT_COMPETITIONS:
+            model = models_by_competition[competition_name]
+            if model is None:
+                print(f"{competition_name}: skipped (not enough matches to fit).")
+                continue
             predict_for_competition(conn, model, competition_name)
     finally:
         conn.close()

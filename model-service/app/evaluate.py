@@ -1,13 +1,16 @@
 """
 Backtest: split every competition's finished matches by date using one
-global cutoff, fit a single joint Dixon-Coles model (see app.train for why
-joint, not per-competition) on the earlier portion, predict the held-out
-later portion, score the model's predictions against what actually
-happened -- and against the market's own closing-odds-implied probabilities
-as a baseline, per competition. See docs/learning-log.md's Phase 5 entry
-for why "beat the market" isn't really the bar here; this is about finding
-out honestly where the model actually stands, which is the real point of
-this step.
+global cutoff, then -- matching app.train's real architecture (see its
+2026-08-15 revision note for why) -- fit three separate models on the
+earlier portion: Premier League alone, Championship alone, and one joint
+fit across all three competitions used only for FA Cup, since that's the
+only one of the three where cross-league comparability is actually needed.
+Predict the held-out later portion with the matching model, score against
+what actually happened -- and against the market's own closing-odds-
+implied probabilities as a baseline, per competition. See
+docs/learning-log.md's Phase 5 entry for why "beat the market" isn't
+really the bar here; this is about finding out honestly where the model
+actually stands, which is the real point of this step.
 
 Usage: python -m app.evaluate
 """
@@ -24,7 +27,6 @@ from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 
 FIT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
-REPORT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
 
 TEST_FRACTION = 0.2
 MIN_MATCHES_FOR_BACKTEST = 100
@@ -130,23 +132,47 @@ def main() -> None:
 
         # One global date cutoff across the joint dataset, not a separate
         # per-competition split -- matches came back ordered by kickoff_date
-        # from the query, so this is genuinely chronological. Using one cutoff
-        # means the train/test boundary means the same thing across all three
-        # competitions, matching how app.train's deployed joint fit actually
-        # works (one fit, one point in time), rather than three splits that
-        # each landed on a different real-world date.
+        # from the query, so this is genuinely chronological. Using one
+        # cutoff keeps the train/test boundary the same real-world date
+        # across all three competitions' backtests, even though each now
+        # gets its own model fit below.
         split_idx = int(len(matches) * (1 - TEST_FRACTION))
         cutoff_date = matches.iloc[split_idx]["kickoff_date"]
         train_matches = matches[matches["kickoff_date"] < cutoff_date]
         test_matches = matches[matches["kickoff_date"] >= cutoff_date]
 
-        model = DixonColesModel()
-        model.fit(train_matches, half_life_days=HALF_LIFE_DAYS)
-        print(f"Joint fit on {model.fitted_on} matches across {', '.join(FIT_COMPETITIONS)}, cutoff {cutoff_date}")
+        pl_train = train_matches[train_matches["competition_name"] == "Premier League"]
+        pl_model = DixonColesModel()
+        pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS)
+        print(f"Premier League fit on {pl_model.fitted_on} matches, {len(pl_model.teams)} teams, cutoff {cutoff_date}")
+        _predict_and_score(
+            pl_model, conn, "Premier League", test_matches[test_matches["competition_name"] == "Premier League"], len(pl_train)
+        )
 
-        for competition_name in REPORT_COMPETITIONS:
-            competition_test_matches = test_matches[test_matches["competition_name"] == competition_name]
-            _predict_and_score(model, conn, competition_name, competition_test_matches, len(train_matches))
+        championship_train = train_matches[train_matches["competition_name"] == "Championship"]
+        championship_model = DixonColesModel()
+        championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS)
+        print(f"Championship fit on {championship_model.fitted_on} matches, {len(championship_model.teams)} teams, cutoff {cutoff_date}")
+        _predict_and_score(
+            championship_model,
+            conn,
+            "Championship",
+            test_matches[test_matches["competition_name"] == "Championship"],
+            len(championship_train),
+        )
+
+        # Joint fit -- all three competitions' pre-cutoff matches -- used
+        # only for FA Cup, the one competition that actually needs
+        # cross-league comparability. See app.train's 2026-08-15 note.
+        joint_model = DixonColesModel()
+        joint_model.fit(train_matches, half_life_days=HALF_LIFE_DAYS)
+        print(
+            f"Joint fit (for FA Cup) on {joint_model.fitted_on} matches across {', '.join(FIT_COMPETITIONS)}, "
+            f"{len(joint_model.teams)} teams, cutoff {cutoff_date}"
+        )
+        _predict_and_score(
+            joint_model, conn, "FA Cup", test_matches[test_matches["competition_name"] == "FA Cup"], len(train_matches)
+        )
     finally:
         conn.close()
 

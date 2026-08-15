@@ -155,6 +155,17 @@ not optional.
       not a bug, since football-data.co.uk has no cup coverage). App still
       only *displays* Premier League/Championship; FA Cup predictions exist
       in the database now but aren't surfaced as a feature yet
+- [x] **Refined 2026-08-15:** the single joint fit above was applied too
+      broadly -- Premier League's own predictions were coming from a fit
+      contaminated by ~800 mostly one-off FA Cup entrants (non-league
+      clubs with almost no data), degrading its own backtest for a
+      cross-league connection Premier-League-vs-Premier-League predictions
+      never needed. Split into three fits: Premier League alone,
+      Championship alone, and the joint fit (unchanged) kept for FA Cup
+      only. The original joint-fit reasoning and synthetic validation
+      above still stand -- this refines *which predictions use it*, not
+      whether it was the right idea. See learning-log for the real team
+      counts (20/24/124) confirming the split against real dependencies
 - [x] Live predictions unblocked -- a real `API_FOOTBALL_KEY` (Pro tier) is
       now in place, `npm run db:seed:current-season` and `npm run db:seed`
       (full lineup/player-stats backfill) are running for real

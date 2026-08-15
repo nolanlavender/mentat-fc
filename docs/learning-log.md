@@ -2068,3 +2068,69 @@ not-yet-linked one, ran `backfillLineups()`, and confirmed zero fetch
 calls for the linked season while the unlinked one still got linked
 correctly -- the short-circuit doesn't just look right, it measurably
 changes what gets called.
+
+## Splitting the joint fit back into three models (2026-08-15)
+
+After the team-alias cleanup, a fresh `python -m app.train` printed
+`821 teams` for the joint fit -- Premier League and Championship combined
+are only ~44-45 real clubs, so the other ~776 were one-off FA Cup entrants
+(Extra Preliminary Round upward, mostly non-league clubs API-Football has
+almost no data for, confirmed back in the bulk-endpoint check). Premier
+League's backtest Brier was still worse than guessing (0.7085) even after
+the real duplicate-data bug was fixed, and that team count was the lead
+worth chasing.
+
+The original Phase 5/7 reasoning for a joint fit was sound and is still
+correct for what it was actually solving: FA Cup fixtures are the only
+matches where a Premier League side and a Championship side play each
+other, so they're genuinely necessary to make the two leagues'
+attack/defense scales comparable *for FA Cup predictions*. What didn't
+follow from that premise, but had been built that way anyway: every
+prediction, including pure Premier-League-vs-Premier-League and
+Championship-vs-Championship ones, was coming from that same contaminated
+fit. Those ~776 low-sample non-league parameters don't just sit inertly
+off to the side -- they pull on the fit's shared `home_advantage`/`rho`
+and the recentering constant every team's attack/defense gets shifted by
+(see `dixon_coles.py`'s identifiability note), degrading Premier League
+and Championship's own predictions for a connection those predictions
+never needed in the first place.
+
+Split `app.train`/`app.evaluate` into three fits: Premier League alone,
+Championship alone, and the joint (all three competitions) fit kept
+exactly as before but now used *only* for FA Cup. `evaluate.py`'s
+backtest was restructured to match -- same global date cutoff as before
+(one fair real-world time boundary across all three), but each
+competition's test set now gets predicted by its own matching model
+instead of one shared one, so the backtest actually measures what
+`app.train` deploys rather than a different, friendlier setup.
+
+**Verified against real dependencies, not just read for correctness:**
+this session's sandbox has no network access to Postgres or the real
+API sources, but `model-service/.venv` has real `psycopg`/`pandas`/`scipy`
+installed, so this got tested against a real (scratch) Postgres instance
+rather than just eyeballed. Seeded synthetic data specifically shaped to
+catch the bug this was fixing: 20 Premier League teams, 24 Championship
+teams, and 80 FA-Cup-only "minnow" teams that never play a PL/Championship
+side (mirroring the real contamination). `python -m app.train` confirmed
+the fix directly: the Premier League fit reported exactly 20 teams, the
+Championship fit exactly 24 -- zero minnow contamination -- while the
+joint fit reported 124 (20+24+80), correctly pulling in everyone since
+it's the one used for FA Cup. `python -m app.evaluate` ran cleanly
+end-to-end too, including a real edge case worth noting: because of this
+synthetic dataset's date layout, the joint model's *training* window
+happened to contain zero FA Cup matches, so it had no minnow parameters
+fitted at all -- the backtest correctly skipped predicting any FA Cup
+test match involving a minnow (`ValueError`, team not in training data)
+rather than crashing, and still scored the 10 held-out matches between
+already-known Premier League/Championship teams.
+
+Considered whether to add more raw inputs to the model at the same time
+(shots, corners, cards) -- deliberately didn't. Dixon-Coles has no
+mechanism to consume arbitrary covariates; it's a generative model of
+goal-scoring rates from historical goals alone, not a feature-based
+regression. Folding in shot/corner data for real would mean a different
+modeling approach entirely (an expected-goals-based target, or the
+XGBoost path Phase 5 already considered and deliberately passed on for
+interpretability) -- worth revisiting *after* this fix and the data
+cleanup get a clean real backtest number, not stacked on top of two
+still-unverified changes at once.

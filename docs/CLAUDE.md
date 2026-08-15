@@ -110,15 +110,23 @@ full player/lineup depth. What the app actually shows is narrower, but not
 PL-only:
 
 - **Team dashboards:** Premier League **and** Championship.
-- **Match predictions:** Premier League, Championship, **and FA Cup**, all
-  **fit as one joint model** — Dixon-Coles estimates every team's
-  attack/defense strength in a single fit across all three competitions'
-  results, using FA Cup fixtures specifically as the connecting data that
-  makes a Premier League team's numbers comparable to a Championship
-  team's (two independent single-competition fits can't do this — each
-  lands on its own arbitrary scale with no data tying them together; see
-  `docs/learning-log.md`'s Phase 5/7 entries for the full reasoning and a
-  synthetic validation of why). The frontend still only ever *displays*
+- **Match predictions:** Premier League, Championship, **and FA Cup**, via
+  **three Dixon-Coles fits, not one** (revised 2026-08-15 from the original
+  single-joint-model design) — Premier League and Championship each get
+  their own fit on just their own results, and a third joint fit across
+  all three competitions is used *only* for FA Cup predictions, since
+  that's the one competition where a Premier League side and a
+  Championship (or lower-tier) side actually play each other, making
+  cross-league comparability necessary. A pure Premier-League-vs-Premier-
+  League or Championship-vs-Championship prediction never needs that
+  connection, and the joint fit's ~800 mostly one-off FA Cup entrants
+  (non-league clubs API-Football has almost no data for) were measurably
+  hurting Premier League/Championship's own predictions by diluting the
+  fit with noise that had nothing to do with either league. See
+  `docs/learning-log.md`'s Phase 5/7 entries for the original joint-fit
+  reasoning and synthetic validation (still the right call for FA Cup),
+  and its 2026-08-15 entry for why splitting the rest back out was
+  correct, not a regression. The frontend still only ever *displays*
   Premier League and Championship — FA Cup predictions exist in
   `model_predictions` but aren't surfaced as an app feature yet, a
   deliberate scope boundary, not a data gap.
