@@ -18,6 +18,14 @@ export interface Prediction {
   predictedAwayGoals: number | null;
 }
 
+export interface ScorerPrediction {
+  playerId: number;
+  playerName: string;
+  teamId: number;
+  expectedGoals: number;
+  probScores: number;
+}
+
 export interface NextMatch {
   fixtureId: number;
   kickoffAt: string;
@@ -41,6 +49,7 @@ export interface FixtureSummary {
   homeTeam: { id: number; name: string };
   awayTeam: { id: number; name: string };
   prediction: Prediction | null;
+  topScorers: ScorerPrediction[];
 }
 
 export interface TablePosition {

@@ -257,10 +257,20 @@ choice rather than introducing a new ML paradigm.
       feed, so `minutes_share` is a historical-average proxy, not actual
       team news; per-player samples are far smaller/noisier than
       team-level ones, hence the reliability threshold
-- [ ] Surface in the app alongside match predictions -- deliberately not
-      done in this pass; predictions exist in the database (same pattern
-      as FA Cup match predictions in Phase 5) but the frontend doesn't
-      show them yet
+- [x] Surface in the app alongside match predictions -- `GET /api/fixtures`
+      and `GET /api/fixtures/:id` now embed each fixture's top 5 predicted
+      scorers (`player_goal_predictions` joined via a `LATERAL`
+      subquery, same pattern already used for `model_predictions`), and
+      the `/predictions` page shows the top 3 as a compact "Likely
+      scorers: Name (X%), ..." line under the match-outcome probabilities.
+      Kept to Premier League/Championship, same existing boundary as the
+      rest of the predictions page -- FA Cup goal-scorer predictions
+      exist in the database but still aren't surfaced, matching FA Cup
+      match predictions' own status. Verified in an actual browser (not
+      just typechecked): seeded a real prediction with a known top
+      scorer, loaded `/predictions` with Playwright, confirmed
+      "Likely scorers: Starman (32%), Fringe (2%)" rendered correctly
+      next to the match prediction it belongs to
 
 ## Phase 8 — Explainer, storylines, odds display
 - [ ] AI explainer feature: backend endpoint calling Groq API

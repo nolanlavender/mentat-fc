@@ -9,6 +9,16 @@ export interface PredictionSummary {
   predictedAwayGoals: number | null;
 }
 
+export interface ScorerPrediction {
+  playerId: number;
+  playerName: string;
+  teamId: number;
+  expectedGoals: number;
+  probScores: number;
+}
+
+const TOP_SCORERS_PER_FIXTURE = 5;
+
 export interface FixtureSummary {
   id: number;
   kickoffAt: string;
@@ -25,6 +35,12 @@ export interface FixtureSummary {
   // current-season fixture app.train hasn't predicted yet. Degrade
   // gracefully, same pattern as the rest of the app, not an error state.
   prediction: PredictionSummary | null;
+  // Empty, not null, when nothing's been predicted (a player-shares model
+  // that ran before both teams had enough appearance data, or app.train
+  // simply hasn't run for this fixture yet) -- there's no meaningful
+  // "no scorers exist" state to distinguish from "not predicted yet", so
+  // both just render as an empty list rather than needing a null check.
+  topScorers: ScorerPrediction[];
 }
 
 export interface ListFixturesFilters {
@@ -46,7 +62,8 @@ export async function listFixtures(filters: ListFixturesFilters): Promise<Fixtur
        ht.id AS home_team_id, ht.name AS home_team_name,
        at.id AS away_team_id, at.name AS away_team_name,
        mp.model_version, mp.prob_home_win, mp.prob_draw, mp.prob_away_win,
-       mp.predicted_home_goals, mp.predicted_away_goals
+       mp.predicted_home_goals, mp.predicted_away_goals,
+       COALESCE(scorers.top_scorers, '[]') AS top_scorers
      FROM fixtures f
      JOIN teams ht ON ht.id = f.home_team_id
      JOIN teams at ON at.id = f.away_team_id
@@ -60,6 +77,20 @@ export async function listFixtures(filters: ListFixturesFilters): Promise<Fixtur
        ORDER BY predicted_at DESC
        LIMIT 1
      ) mp ON true
+     LEFT JOIN LATERAL (
+       SELECT json_agg(top ORDER BY (top ->> 'probScores')::numeric DESC) AS top_scorers
+       FROM (
+         SELECT json_build_object(
+           'playerId', pgp.player_id, 'playerName', p.full_name, 'teamId', pgp.team_id,
+           'expectedGoals', pgp.expected_goals, 'probScores', pgp.prob_scores
+         ) AS top
+         FROM player_goal_predictions pgp
+         JOIN players p ON p.id = pgp.player_id
+         WHERE pgp.fixture_id = f.id
+         ORDER BY pgp.prob_scores DESC
+         LIMIT ${TOP_SCORERS_PER_FIXTURE}
+       ) ranked
+     ) scorers ON true
      WHERE ($1::text IS NULL OR c.name = $1)
        AND ($2::int IS NULL OR f.home_team_id = $2 OR f.away_team_id = $2)
        AND ($3::timestamptz IS NULL OR f.kickoff_at >= $3)
@@ -91,6 +122,18 @@ export async function listFixtures(filters: ListFixturesFilters): Promise<Fixtur
             predictedHomeGoals: r.predicted_home_goals === null ? null : Number(r.predicted_home_goals),
             predictedAwayGoals: r.predicted_away_goals === null ? null : Number(r.predicted_away_goals),
           },
+    topScorers: mapTopScorers(r.top_scorers),
+  }));
+}
+
+function mapTopScorers(raw: unknown): ScorerPrediction[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((s: any) => ({
+    playerId: s.playerId,
+    playerName: s.playerName,
+    teamId: s.teamId,
+    expectedGoals: Number(s.expectedGoals),
+    probScores: Number(s.probScores),
   }));
 }
 
@@ -140,7 +183,7 @@ export async function getFixtureById(id: number): Promise<FixtureDetail | undefi
   const f = fixtureResult.rows[0];
   if (!f) return undefined;
 
-  const [statsResult, oddsResult, predictionResult] = await Promise.all([
+  const [statsResult, oddsResult, predictionResult, scorersResult] = await Promise.all([
     pool.query(
       `SELECT team_id, is_home, shots, shots_on_target, corners, fouls, yellow_cards, red_cards, xg
        FROM fixture_team_stats WHERE fixture_id = $1`,
@@ -156,6 +199,15 @@ export async function getFixtureById(id: number): Promise<FixtureDetail | undefi
       `SELECT model_version, prob_home_win, prob_draw, prob_away_win, predicted_home_goals, predicted_away_goals
        FROM model_predictions WHERE fixture_id = $1
        ORDER BY predicted_at DESC LIMIT 1`,
+      [id],
+    ),
+    pool.query(
+      `SELECT pgp.player_id, p.full_name, pgp.team_id, pgp.expected_goals, pgp.prob_scores
+       FROM player_goal_predictions pgp
+       JOIN players p ON p.id = pgp.player_id
+       WHERE pgp.fixture_id = $1
+       ORDER BY pgp.prob_scores DESC
+       LIMIT ${TOP_SCORERS_PER_FIXTURE}`,
       [id],
     ),
   ]);
@@ -204,5 +256,12 @@ export async function getFixtureById(id: number): Promise<FixtureDetail | undefi
           predictedAwayGoals: p.predicted_away_goals === null ? null : Number(p.predicted_away_goals),
         }
       : null,
+    topScorers: scorersResult.rows.map((r) => ({
+      playerId: r.player_id,
+      playerName: r.full_name,
+      teamId: r.team_id,
+      expectedGoals: Number(r.expected_goals),
+      probScores: Number(r.prob_scores),
+    })),
   };
 }
