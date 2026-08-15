@@ -1471,3 +1471,67 @@ predictions (see `docs/CLAUDE.md`'s data scope note) -- FA Cup
 predictions now genuinely exist and are meaningful, but surfacing them as
 an actual feature is separate, not-yet-decided scope, not bundled into
 this fix.
+
+## Why `npm run db:seed` was so slow, and batching the writes (2026-08-15)
+
+Flagged as "seems really slow going into the db" while a real backfill was
+running against real Neon. Root cause, confirmed by reading the code
+rather than guessing: `seedFootballDataSeason` (the football-data.co.uk
+importer) issued one `pool.query` call *per row it wrote*, sequentially
+awaited, no batching at all. A single fixture writes 2 team lookups, 1
+fixture row, 2 team-stats rows, and ~30-77 odds rows (8 bookmakers x
+several markets x opening/closing snapshots -- 77 turned out to be the
+real number for a real 2023/24 Premier League fixture, higher than the
+~30-60 estimate in earlier docs). Every one of those is a separate network
+round-trip to a remote Postgres instance. Across all 380 Premier League
+fixtures in one season, that's **31,134 individual sequential round-trips
+for one file** -- and the full pipeline re-walks 6 season/competition
+combinations (Premier League x3, Championship x3) on every `npm run
+db:seed` run, whether or not anything actually changed, since the
+upserts are unconditional even when idempotent.
+
+Two independent fixes, both safe because they don't change *what* gets
+written, only *how many round-trips* it costs to write it:
+
+1. **In-memory team-id cache.** `getOrCreateTeam` hit the database on
+   every single call, but there are only ~20 distinct Premier League team
+   names -- it was resolving the same names over and over across 380
+   fixtures (2 lookups/fixture = 760 calls for 20 real answers). A
+   module-level `Map` cache, valid for the lifetime of one seed run (team
+   names don't change mid-run, and nothing else writes to `teams`
+   concurrently during a seed run), turns that into ~20 real lookups.
+2. **Batched multi-row INSERTs.** `upsertFixtureOddsBatch` and
+   `upsertFixtureTeamStatsBatch` collect all of one fixture's odds/stats
+   rows in memory first (pure JS, no DB calls), then write them in a
+   single `INSERT ... VALUES (...), (...), ... ON CONFLICT ...`
+   statement instead of one statement per row. Safe specifically because
+   no two rows built from one fixture's CSV row can ever target the same
+   `ON CONFLICT` key (verified against the actual bookmaker constant
+   lists: every bookmaker name is unique within its own market group, and
+   the three markets -- match_winner/over_under/asian_handicap -- never
+   share a market value) -- Postgres rejects a multi-row `ON CONFLICT DO
+   UPDATE` if two rows in the same statement would affect the same
+   existing row twice, so this needed checking, not assuming.
+
+**Measured, not estimated:** instrumented `pool.query` to count real
+calls against the actual cached 2023/24 Premier League CSV (a real file,
+not synthetic). Before: ~31,134 round-trips for that one file (740 of
+them redundant team lookups, the rest odds/stats). After: **1,164** --
+roughly a **27x reduction**. Reran the same file a second time to confirm
+idempotency held after the rewrite: identical row counts (380 fixtures,
+760 team-stats rows, 29,234 odds rows), no duplicates introduced.
+
+This sandbox's scratch Postgres runs on localhost, so wall-clock time
+here (about 2 seconds either way) doesn't reflect the real slowdown --
+the actual cost lives in per-round-trip network latency to a remote Neon
+instance, which this environment can't reproduce. But round-trip *count*
+is the number that actually predicts real-world wall-clock time on a
+remote database, and that dropped by the same ~27x regardless of what
+the per-round-trip latency happens to be. Deliberately didn't go further
+(e.g. batching across an entire season file into one statement instead
+of per-fixture, which would cut round-trips further but requires a
+riskier two-pass restructure -- inserting all fixtures first, then
+mapping their generated ids back to build dependent rows) -- per-fixture
+batching already gets the overwhelming majority of the win for a much
+smaller, more reviewable change to code that writes to a real production
+database.

@@ -1,5 +1,25 @@
 import type { Pool } from 'pg';
 
+// Builds "($1, $2, ...), ($3, $4, ...), ..." for a multi-row INSERT --
+// shared by the batch upserts below, which exist because seeding
+// football-data.co.uk originally issued one INSERT per odds row (~30-60
+// per fixture) and one per team-stats row (2 per fixture), each its own
+// network round-trip to a remote Postgres. For ~2,800 fixtures across
+// Premier League + Championship that's 100,000+ sequential round-trips --
+// real, measured seed latency, not a hypothetical. Collapsing a whole
+// fixture's odds/stats into one multi-row statement each cuts that to 2
+// round-trips per fixture instead of ~35-65.
+function buildValuesPlaceholders(rowCount: number, colCount: number): string {
+  const rows: string[] = [];
+  let paramIndex = 1;
+  for (let r = 0; r < rowCount; r++) {
+    const cols: string[] = [];
+    for (let c = 0; c < colCount; c++) cols.push(`$${paramIndex++}`);
+    rows.push(`(${cols.join(', ')})`);
+  }
+  return rows.join(', ');
+}
+
 export async function getOrCreateCompetition(
   pool: Pool,
   name: string,
@@ -62,13 +82,25 @@ export async function getOrCreateCompetitionSeason(
 // for "Manchester United" and lands on the same row, as long as
 // canonicalTeamName() has already resolved source-specific short names to
 // the canonical one before this is called.
+// Module-level, not per-call -- lives for the process's lifetime, which is
+// exactly one `npm run db:seed` run. Real seeding cost measured: getOrCreateTeam
+// was called ~2x per fixture (home + away), so ~5,600 round-trips for PL +
+// Championship alone, resolving the same ~50 distinct team names over and
+// over. Team names don't change mid-run and nothing else writes to `teams`
+// concurrently during a seed run, so caching here is safe, not just fast.
+const teamIdCache = new Map<string, number>();
+
 export async function getOrCreateTeam(pool: Pool, name: string): Promise<number> {
+  const cached = teamIdCache.get(name);
+  if (cached !== undefined) return cached;
+
   const { rows } = await pool.query<{ id: number }>(
     `INSERT INTO teams (name) VALUES ($1)
      ON CONFLICT (natural_key) DO UPDATE SET name = teams.name
      RETURNING id`,
     [name],
   );
+  teamIdCache.set(name, rows[0].id);
   return rows[0].id;
 }
 
@@ -319,6 +351,47 @@ export async function upsertFixtureTeamStats(
   );
 }
 
+/** One multi-row INSERT for both a fixture's team-stats rows (home + away) instead of two separate round-trips. */
+export async function upsertFixtureTeamStatsBatch(
+  pool: Pool,
+  entries: Array<{
+    fixtureId: number;
+    teamId: number;
+    isHome: boolean;
+    shots?: number;
+    shotsOnTarget?: number;
+    corners?: number;
+    fouls?: number;
+    yellowCards?: number;
+    redCards?: number;
+  }>,
+): Promise<void> {
+  if (entries.length === 0) return;
+  const params = entries.flatMap((s) => [
+    s.fixtureId,
+    s.teamId,
+    s.isHome,
+    s.shots ?? null,
+    s.shotsOnTarget ?? null,
+    s.corners ?? null,
+    s.fouls ?? null,
+    s.yellowCards ?? null,
+    s.redCards ?? null,
+  ]);
+  await pool.query(
+    `INSERT INTO fixture_team_stats (fixture_id, team_id, is_home, shots, shots_on_target, corners, fouls, yellow_cards, red_cards)
+     VALUES ${buildValuesPlaceholders(entries.length, 9)}
+     ON CONFLICT (fixture_id, team_id) DO UPDATE SET
+       shots = EXCLUDED.shots,
+       shots_on_target = EXCLUDED.shots_on_target,
+       corners = EXCLUDED.corners,
+       fouls = EXCLUDED.fouls,
+       yellow_cards = EXCLUDED.yellow_cards,
+       red_cards = EXCLUDED.red_cards`,
+    params,
+  );
+}
+
 export interface FixtureOddsInput {
   fixtureId: number;
   bookmaker: string;
@@ -338,6 +411,31 @@ export async function upsertFixtureOdds(pool: Pool, o: FixtureOddsInput): Promis
        price = EXCLUDED.price,
        recorded_at = now()`,
     [o.fixtureId, o.bookmaker, o.market, o.outcome, o.line, o.price, o.snapshotType, o.source],
+  );
+}
+
+/**
+ * One multi-row INSERT for an entire fixture's odds (~30-60 rows across 8
+ * bookmakers x several markets x opening/closing) instead of one
+ * round-trip per row. Safe against Postgres's "ON CONFLICT DO UPDATE
+ * command cannot affect row a second time" error -- that fires only if two
+ * rows in the same batch target the same conflict key
+ * (fixture_id, bookmaker, market, outcome, line, snapshot_type). Every
+ * bookmaker name is unique within its own market group in
+ * football-data-co-uk.ts's bookmaker constants, and match_winner/
+ * over_under/asian_handicap never share a market value with each other,
+ * so no two rows built from one fixture's CSV row can ever collide.
+ */
+export async function upsertFixtureOddsBatch(pool: Pool, rows: FixtureOddsInput[]): Promise<void> {
+  if (rows.length === 0) return;
+  const params = rows.flatMap((o) => [o.fixtureId, o.bookmaker, o.market, o.outcome, o.line, o.price, o.snapshotType, o.source]);
+  await pool.query(
+    `INSERT INTO fixture_odds (fixture_id, bookmaker, market, outcome, line, price, snapshot_type, source)
+     VALUES ${buildValuesPlaceholders(rows.length, 8)}
+     ON CONFLICT (fixture_id, bookmaker, market, outcome, line, snapshot_type) DO UPDATE SET
+       price = EXCLUDED.price,
+       recorded_at = now()`,
+    params,
   );
 }
 
