@@ -40,14 +40,27 @@ async function checkLeagueCoverage(leagueId: number, leagueName: string, season:
 }
 
 async function checkBulkFixturesEndpoint(): Promise<void> {
+  // Premier League specifically, not "earliest fixture in the whole DB" --
+  // that first attempt picked FA Cup Extra Preliminary Round fixtures
+  // between non-league clubs (the earliest matches by date across every
+  // competition), which API-Football almost certainly never tracks
+  // detailed lineups for regardless of endpoint. A fair test needs
+  // fixtures from a competition/tier already confirmed to have real depth
+  // (see check-lineup-depth.ts's result).
   const { rows } = await pool.query<{ external_api_football_id: number }>(
-    `SELECT external_api_football_id FROM fixtures
-     WHERE external_api_football_id IS NOT NULL
-     ORDER BY kickoff_date ASC
+    `SELECT f.external_api_football_id
+     FROM fixtures f
+     JOIN competition_seasons cs ON cs.id = f.competition_season_id
+     JOIN competitions c ON c.id = cs.competition_id
+     WHERE c.name = 'Premier League' AND f.external_api_football_id IS NOT NULL
+     ORDER BY f.kickoff_date ASC
      LIMIT 5`,
   );
   if (rows.length === 0) {
-    console.log('\nNo fixtures with an external_api_football_id in this database yet -- run check:lineup-depth or a fixture-list seed first.');
+    console.log(
+      '\nNo Premier League fixtures with an external_api_football_id in this database yet -- ' +
+        'run check:lineup-depth or a fixture-list seed first.',
+    );
     return;
   }
 
