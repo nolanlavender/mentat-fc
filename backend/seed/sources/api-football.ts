@@ -186,28 +186,39 @@ export async function seedApiFootballFixtures(pool: Pool, spec: CompetitionSeaso
   }
 }
 
+// startXI/substitutes/players typed as possibly null, not just possibly
+// empty -- confirmed real: a real FA Cup fixture came back with a team
+// lineup entry whose startXI was null rather than [], crashing the `for
+// (... of teamLineup.startXI)` loop with "is not iterable". Same messy-
+// data pattern already seen twice on lower-profile competitions (empty
+// lineups entirely, a repeated player) -- API-Football's coverage just
+// isn't uniformly complete once you're off Premier League/Championship,
+// so every array read from this response needs to tolerate null, not
+// assume the docs' happy-path shape.
 interface ApiFootballLineupEntry {
   team: { id: number; name: string };
-  startXI: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }>;
-  substitutes: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }>;
+  startXI: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }> | null;
+  substitutes: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }> | null;
 }
 
 interface ApiFootballPlayerStatsEntry {
   team: { id: number; name: string };
-  players: Array<{
-    player: { id: number; name: string };
-    statistics: Array<{
-      games: { minutes: number | null; rating: string | null; position: string | null };
-      shots: { total: number | null; on: number | null };
-      goals: { total: number | null; assists: number | null; saves: number | null };
-      passes: { total: number | null; accuracy: string | null };
-      tackles: { total: number | null; interceptions: number | null };
-      dribbles: { attempts: number | null; success: number | null };
-      fouls: { drawn: number | null; committed: number | null };
-      cards: { yellow: number | null; red: number | null };
-      penalty: { scored: number | null; missed: number | null };
-    }>;
-  }>;
+  players:
+    | Array<{
+        player: { id: number; name: string };
+        statistics: Array<{
+          games: { minutes: number | null; rating: string | null; position: string | null };
+          shots: { total: number | null; on: number | null };
+          goals: { total: number | null; assists: number | null; saves: number | null };
+          passes: { total: number | null; accuracy: string | null };
+          tackles: { total: number | null; interceptions: number | null };
+          dribbles: { attempts: number | null; success: number | null };
+          fouls: { drawn: number | null; committed: number | null };
+          cards: { yellow: number | null; red: number | null };
+          penalty: { scored: number | null; missed: number | null };
+        }>;
+      }>
+    | null;
 }
 
 interface ApiFootballLineupsResponse {
@@ -229,7 +240,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
   for (const teamLineup of data.response) {
     const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name));
 
-    for (const { player } of teamLineup.startXI) {
+    for (const { player } of teamLineup.startXI ?? []) {
       const playerId = await upsertPlayerGoldenRecord(pool, {
         externalApiFootballId: player.id,
         fullName: player.name,
@@ -245,7 +256,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
       });
     }
 
-    for (const { player } of teamLineup.substitutes) {
+    for (const { player } of teamLineup.substitutes ?? []) {
       const playerId = await upsertPlayerGoldenRecord(pool, {
         externalApiFootballId: player.id,
         fullName: player.name,
@@ -283,7 +294,7 @@ export async function seedApiFootballPlayerStats(pool: Pool, fixtureExternalId: 
   for (const teamEntry of data.response) {
     const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name));
 
-    for (const { player, statistics } of teamEntry.players) {
+    for (const { player, statistics } of teamEntry.players ?? []) {
       const stats = statistics[0]; // one fixture -> one stat block per player
       if (!stats) continue;
 
@@ -324,8 +335,8 @@ export async function seedApiFootballPlayerStats(pool: Pool, fixtureExternalId: 
 interface ApiFootballBulkFixturesResponse {
   response: Array<{
     fixture: { id: number };
-    lineups: ApiFootballLineupEntry[];
-    players: ApiFootballPlayerStatsEntry[];
+    lineups: ApiFootballLineupEntry[] | null;
+    players: ApiFootballPlayerStatsEntry[] | null;
   }>;
 }
 
@@ -381,10 +392,10 @@ export async function seedApiFootballLineupsAndStatsBulk(
     const fixtureId = fixtureIdByExternalId.get(item.fixture.id);
     if (fixtureId === undefined) continue; // the API only ever echoes back ids we asked for, but guard anyway
 
-    for (const teamLineup of item.lineups) {
+    for (const teamLineup of item.lineups ?? []) {
       const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name));
 
-      for (const { player } of teamLineup.startXI) {
+      for (const { player } of teamLineup.startXI ?? []) {
         const playerId = await upsertPlayerGoldenRecord(pool, {
           externalApiFootballId: player.id,
           fullName: player.name,
@@ -392,7 +403,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
         });
         lineupRows.push({ fixtureId, teamId, playerId, isStarting: true, shirtNumber: player.number ?? undefined, position: player.pos ?? undefined });
       }
-      for (const { player } of teamLineup.substitutes) {
+      for (const { player } of teamLineup.substitutes ?? []) {
         const playerId = await upsertPlayerGoldenRecord(pool, {
           externalApiFootballId: player.id,
           fullName: player.name,
@@ -402,10 +413,10 @@ export async function seedApiFootballLineupsAndStatsBulk(
       }
     }
 
-    for (const teamEntry of item.players) {
+    for (const teamEntry of item.players ?? []) {
       const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name));
 
-      for (const { player, statistics } of teamEntry.players) {
+      for (const { player, statistics } of teamEntry.players ?? []) {
         const stats = statistics[0]; // one fixture -> one stat block per player
         if (!stats) continue;
 
