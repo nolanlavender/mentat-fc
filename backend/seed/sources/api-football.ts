@@ -14,15 +14,13 @@ import {
   upsertPlayerGoldenRecord,
 } from '../lib/db.js';
 
-// UNVERIFIED: this module is written against API-Football v3's publicly
-// documented response shape, but has not been run against a live response in
-// this environment (no key configured, and this container's network policy
-// blocks the API-Football host anyway). Before trusting a large backfill,
-// run seedApiFootballFixtures for one competition-season and eyeball the
-// cached JSON in seed/raw/api-football/ against what actually came back --
-// per the plan, also specifically check whether a 2+-season-old fixture's
-// lineup data is served at all on the free tier, since that's unconfirmed
-// and would change this whole approach if it isn't.
+// CONFIRMED 2026-08-15 via `npm run check:lineup-depth` against a real
+// API_FOOTBALL_KEY: the free tier serves full lineup and player-stats data
+// for a 2023/24 (2+ season old) fixture -- 40 lineup rows, 40 player-stats
+// rows for one match. The original 3-season backfill plan holds; no paid
+// tier needed for depth. (This module's response-shape assumptions were
+// also exercised for real at that point, not just written against
+// API-Football v3's docs.)
 
 const API_BASE = 'https://v3.football.api-sports.io';
 const DAILY_BUDGET = 100;

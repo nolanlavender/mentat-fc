@@ -40,11 +40,13 @@ not optional.
       node-pg-migrate, plain `.sql` migrations
 - [x] Seed script pulling real data for all 20 PL teams -- built and
       verified end-to-end for the 2023/24 season (380 real fixtures, odds,
-      stats, FPL players/gameweeks). Remaining seasons, Championship, FA
-      Cup, and the lineup backfill need to run on a machine with real
-      internet access and a real `API_FOOTBALL_KEY` -- not available in the
-      cloud session this was built in. See learning-log for the exact
-      commands to run.
+      stats, FPL players/gameweeks); remaining seasons and Championship
+      later confirmed for real too (3 seasons, PL + Championship, see
+      Phase 4's note). Lineup/player-stats depth confirmed 2026-08-15 with
+      a real `API_FOOTBALL_KEY`: the free tier serves full data even for a
+      2+ season-old fixture, so the full 3-season backfill (`npm run
+      db:seed`, resumable against the 100/day cap) is now actually running
+      rather than a deferred plan.
 - [x] Explain: why this schema shape, what a migration is and why we don't
       just edit the DB by hand
 
