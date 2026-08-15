@@ -57,14 +57,14 @@ not optional.
 - [x] Team dashboard endpoint (next match, table position, squad)
 - [x] Explain: REST resource design, error handling conventions, why we
       structure routes/controllers/services the way we do
-- [ ] Recurring refresh job to keep current-season data current (new
-      fixtures/results, FPL prices/ownership) -- designed in Phase 1, see
-      `docs/architecture.md`'s "Keeping data current" section; build it once
-      there's an actual API/frontend consuming the data, not before. Phase 5
-      added a manual path in the meantime (`seedCurrentSeasonFixtureLists`
-      in `backend/seed/index.ts`, runs as part of `npm run db:seed`) so
-      `app.train` has real upcoming fixtures to predict -- this item is
-      about turning that into an actual schedule, not a from-scratch build
+- [x] Recurring refresh job to keep current-season data current -- built
+      2026-08-15 as `backend/scripts/daily-refresh.sh`
+      (`db:seed:current-season` → `db:seed:backfill-lineups` →
+      `python -m app.train`), wired into local `cron`/`launchd` rather than
+      GitHub Actions since the app isn't deployed yet. See
+      `docs/architecture.md`'s "Keeping data current" section. Phase 10
+      swaps the scheduler for a GitHub Actions workflow once deployed --
+      same commands, this item doesn't need redoing then
 
 ## Phase 3 — Frontend shell
 - [x] React + TypeScript app scaffold (routes/pages/components split, added
