@@ -1653,3 +1653,51 @@ this way in production, not just in a mocked test) is still pending a
 real run against a real key -- the mocked test proves the code is
 correct against the confirmed shape, not that the shape itself is
 eternal.
+
+## `fetch` has no timeout by default -- a real hang, not throttling (2026-08-15)
+
+Mid-run, `npm run db:seed` sat silent after "Seeding FA Cup 2025/26
+fixtures from API-Football..." -- no output, no error, nothing running.
+First guess was rate-limiting, but the code already logs a clear
+`Rate-limited on ...` line whenever that actually happens (from the
+earlier 429-retry fix), and no such line ever printed. Ruled out a
+concurrent process hitting the same key too. That combination -- total
+silence, no retry log, nothing else touching the API -- pointed
+somewhere else: `callApiFootball`'s `fetch()` call had no timeout at all.
+
+The concept: `fetch` doesn't time out on its own. If the server accepts
+the connection but then never sends a response (a stalled proxy hop, a
+half-open TCP connection, anything short of the OS actually closing the
+socket), `await fetch(...)` waits *forever* -- not "slow," genuinely
+unbounded. The existing 429-retry logic never got a chance to run,
+because it only fires once a response actually arrives; a stalled
+connection never produces one.
+
+The fix is `AbortController`: create one, pass its `signal` into
+`fetch`'s options, and call `controller.abort()` from a `setTimeout` after
+a deadline (30s here -- generous for a JSON API response, but not
+infinite). That turns the hang into a normal, catchable error. Bundled
+that error handling together with genuine network failures (DNS hiccups,
+TLS resets) under one retry path, same backoff shape as the 429 handling
+-- both are transient from the caller's point of view, and there's no
+way to tell them apart from a caught error alone that would change what
+to do about it. Renamed `MAX_RATE_LIMIT_RETRIES` to `MAX_CALL_RETRIES`
+since it now bounds both cases, not just 429s.
+
+**Verified for real, not assumed:** a stalled connection is hard to
+reproduce against a live API on demand, so this got tested against a fake
+`fetch` built to behave exactly like the real failure -- a promise that
+never resolves or rejects on its own, only settling when the abort signal
+fires (the same shape a truly stalled server produces, not a fast
+network error that would've passed even before this fix). Two real runs
+against a real scratch Postgres:
+- One stalled call followed by a working retry: the process actually
+  waited the full ~30s timeout (not simulated/mocked away), logged the
+  new retry message, and succeeded on the second attempt -- 31.1s elapsed,
+  matching the real deadline plus backoff almost exactly.
+- Every call stalling: confirmed the retry loop is actually bounded --
+  6 real fetch attempts (1 + 5 retries), each waiting its own real 30s
+  timeout plus the increasing backoff between them (~211s total), then a
+  clear thrown error instead of hanging a 6th time. Before this fix,
+  that scenario never would have thrown anything -- it just wouldn't
+  have finished, ever.

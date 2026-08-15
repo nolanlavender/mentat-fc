@@ -40,7 +40,8 @@ export class BudgetExhaustedError extends Error {
   }
 }
 
-const MAX_RATE_LIMIT_RETRIES = 5;
+const MAX_CALL_RETRIES = 5; // covers both 429s and the timeout/network-error case below
+const REQUEST_TIMEOUT_MS = 30_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,14 +81,45 @@ async function callApiFootball<T>(path: string, cacheFile: string): Promise<T> {
     // daily budget counter below: they're not a new logical call, just the
     // same one arriving late.
     for (let attempt = 0; ; attempt++) {
-      const res = await fetch(`${API_BASE}${path}`, { headers: { 'x-apisports-key': apiFootballKey() } });
+      // fetch() has no timeout by default -- if API-Football's connection
+      // stalls (drops the response without ever closing the socket) this
+      // used to hang forever with zero log output, indistinguishable from
+      // "still working." A real run hit exactly this: no rate-limit
+      // message, no error, just silence. AbortController turns that
+      // indefinite wait into a bounded, retried failure instead.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await fetch(`${API_BASE}${path}`, { headers: { 'x-apisports-key': apiFootballKey() }, signal: controller.signal });
+      } catch (err) {
+        // Bundles the timeout (AbortError) together with genuine network
+        // errors (DNS hiccup, TLS reset) -- both are transient from this
+        // call's perspective, and neither is distinguishable from the
+        // other in a way that would change what to do about it: back off
+        // and retry, same as a 429.
+        if (attempt >= MAX_CALL_RETRIES) {
+          throw new Error(
+            `API-Football request to ${path} failed ${MAX_CALL_RETRIES} times in a row (${err instanceof Error ? err.message : err}) -- giving up.`,
+          );
+        }
+        const waitMs = 2 ** attempt * 1000;
+        console.log(
+          `${path} failed or timed out after ${REQUEST_TIMEOUT_MS / 1000}s (${err instanceof Error ? err.message : err}), retrying ${attempt + 1}/${MAX_CALL_RETRIES} in ${Math.round(waitMs / 1000)}s...`,
+        );
+        await sleep(waitMs);
+        continue;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
       if (res.status === 429) {
-        if (attempt >= MAX_RATE_LIMIT_RETRIES) {
-          throw new Error(`API-Football rate-limited ${MAX_RATE_LIMIT_RETRIES} times in a row on ${path} -- giving up.`);
+        if (attempt >= MAX_CALL_RETRIES) {
+          throw new Error(`API-Football rate-limited ${MAX_CALL_RETRIES} times in a row on ${path} -- giving up.`);
         }
         const retryAfterHeader = Number(res.headers.get('retry-after'));
         const waitMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader * 1000 : 2 ** attempt * 1000;
-        console.log(`Rate-limited on ${path}, waiting ${Math.round(waitMs / 1000)}s before retry ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES}...`);
+        console.log(`Rate-limited on ${path}, waiting ${Math.round(waitMs / 1000)}s before retry ${attempt + 1}/${MAX_CALL_RETRIES}...`);
         await sleep(waitMs);
         continue;
       }
