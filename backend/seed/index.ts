@@ -138,9 +138,15 @@ async function seedFaCupFixtures(): Promise<void> {
  *
  * Idempotent and cache-backed exactly like every other seedApiFootballFixtures
  * call (upserts against the same natural key football-data.co.uk already
- * used, enriching those rows rather than duplicating them), so safe to
- * leave in the regular pipeline permanently even though it only ever does
- * real work once per historical season.
+ * used, enriching those rows rather than duplicating them), so it's SAFE to
+ * leave in the regular pipeline permanently -- but not free. Discovered
+ * while sizing up the daily-refresh job: each of these 6 calls re-upserts
+ * an entire season's fixture list (380-552 rows) every single time it
+ * runs, even once a season is fully linked and will never change again --
+ * ~2,700 pointless DB round-trips on every daily run, forever, for
+ * seasons that are done. A cheap EXISTS check per season skips the whole
+ * fetch+upsert once nothing is left to link, so daily reruns cost 6 fast
+ * SELECTs instead of 6 full-season upserts.
  */
 async function linkHistoricalSeasonsToApiFootball(): Promise<void> {
   if (!process.env.API_FOOTBALL_KEY) return; // already logged by the caller
@@ -155,6 +161,16 @@ async function linkHistoricalSeasonsToApiFootball(): Promise<void> {
     const seasonLabel = `20${seasonCode.slice(0, 2)}/${seasonCode.slice(2, 4)}`;
     const externalSeasonYear = Number(`20${seasonCode.slice(0, 2)}`);
     for (const league of leagues) {
+      const competitionId = await getOrCreateCompetition(pool, league.name, 'league', league.externalLeagueId);
+      const seasonId = await getOrCreateSeason(pool, seasonLabel, `${externalSeasonYear}-08-01`, `${externalSeasonYear + 1}-06-30`);
+      const competitionSeasonId = await getOrCreateCompetitionSeason(pool, competitionId, seasonId, externalSeasonYear);
+
+      const { rows } = await pool.query<{ still_missing: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM fixtures WHERE competition_season_id = $1 AND external_api_football_id IS NULL) AS still_missing`,
+        [competitionSeasonId],
+      );
+      if (!rows[0].still_missing) continue; // already fully linked -- nothing to do, don't re-upsert a whole season for no reason
+
       console.log(`Linking ${league.name} ${seasonLabel} fixtures to API-Football (attaching external ids for the lineup backfill)...`);
       await seedApiFootballFixtures(pool, {
         competitionName: league.name,
