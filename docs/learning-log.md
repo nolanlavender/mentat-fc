@@ -2414,3 +2414,26 @@ against a real `npm run db:seed` run before fully trusting the frontend
 result -- unlike most of this project's verification, this one piece
 couldn't be checked against real API-Football data from inside this
 sandbox.
+
+**Follow-up, same day**: `npm run db:seed:logos`. Team crest capture only
+landed for *new* fixture-list fetches going forward -- it doesn't
+retroactively fill in logos for the seasons a full `npm run db:seed` had
+already pulled before this code existed, and rerunning the entire
+pipeline just to backfill that is genuinely an hour-plus job, almost all
+of it the per-fixture lineup/player-stats backfill that has nothing to do
+with logos at all. Added a standalone script
+(`backend/seed/backfill-logos.ts`, exported as `backfillTeamLogos` from
+`seed/index.ts`) that only replays the fixtures-list call every full seed
+already makes once per competition-season -- the cheap one, not the
+expensive per-fixture one. The reason this is fast and not just "a
+smaller slow thing": every one of those fixture-list responses is already
+sitting in the on-disk cache (`backend/seed/raw/api-football/fixtures/
+*.json`, `lib/cache.ts`'s fetch-if-absent pattern) from the original full
+seed run, so on a machine that's already seeded once, this makes *zero*
+new API-Football requests -- it's just re-reading cached JSON off disk
+and re-running the (already-idempotent, COALESCE-based) team upsert.
+Verified by priming a scratch cache file with synthetic fixture data
+(same shape as a real API-Football response) and confirming
+`seedApiFootballFixtures` -- the exact function the new script calls in a
+loop -- reads it and lands real logo URLs on all four teams with no
+network call at all.

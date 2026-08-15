@@ -25,6 +25,10 @@ const API_FOOTBALL_LEAGUE_IDS = {
   faCup: 45,
 };
 
+// API-Football's season param, e.g. 2023 = '2023/24'. Shared with
+// backfillTeamLogos below so both loop over the exact same FA Cup seasons.
+const FA_CUP_SEASON_YEARS = [2023, 2024, 2025];
+
 // football-data.co.uk is a free, hobby-run site with no SLA (same
 // reasoning already applied to the FPL API in docs/CLAUDE.md) -- and the
 // current, in-progress season's CSV is the one most likely to not exist
@@ -107,8 +111,7 @@ async function seedFaCupFixtures(): Promise<void> {
     console.log('Skipping FA Cup (API_FOOTBALL_KEY not set) -- football-data.co.uk has no cup coverage.');
     return;
   }
-  const seasonYears = [2023, 2024, 2025]; // API-Football's season param, e.g. 2023 = '2023/24'
-  for (const year of seasonYears) {
+  for (const year of FA_CUP_SEASON_YEARS) {
     console.log(`Seeding FA Cup ${year}/${String(year + 1).slice(2)} fixtures from API-Football...`);
     await seedApiFootballFixtures(pool, {
       competitionName: 'FA Cup',
@@ -120,6 +123,70 @@ async function seedFaCupFixtures(): Promise<void> {
       seasonEnd: `${year + 1}-06-30`,
     });
   }
+}
+
+/**
+ * Standalone, fast path to (re-)capture team crest URLs -- for
+ * `npm run db:seed:logos`, exported so seed/backfill-logos.ts can run just
+ * this on its own. Deliberately NOT the full `npm run db:seed` (which can
+ * run over an hour, almost all of it the per-fixture lineup/player-stats
+ * backfill in backfillLineups below): team logos only ever come from the
+ * fixtures-list response, the cheap call every full seed already makes
+ * once per competition-season, so this just replays those same calls.
+ *
+ * On a machine that's already run a full seed before, this costs zero new
+ * API-Football requests: every one of these fixture-list responses is
+ * already sitting in the on-disk cache (backend/seed/raw/api-football/
+ * fixtures/*.json -- see lib/cache.ts's fetch-if-absent behavior), so this
+ * is just re-reading cached JSON and upserting teams.logo_url for whichever
+ * teams don't have one yet (getOrCreateTeam's COALESCE means teams that
+ * already have a logo are untouched). Should finish in well under a
+ * minute, not the better part of an hour.
+ */
+export async function backfillTeamLogos(): Promise<void> {
+  if (!process.env.API_FOOTBALL_KEY) {
+    throw new Error('API_FOOTBALL_KEY is not set -- required to pull team logos from API-Football.');
+  }
+
+  const leagues: Array<{ name: string; externalLeagueId: number }> = [
+    { name: 'Premier League', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.premierLeague },
+    { name: 'Championship', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.championship },
+  ];
+
+  for (const seasonCode of SEASON_CODES) {
+    const seasonLabel = `20${seasonCode.slice(0, 2)}/${seasonCode.slice(2, 4)}`;
+    const externalSeasonYear = Number(`20${seasonCode.slice(0, 2)}`);
+    for (const league of leagues) {
+      console.log(`Pulling ${league.name} ${seasonLabel} fixtures (for team logos)...`);
+      await seedApiFootballFixtures(pool, {
+        competitionName: league.name,
+        competitionType: 'league',
+        externalLeagueId: league.externalLeagueId,
+        seasonLabel,
+        externalSeasonYear,
+        seasonStart: `${externalSeasonYear}-08-01`,
+        seasonEnd: `${externalSeasonYear + 1}-06-30`,
+      });
+    }
+  }
+
+  for (const year of FA_CUP_SEASON_YEARS) {
+    console.log(`Pulling FA Cup ${year}/${String(year + 1).slice(2)} fixtures (for team logos)...`);
+    await seedApiFootballFixtures(pool, {
+      competitionName: 'FA Cup',
+      competitionType: 'cup',
+      externalLeagueId: API_FOOTBALL_LEAGUE_IDS.faCup,
+      seasonLabel: `${year}/${String(year + 1).slice(2)}`,
+      externalSeasonYear: year,
+      seasonStart: `${year}-08-01`,
+      seasonEnd: `${year + 1}-06-30`,
+    });
+  }
+
+  const { rows } = await pool.query<{ total: string; with_logo: string }>(
+    `SELECT count(*) AS total, count(logo_url) AS with_logo FROM teams`,
+  );
+  console.log(`Done: ${rows[0].with_logo}/${rows[0].total} teams now have a logo_url.`);
 }
 
 /**
