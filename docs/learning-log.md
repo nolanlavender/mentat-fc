@@ -1535,3 +1535,33 @@ mapping their generated ids back to build dependent rows) -- per-fixture
 batching already gets the overwhelming majority of the win for a much
 smaller, more reviewable change to code that writes to a real production
 database.
+
+## One missing CSV shouldn't crash the whole backfill (2026-08-15)
+
+Real error hit mid-run against real Neon: `football-data.co.uk fetch
+failed: 300 .../2627/E1.csv` -- an HTTP 300 (Multiple Choices), an unusual
+status for a plain file download. Most likely explanation: the 2026/27
+Championship season's CSV doesn't exist on football-data.co.uk yet (early
+in the season), and whatever server-side handling they have for a missing
+file emits a non-standard status instead of a normal 404 in this case.
+
+The real problem wasn't the 300 itself -- it's that `seedFootballDataSeason`
+had no error handling around it, and neither did its caller. One
+not-yet-existing file crashed the entire `npm run db:seed` run, which also
+killed everything *downstream* of it in the same process: FA Cup fixtures,
+the current-season fixture list, and the actual lineup/player-stats
+backfill this whole run was for. football-data.co.uk is a free, hobby-run
+site with no SLA -- the same reasoning already applied to the FPL API in
+`docs/CLAUDE.md` -- so a fetch failure there should degrade gracefully,
+not take the whole pipeline down with it.
+
+Fixed by wrapping each individual season/competition fetch in its own
+try/catch inside `seedHistoricalResultsAndOdds`, logging clearly and
+moving on rather than crashing `main()`. Verified against the real
+failure, not a hypothetical: monkeypatched `fetch` to reproduce the exact
+300 response for the exact URL from the error, mixed with real successful
+fetches on either side of it, and confirmed the real `seedFootballDataSeason`
+function still throws exactly as before (unchanged), but the pipeline now
+catches it, logs it, and keeps seeding everything else -- 760 real fixture
+rows landed from the two calls on either side of the deliberately-failing
+one.

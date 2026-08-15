@@ -25,23 +25,33 @@ const API_FOOTBALL_LEAGUE_IDS = {
   faCup: 45,
 };
 
+// football-data.co.uk is a free, hobby-run site with no SLA (same
+// reasoning already applied to the FPL API in docs/CLAUDE.md) -- and the
+// current, in-progress season's CSV is the one most likely to not exist
+// yet at all early in a season, rather than just being sparse. A fetch
+// failure here used to crash the entire npm run db:seed run, sacrificing
+// everything downstream (FA Cup, current-season fixture lists, the
+// lineup/player-stats backfill) over one missing historical file that
+// doesn't block any of that. Catches and logs per season/competition
+// instead of per the whole function, so one bad file doesn't take out five
+// good ones next to it.
 async function seedHistoricalResultsAndOdds(): Promise<void> {
   for (const seasonCode of SEASON_CODES) {
-    console.log(`Seeding Premier League ${seasonCode} from football-data.co.uk...`);
-    await seedFootballDataSeason(pool, {
-      div: 'E0',
-      competitionName: 'Premier League',
-      competitionType: 'league',
-      seasonCode,
-    });
-
-    console.log(`Seeding Championship ${seasonCode} from football-data.co.uk...`);
-    await seedFootballDataSeason(pool, {
-      div: 'E1',
-      competitionName: 'Championship',
-      competitionType: 'league',
-      seasonCode,
-    });
+    for (const { div, competitionName } of [
+      { div: 'E0', competitionName: 'Premier League' },
+      { div: 'E1', competitionName: 'Championship' },
+    ] as const) {
+      console.log(`Seeding ${competitionName} ${seasonCode} from football-data.co.uk...`);
+      try {
+        await seedFootballDataSeason(pool, { div, competitionName, competitionType: 'league', seasonCode });
+      } catch (err) {
+        console.log(
+          `  Skipped ${competitionName} ${seasonCode}: ${err instanceof Error ? err.message : err} -- ` +
+            `likely means this season's CSV doesn't exist on football-data.co.uk yet (common for the current, ` +
+            `in-progress season early on). Continuing with the rest of the pipeline.`,
+        );
+      }
+    }
   }
 }
 
