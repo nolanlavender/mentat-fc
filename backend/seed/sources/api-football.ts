@@ -523,15 +523,42 @@ export async function backfillLineupsForCompetitionSeason(
   let done = 0;
   for (let i = 0; i < rows.length; i += BULK_FIXTURES_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + BULK_FIXTURES_CHUNK_SIZE).map((r) => ({ externalId: r.external_api_football_id, fixtureId: r.id }));
-    try {
-      await seedApiFootballLineupsAndStatsBulk(pool, chunk);
-      done += chunk.length;
-    } catch (err) {
-      if (err instanceof BudgetExhaustedError) {
-        return { done, remaining: rows.length - done, stoppedOnBudget: true };
+
+    // Real crash hit here: "Connection terminated unexpectedly" from pg,
+    // mid-multi-hour run -- a pooled connection that sat idle through an
+    // API-Football retry/backoff sleep got closed server-side (Neon's
+    // pooler or an intermediate network hop) before the next query used
+    // it. pool.ts's keepAlive addresses the common cause, but a dropped
+    // connection is still possible, so this chunk gets its own bounded
+    // retry rather than taking the whole backfill down over one query.
+    // Safe to retry wholesale: callApiFootball's disk cache means the
+    // retry doesn't re-spend an API call, and every DB write inside is an
+    // idempotent upsert.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await seedApiFootballLineupsAndStatsBulk(pool, chunk);
+        done += chunk.length;
+        break;
+      } catch (err) {
+        if (err instanceof BudgetExhaustedError) {
+          return { done, remaining: rows.length - done, stoppedOnBudget: true };
+        }
+        if (isTransientDbConnectionError(err) && attempt < MAX_CALL_RETRIES) {
+          const waitMs = 2 ** attempt * 1000;
+          console.log(
+            `DB connection dropped mid-chunk (${err instanceof Error ? err.message : err}), retrying ${attempt + 1}/${MAX_CALL_RETRIES} in ${Math.round(waitMs / 1000)}s...`,
+          );
+          await sleep(waitMs);
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
   }
   return { done, remaining: 0, stoppedOnBudget: false };
+}
+
+function isTransientDbConnectionError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /connection terminated|connection reset|ECONNRESET|ETIMEDOUT/i.test(message);
 }
