@@ -41,8 +41,10 @@ def _tau(home_goals: int, away_goals: int, lambda_home: float, lambda_away: floa
     return 1.0
 
 
-def _time_weight(match_date: date, as_of: date, half_life_days: float) -> float:
-    """Exponential decay: a match half_life_days ago counts for half as much as one today."""
+def time_weight(match_date: date, as_of: date, half_life_days: float) -> float:
+    """Exponential decay: a match half_life_days ago counts for half as much as one today.
+    Public (not a leading underscore) so app.goal_scorer can reuse the exact same decay
+    formula for per-player goal/minutes shares instead of a second, subtly different one."""
     days_ago = (as_of - match_date).days
     xi = log(2) / half_life_days
     return exp(-xi * max(days_ago, 0))
@@ -76,7 +78,7 @@ class DixonColesModel:
         team_index = {team: i for i, team in enumerate(self.teams)}
 
         as_of = matches["kickoff_date"].max()
-        weights = matches["kickoff_date"].apply(lambda d: _time_weight(d, as_of, half_life_days)).to_numpy()
+        weights = matches["kickoff_date"].apply(lambda d: time_weight(d, as_of, half_life_days)).to_numpy()
 
         home_idx = matches["home_team"].map(team_index).to_numpy()
         away_idx = matches["away_team"].map(team_index).to_numpy()

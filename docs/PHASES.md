@@ -227,27 +227,40 @@ not optional.
       becomes something actually wanted
 
 ## Phase 7 — Goal scorer prediction
-**Deliberately paused (2026-08-15), not started:** needs real depth in
-`fixture_player_stats` (minutes played + goals per player per fixture,
-across all 3 seasons/both leagues) from the API-Football lineup/player-stats
-backfill, which was just kicked off (Pro tier, ~7,500 calls/day) and hasn't
-run long enough yet to be worth building against. Decided approach for when
-it resumes, so this isn't a re-litigation later: **Poisson allocation**,
-not a classifier -- reuse Dixon-Coles' already-fitted team-level expected
-goals (`predicted_home_goals`/`predicted_away_goals`) as the anchor, then
+Unblocked and built 2026-08-15, once the lineup/player-stats backfill
+actually caught up. Built the approach decided when this was originally
+paused, with no re-litigation needed: **Poisson allocation**, not a
+classifier -- reuse Dixon-Coles' already-fitted team-level expected goals
+(`predicted_home_goals`/`predicted_away_goals`) as the anchor, then
 `λ_player = team's expected goals × player's historical share of the
 team's goals × player's expected share of available minutes`, converted to
 `P(scores) = 1 - e^(-λ_player)` via the same Poisson math already in
 `dixon_coles.py`. Stays consistent with Phase 5's interpretable-model
-choice rather than introducing a new ML paradigm. See
-`docs/learning-log.md` for why goal-scorer prediction is harder than match
-outcome (attribution + appearance noise) -- written up even though the
-implementation is paused, since the "explain before implementing" rule
-applies to the plan, not just the code.
-- [ ] Extend the model service to predict likely goal scorers
-- [ ] Explain: why this is harder than match outcome (minutes/rotation
-      variance) and how we're accounting for it
-- [ ] Surface in the app alongside match predictions
+choice rather than introducing a new ML paradigm.
+- [x] Extend the model service to predict likely goal scorers --
+      `model-service/app/goal_scorer.py` (allocation logic) +
+      `player_goal_predictions` table (migration `1701000000021`) +
+      wired into `app.train`'s existing batch run, reusing whichever
+      match-outcome model (Premier League/Championship/joint) is already
+      being used per competition rather than fitting anything new.
+      Verified against a real scratch Postgres with a known ground truth
+      (a 19-appearance full-90 prolific scorer vs. a 19-appearance sparse
+      substitute vs. a 2-appearance player): the prolific scorer's real
+      predicted probability (31.7%) came out ~14x the sparse sub's
+      (2.3%), and the 2-appearance player was correctly excluded
+      entirely (below the 5-appearance reliability threshold). Reran to
+      confirm the upsert is idempotent -- same 2 rows, no duplicates
+- [x] Explain: why this is harder than match outcome (minutes/rotation
+      variance) and how we're accounting for it -- see
+      `model-service/app/goal_scorer.py`'s module docstring and
+      `docs/learning-log.md`'s Phase 7 entry: no real-time squad-news
+      feed, so `minutes_share` is a historical-average proxy, not actual
+      team news; per-player samples are far smaller/noisier than
+      team-level ones, hence the reliability threshold
+- [ ] Surface in the app alongside match predictions -- deliberately not
+      done in this pass; predictions exist in the database (same pattern
+      as FA Cup match predictions in Phase 5) but the frontend doesn't
+      show them yet
 
 ## Phase 8 — Explainer, storylines, odds display
 - [ ] AI explainer feature: backend endpoint calling Groq API
