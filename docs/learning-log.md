@@ -1764,3 +1764,38 @@ confirming the test actually exercises the real bug rather than a
 different one. Reran the same test against the fix: no crash, the
 duplicate got logged and deduped, and both the real player and the
 duplicated one landed as exactly one row each.
+
+## API-Football's arrays aren't always arrays -- `startXI: null` (2026-08-15)
+
+Third real crash in the same real backfill run, further along still:
+right after FA Cup 2024/25 finished cleanly (873 fixtures), the next
+chunk threw `TypeError: teamLineup.startXI is not iterable`. The
+`ApiFootballLineupEntry` type declared `startXI`/`substitutes` as always
+being an array, matching every example seen so far (the confirmed bulk
+response, the check-lineup-depth spot check) -- but a real FA Cup fixture
+came back with a team lineup entry whose `startXI` was `null` instead of
+`[]`. Same underlying story as the two fixes before this one: API-Football's
+coverage gets less clean the further you get from Premier League/
+Championship, and this project has now hit three distinct shapes of that
+messiness (empty lineups entirely, a repeated player, and now a null
+array) in the same run.
+
+Rather than patch just the one field that happened to crash first, applied
+the same `?? []` guard everywhere an array is read off this response --
+`item.lineups`, `teamLineup.startXI`, `teamLineup.substitutes`,
+`item.players`, `teamEntry.players` -- in both the new bulk-endpoint parser
+and the older per-fixture `seedApiFootballLineup`/`seedApiFootballPlayerStats`
+functions (still used by `check-lineup-depth.ts`), since they read the
+same shape of data and carry the identical risk. Updated the TypeScript
+interfaces to say `Array<...> | null` instead of `Array<...>` -- the type
+should describe what the API actually, confirmedly sends, not the
+happy-path shape assumed from the docs.
+
+**Verified against the real failure:** reproduced the identical error
+message (`teamLineup.startXI is not iterable`) against a real scratch
+Postgres on the pre-fix code with a fake fixture shaped exactly like the
+real one (one team's `startXI`/`substitutes` both `null`, the whole
+`players` array also `null`), then confirmed the fix processes the
+fixture cleanly -- the team with null data contributes nothing (correctly
+skipped, not crashed), and the other team's real player still lands as
+expected.
