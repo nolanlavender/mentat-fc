@@ -39,8 +39,10 @@ point of this project.** Concretely, that means:
    public FPL API (players, prices, ownership, gameweek points). Not a
    custom scoring system — the real thing.
 2. **Betting tracker** — I log bets I've placed elsewhere (pick, odds,
-   stake, result). The app tracks my ROI and record over time. This is a
-   personal tracker only — no real-money wagering happens inside the app.
+   stake, result), including parlays/accumulators (multiple legs, one
+   bet). The app tracks ROI and record over time, filterable by season and
+   by team. Multi-user (real login, added Phase 6) — no real-money
+   wagering happens inside the app, it's a record-keeping tool.
 3. **Prediction model** — a model I build and own predicts match outcomes
    (score/result), and eventually goal scorers. Predictions surface in the
    app next to my logged bets, so I can see where the model and the market

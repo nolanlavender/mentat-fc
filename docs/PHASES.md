@@ -139,20 +139,45 @@ not optional.
 ## Phase 6 — Betting tracker
 - [x] Endpoints + UI to log a bet: pick, odds, stake, fixture, result --
       `POST/GET/PATCH/DELETE /api/bets`, `GET /api/bets/summary`, and a
-      `/bets` frontend page (log form + table + settle/delete). Verified
-      end-to-end against a real scratch Postgres (migration round-trip,
-      full CRUD via curl, and a real browser session via Playwright).
-      Premier League only, per CLAUDE.md's data-scope note
+      `/bets` frontend page (parlay-capable log form + bet cards +
+      settle/delete). Verified end-to-end against a real scratch Postgres
+      (migration round-trip, full CRUD + auth + parlay math via curl, and
+      a real registered-user browser session via Playwright). Premier
+      League only, per CLAUDE.md's data-scope note
 - [x] ROI / record tracking over time -- `GET /api/bets/summary`: staked,
       returned, net profit, ROI%, win rate, all computed from settled bets
-      only (pending bets have no known outcome yet)
+      only (pending bets have no known outcome yet). Filterable by season
+      and by team (`?season=&teamId=`) -- "am I up or down betting on
+      Chelsea" is a `teamId` filter on the same endpoint, not a separate
+      feature
 - [x] Surface model prediction next to my logged bet and the market odds —
       where do they disagree? -- each bet response includes your own
-      implied probability (`1/odds_decimal`), the model's probability for
-      that exact selection (when one exists), and their difference
-      (`edge`). Live market odds deliberately deferred (see below)
+      implied probability (`1/combinedOdds`), the model's probability for
+      the exact bet (when every non-void leg has one), and their
+      difference (`edge`). Live market odds deliberately deferred (see
+      below)
 - [x] Explain: what "value" means when comparing model probability to
       market odds -- see `docs/learning-log.md`'s Phase 6 entry
+- [x] **New, not in the original plan, pulled forward from Phase 9:**
+      real multi-user auth (JWT, bcrypt-hashed passwords,
+      `POST /api/auth/register`/`login`, a `requireAuth` middleware
+      protecting every `/api/bets` route, `users.id` on `bets`). Every bet
+      is scoped to the logged-in user -- verified cross-user isolation
+      returns 404, not a leak, when one user probes another's bet/leg ids.
+      Phase 9 no longer needs to build auth from scratch, just extend what
+      exists here (see its updated note below) -- everything *other* than
+      bets (teams, fixtures, my-team) is still unauthenticated/public, a
+      deliberate boundary, not an oversight
+- [x] **New, not in the original plan:** parlay/accumulator support --
+      `bets` holds the stake and who placed it, `bet_legs` holds the
+      individual picks (one row per leg; a straight bet is just a
+      single-leg parlay). Overall result, combined odds, and payout are
+      *derived* from the legs (any lost leg loses the whole bet; a void
+      leg is dropped from the price, same as a real sportsbook), not
+      stored redundantly. Model probability for a parlay is the product of
+      each non-void leg's own probability, assuming independence between
+      fixtures -- a simplifying assumption, documented as such in
+      `docs/learning-log.md`, not strictly true for correlated matches
 - [ ] **New, not in the original plan:** live market-odds comparison (The
       Odds API) was deliberately deferred -- you already know the odds you
       got when you log a bet, so for now the comparison is your bet's own
@@ -175,7 +200,14 @@ not optional.
       streaming vs. non-streaming LLM responses
 
 ## Phase 9 — Auth, testing, polish
-- [ ] Auth (JWT), login/register flow
+- [x] Auth (JWT), login/register flow -- built early, in Phase 6, once
+      per-user bets made it a real requirement rather than a someday
+      feature. What's *not* done yet and still belongs here: extending
+      `requireAuth` to any other route that turns out to need per-user
+      data (none do today -- team dashboards, fixtures, and `/my-team` are
+      all shared/public reads), a password-reset flow, and treating login
+      as a first-class polish pass (this session's `/login` page is
+      functional, not designed)
 - [ ] Unit tests on model evaluation / aggregation / business logic
 - [ ] One E2E test (Playwright): log in → view dashboard → log a bet → see
       it tracked
