@@ -9,8 +9,13 @@ function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
+// Top 3 only, even though the API can return up to 5 -- this is a compact
+// list view, not a fixture detail page; showing all 5 tips over into
+// clutter for a "likely scorers" glance rather than a full breakdown.
+const SCORERS_SHOWN = 3;
+
 function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
-  const { prediction } = fixture;
+  const { prediction, topScorers } = fixture;
   return (
     <li className="prediction-row">
       <div className="prediction-fixture">
@@ -29,6 +34,15 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
           {prediction.predictedHomeGoals !== null && prediction.predictedAwayGoals !== null && (
             <span className="prediction-expected-goals">
               expected {prediction.predictedHomeGoals.toFixed(1)} - {prediction.predictedAwayGoals.toFixed(1)}
+            </span>
+          )}
+          {topScorers.length > 0 && (
+            <span className="prediction-scorers">
+              Likely scorers:{' '}
+              {topScorers
+                .slice(0, SCORERS_SHOWN)
+                .map((s) => `${s.playerName} (${formatPercent(s.probScores)})`)
+                .join(', ')}
             </span>
           )}
         </div>

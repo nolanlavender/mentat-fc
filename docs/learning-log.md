@@ -2236,6 +2236,44 @@ existing in the code. Reran the same command a second time and confirmed
 the row count stayed at exactly 2 -- the `ON CONFLICT` upsert is
 idempotent, not silently duplicating.
 
-Deliberately not surfaced in the frontend yet -- same "predictions exist
-in the database, not yet an app feature" boundary already used for FA Cup
-predictions in Phase 5.
+Not surfaced in the frontend in this pass -- see the follow-up entry
+below for that.
+
+## Surfacing predictions in the frontend (2026-08-15)
+
+Both goal-scorer predictions (just built) and FA Cup match predictions
+(built in Phase 5) existed only in the database until now -- nothing in
+the frontend showed them. Extended the existing `/predictions` page
+rather than building a new one: no fixture-detail page exists yet at all
+(`getFixtureById`'s rich response -- team stats, odds -- isn't consumed
+anywhere in the frontend either, a separate, pre-existing gap not touched
+here), so a new page for this specifically would have been bigger than
+what was asked for.
+
+`GET /api/fixtures` and `GET /api/fixtures/:id` now embed each fixture's
+top 5 predicted scorers via a `LATERAL` subquery aggregating
+`player_goal_predictions` into a JSON array, ordered by `prob_scores`,
+mirroring exactly how `model_predictions` was already embedded (same
+one-query, no-N+1 shape). `PredictionsPage.tsx` renders the top 3 as a
+compact line under the existing home/draw/away probabilities: "Likely
+scorers: Name (X%), ...".
+
+**Deliberately did not expand scope to FA Cup while doing this.**
+`docs/CLAUDE.md` calls out FA Cup predictions existing in the database
+without being an app feature as "a deliberate scope boundary, not a data
+gap" -- extending goal-scorer predictions to the exact same competitions
+the predictions page already shows (Premier League, Championship) keeps
+that boundary intact rather than quietly widening it as a side effect of
+an unrelated change.
+
+**Verified in an actual browser, not just typechecked** -- this project's
+own rule for UI changes. Seeded a real upcoming fixture with a known
+predicted top scorer against a scratch Postgres, started the real backend
+and frontend dev servers, confirmed the API response shape directly with
+curl first, then loaded `/predictions` with Playwright and screenshotted
+it: "Likely scorers: Starman (32%), Fringe (2%)" rendered exactly where
+expected, next to the match prediction it belongs to. Caught a real
+issue doing this, not a hypothetical one -- the first seeded "upcoming"
+fixture was dated 2024, which the real current date (2026) treats as
+already in the past, so the page correctly showed nothing until the seed
+data was redated forward.
