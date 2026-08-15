@@ -107,8 +107,15 @@ select {
 .page {
   text-align: left;
   padding: 32px 24px;
-  max-width: 720px;
+  max-width: 1080px;
   margin: 0 auto;
+}
+
+/* Auth forms stay compact even though .page itself is wide -- a 320px-wide
+   form left-aligned inside a 1080px page would strand itself with a huge
+   empty gap to the right. */
+.page-narrow {
+  max-width: 420px;
 }
 
 .error {

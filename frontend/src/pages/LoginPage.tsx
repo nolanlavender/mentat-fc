@@ -27,9 +27,9 @@ export function LoginPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page page-narrow">
       <h1>{mode === 'login' ? 'Log in' : 'Create an account'}</h1>
-      <form onSubmit={handleSubmit} className="bet-form" style={{ flexDirection: 'column', alignItems: 'stretch', maxWidth: 320 }}>
+      <form onSubmit={handleSubmit} className="bet-form" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
         <label>
           Email
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
