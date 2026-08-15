@@ -23,7 +23,7 @@ import {
 // API-Football v3's docs.)
 
 const API_BASE = 'https://v3.football.api-sports.io';
-const DAILY_BUDGET = 100;
+const DAILY_BUDGET = 7500; // Pro tier -- confirmed on the account's api-sports.io dashboard, not the free tier's 100/day
 
 function apiFootballKey(): string {
   const key = process.env.API_FOOTBALL_KEY;
@@ -33,8 +33,14 @@ function apiFootballKey(): string {
 
 export class BudgetExhaustedError extends Error {
   constructor() {
-    super(`API-Football's ${DAILY_BUDGET}/day free-tier budget is used up for today -- rerun tomorrow to continue.`);
+    super(`API-Football's ${DAILY_BUDGET}/day plan budget is used up for today -- rerun tomorrow to continue.`);
   }
+}
+
+const MAX_RATE_LIMIT_RETRIES = 5;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Every live (non-cached) call this process makes is counted here so a
@@ -63,10 +69,29 @@ async function callApiFootball<T>(path: string, cacheFile: string): Promise<T> {
   const text = await fetchCached(cachePath, async () => {
     const state = readBudgetState();
     if (state.callsUsed >= DAILY_BUDGET) throw new BudgetExhaustedError();
-    const res = await fetch(`${API_BASE}${path}`, { headers: { 'x-apisports-key': apiFootballKey() } });
-    if (!res.ok) throw new Error(`API-Football request failed: ${res.status} ${path}`);
-    writeBudgetState({ date: state.date, callsUsed: state.callsUsed + 1 });
-    return res.text();
+
+    // A per-minute rate limit (separate from the daily cap above) is real
+    // on every tier, and this backfill fires thousands of sequential
+    // requests -- a single transient 429 used to crash the entire
+    // npm run db:seed run instead of just pausing. Retries don't touch the
+    // daily budget counter below: they're not a new logical call, just the
+    // same one arriving late.
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(`${API_BASE}${path}`, { headers: { 'x-apisports-key': apiFootballKey() } });
+      if (res.status === 429) {
+        if (attempt >= MAX_RATE_LIMIT_RETRIES) {
+          throw new Error(`API-Football rate-limited ${MAX_RATE_LIMIT_RETRIES} times in a row on ${path} -- giving up.`);
+        }
+        const retryAfterHeader = Number(res.headers.get('retry-after'));
+        const waitMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader * 1000 : 2 ** attempt * 1000;
+        console.log(`Rate-limited on ${path}, waiting ${Math.round(waitMs / 1000)}s before retry ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES}...`);
+        await sleep(waitMs);
+        continue;
+      }
+      if (!res.ok) throw new Error(`API-Football request failed: ${res.status} ${path}`);
+      writeBudgetState({ date: state.date, callsUsed: state.callsUsed + 1 });
+      return res.text();
+    }
   });
   return JSON.parse(text) as T;
 }
