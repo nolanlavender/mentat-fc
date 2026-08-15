@@ -461,6 +461,40 @@ export async function upsertFixtureLineup(
   );
 }
 
+/**
+ * One multi-row INSERT for every lineup row (startXI + substitutes, both
+ * teams) coming out of a single bulk /fixtures?ids=... call -- up to 20
+ * fixtures' worth (~800 rows) in one round-trip instead of one per row.
+ * Safe against the same-row-twice ON CONFLICT restriction the odds batch
+ * above already reasons about: a real player is either in the startXI or
+ * the substitutes for a match, never both, so (fixture_id, player_id) can't
+ * repeat within one fixture's rows, and fixture_id itself differs across
+ * fixtures in the batch.
+ */
+export async function upsertFixtureLineupsBatch(
+  pool: Pool,
+  entries: Array<{
+    fixtureId: number;
+    teamId: number;
+    playerId: number;
+    isStarting: boolean;
+    shirtNumber?: number;
+    position?: string;
+  }>,
+): Promise<void> {
+  if (entries.length === 0) return;
+  const params = entries.flatMap((e) => [e.fixtureId, e.teamId, e.playerId, e.isStarting, e.shirtNumber ?? null, e.position ?? null]);
+  await pool.query(
+    `INSERT INTO fixture_lineups (fixture_id, team_id, player_id, is_starting, shirt_number, position)
+     VALUES ${buildValuesPlaceholders(entries.length, 6)}
+     ON CONFLICT (fixture_id, player_id) DO UPDATE SET
+       is_starting = EXCLUDED.is_starting,
+       shirt_number = COALESCE(EXCLUDED.shirt_number, fixture_lineups.shirt_number),
+       position = COALESCE(EXCLUDED.position, fixture_lineups.position)`,
+    params,
+  );
+}
+
 export interface FixturePlayerStatsInput {
   fixtureId: number;
   teamId: number;
@@ -538,6 +572,70 @@ export async function upsertFixturePlayerStats(pool: Pool, s: FixturePlayerStats
       s.penaltiesMissed ?? null,
       s.saves ?? null,
     ],
+  );
+}
+
+/**
+ * Same batching as upsertFixtureLineupsBatch, for the fixture_player_stats
+ * side of one bulk /fixtures?ids=... call -- one INSERT for up to ~800
+ * rows (20 fixtures x ~40 players) instead of one round-trip per player.
+ * Same (fixture_id, player_id) uniqueness reasoning applies: API-Football's
+ * players[] array has one entry per player per fixture.
+ */
+export async function upsertFixturePlayerStatsBatch(pool: Pool, entries: FixturePlayerStatsInput[]): Promise<void> {
+  if (entries.length === 0) return;
+  const params = entries.flatMap((s) => [
+    s.fixtureId,
+    s.teamId,
+    s.playerId,
+    s.minutesPlayed ?? null,
+    s.rating ?? null,
+    s.goals ?? null,
+    s.assists ?? null,
+    s.shots ?? null,
+    s.shotsOnTarget ?? null,
+    s.passes ?? null,
+    s.passesAccuracy ?? null,
+    s.tackles ?? null,
+    s.interceptions ?? null,
+    s.dribblesAttempted ?? null,
+    s.dribblesCompleted ?? null,
+    s.foulsDrawn ?? null,
+    s.foulsCommitted ?? null,
+    s.yellowCards ?? null,
+    s.redCards ?? null,
+    s.penaltiesScored ?? null,
+    s.penaltiesMissed ?? null,
+    s.saves ?? null,
+  ]);
+  await pool.query(
+    `INSERT INTO fixture_player_stats (
+       fixture_id, team_id, player_id, minutes_played, rating, goals, assists,
+       shots, shots_on_target, passes, passes_accuracy, tackles, interceptions,
+       dribbles_attempted, dribbles_completed, fouls_drawn, fouls_committed,
+       yellow_cards, red_cards, penalties_scored, penalties_missed, saves
+     ) VALUES ${buildValuesPlaceholders(entries.length, 22)}
+     ON CONFLICT (fixture_id, player_id) DO UPDATE SET
+       minutes_played = EXCLUDED.minutes_played,
+       rating = EXCLUDED.rating,
+       goals = EXCLUDED.goals,
+       assists = EXCLUDED.assists,
+       shots = EXCLUDED.shots,
+       shots_on_target = EXCLUDED.shots_on_target,
+       passes = EXCLUDED.passes,
+       passes_accuracy = EXCLUDED.passes_accuracy,
+       tackles = EXCLUDED.tackles,
+       interceptions = EXCLUDED.interceptions,
+       dribbles_attempted = EXCLUDED.dribbles_attempted,
+       dribbles_completed = EXCLUDED.dribbles_completed,
+       fouls_drawn = EXCLUDED.fouls_drawn,
+       fouls_committed = EXCLUDED.fouls_committed,
+       yellow_cards = EXCLUDED.yellow_cards,
+       red_cards = EXCLUDED.red_cards,
+       penalties_scored = EXCLUDED.penalties_scored,
+       penalties_missed = EXCLUDED.penalties_missed,
+       saves = EXCLUDED.saves`,
+    params,
   );
 }
 

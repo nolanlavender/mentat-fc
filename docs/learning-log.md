@@ -1565,3 +1565,91 @@ function still throws exactly as before (unchanged), but the pipeline now
 catches it, logs it, and keeps seeding everything else -- 760 real fixture
 rows landed from the two calls on either side of the deliberately-failing
 one.
+
+## Rewriting the lineup/player-stats backfill around a bulk endpoint (2026-08-15)
+
+The lineup/player-stats backfill was the API-Football pipeline's real
+bottleneck: `backfillLineupsForCompetitionSeason` called
+`seedApiFootballLineup` (`GET /fixtures/lineups?fixture=X`) and
+`seedApiFootballPlayerStats` (`GET /fixtures/players?fixture=X`)
+separately for every fixture -- 2 calls each, ~3,000+ fixtures across 3
+seasons x 3 competitions. That's the resource actually gated by the daily
+budget, unlike the DB round-trips fixed above.
+
+API-Football's docs describe a `GET /fixtures?ids=id1-id2-...-id20`
+filter (max 20 ids, hyphen-separated) but don't show an expanded JSON
+example proving it returns anything beyond the same core fixture fields
+the plain `?league=&season=` list call already gives. Rather than trust
+the prose, this got tested for real: a small script
+(`seed/check-bulk-fixtures-endpoint.ts`) called it against 5 real fixture
+ids and inspected the actual response. First attempt picked the earliest
+fixtures in the whole database with no competition filter, which turned
+out to be FA Cup Extra Preliminary Round matches between non-league clubs
+-- API-Football has no detailed data for that tier at all, so the
+all-empty result was a false negative about the *tier*, not real evidence
+about the *endpoint*. Refiltered to 5 real Premier League fixtures and
+reran: **confirmed** -- each fixture object in the bulk response embeds
+`lineups[]`, `players[]`, `statistics[]`, and `events[]` directly, same
+shape as the separate per-fixture endpoints. Saved the raw response
+(`seed/raw/api-football/bulk-fixtures-check.json`, gitignored) and used
+its exact field shapes (including real quirks like `passes.accuracy` and
+`games.rating` arriving as numeric *strings*, not numbers) to build the
+rewrite against real data instead of the docs' prose.
+
+Rewrote `seedApiFootballLineup` + `seedApiFootballPlayerStats` (2
+calls/fixture) into `seedApiFootballLineupsAndStatsBulk`, one call per
+chunk of up to 20 fixtures via the `ids=` filter -- a real **~40x**
+reduction in API-Football call volume for the backfill (2,800 fixtures x
+2 calls = 5,600 calls before; ~140 chunk calls after). Since a chunk's
+response covers many fixtures' worth of lineup/player-stats rows at once,
+the DB writes got batched too: two new helpers,
+`upsertFixtureLineupsBatch` and `upsertFixturePlayerStatsBatch` in
+`seed/lib/db.ts`, each building one multi-row `INSERT ... ON CONFLICT` for
+an entire chunk (~800 rows) instead of one round-trip per row -- same
+reasoning as the earlier odds/team-stats batching, applied here because a
+cheaper API call shouldn't still pay per-row DB round-trips.
+
+The old per-fixture `seedApiFootballLineup`/`seedApiFootballPlayerStats`
+functions were kept (not deleted) -- `check-lineup-depth.ts`, the
+diagnostic script that originally confirmed this tier serves historical
+lineup data at all, still calls them directly, and rewriting a script
+that already did its job and is referenced by an earlier learning-log
+entry wasn't part of this change.
+
+**Design decisions made and deliberately left out of scope:**
+- **Cache keys:** the old per-fixture cache (`lineups/{id}.json`,
+  `player-stats/{id}.json`) doesn't fit a batch-of-20 response. New scheme:
+  `bulk-fixtures/{id1-id2-...-id20}.json`, matching the same ids used in
+  the URL's `ids=` param. The backfill query also gained an
+  `ORDER BY kickoff_date` it didn't strictly need before (each fixture was
+  its own cache key, so order was irrelevant) -- now chunk *boundaries*
+  need to be stable across reruns, or a partial run resumed later would
+  build different 20-fixture groupings and mostly miss the cache.
+- **`expected_goals` (xg):** the bulk response's `statistics[]` includes
+  it (as a string, like the other numeric fields), and
+  `fixture_team_stats.xg` already exists as a column from an earlier
+  migration -- but capturing it wasn't part of what this change was
+  asked to do, so it's left unfilled for now rather than added silently.
+- **`events[]` (goal/card timeline):** also present in the bulk response,
+  also not captured -- `docs/erd.md` already documents `fixture_events` as
+  a deliberate future extension (Phase 7), not something to backfill into
+  early.
+
+**Verified against real Postgres, not just typechecked:** the real
+sandbox has no network access to API-Football, so `fetch` was
+monkeypatched to return a response shaped exactly like the real, saved
+`bulk-fixtures-check.json` (including the string-typed `rating`/
+`passes.accuracy` fields) for 25 fixtures, forcing the chunker to produce
+a real 20-then-5 split. Ran `backfillLineupsForCompetitionSeason` against
+a real scratch Postgres instance with real migrations applied: chunking
+produced exactly 2 fetch calls (not 25 or 50), row counts matched
+expectations exactly (100 lineup rows = 25 fixtures x 4 players, 50
+player-stats rows), the string-typed fields parsed correctly to numeric
+columns, and a second run made **zero** fetch calls and produced
+identical row counts -- confirming the cache and the idempotent
+`ON CONFLICT` upserts both still hold under the new batched-chunk shape.
+Real API-Football verification (does the live endpoint actually behave
+this way in production, not just in a mocked test) is still pending a
+real run against a real key -- the mocked test proves the code is
+correct against the confirmed shape, not that the shape itself is
+eternal.

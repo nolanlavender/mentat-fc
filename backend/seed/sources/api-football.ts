@@ -10,8 +10,11 @@ import {
   getOrCreateTeam,
   upsertFixture,
   upsertFixtureLineup,
+  upsertFixtureLineupsBatch,
   upsertFixturePlayerStats,
+  upsertFixturePlayerStatsBatch,
   upsertPlayerGoldenRecord,
+  type FixturePlayerStatsInput,
 } from '../lib/db.js';
 
 // CONFIRMED 2026-08-15 via `npm run check:lineup-depth` against a real
@@ -151,12 +154,32 @@ export async function seedApiFootballFixtures(pool: Pool, spec: CompetitionSeaso
   }
 }
 
-interface ApiFootballLineupsResponse {
-  response: Array<{
-    team: { id: number; name: string };
-    startXI: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }>;
-    substitutes: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }>;
+interface ApiFootballLineupEntry {
+  team: { id: number; name: string };
+  startXI: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }>;
+  substitutes: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }>;
+}
+
+interface ApiFootballPlayerStatsEntry {
+  team: { id: number; name: string };
+  players: Array<{
+    player: { id: number; name: string };
+    statistics: Array<{
+      games: { minutes: number | null; rating: string | null; position: string | null };
+      shots: { total: number | null; on: number | null };
+      goals: { total: number | null; assists: number | null; saves: number | null };
+      passes: { total: number | null; accuracy: string | null };
+      tackles: { total: number | null; interceptions: number | null };
+      dribbles: { attempts: number | null; success: number | null };
+      fouls: { drawn: number | null; committed: number | null };
+      cards: { yellow: number | null; red: number | null };
+      penalty: { scored: number | null; missed: number | null };
+    }>;
   }>;
+}
+
+interface ApiFootballLineupsResponse {
+  response: ApiFootballLineupEntry[];
 }
 
 /**
@@ -209,23 +232,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
 }
 
 interface ApiFootballPlayerStatsResponse {
-  response: Array<{
-    team: { id: number; name: string };
-    players: Array<{
-      player: { id: number; name: string };
-      statistics: Array<{
-        games: { minutes: number | null; rating: string | null; position: string | null };
-        shots: { total: number | null; on: number | null };
-        goals: { total: number | null; assists: number | null; saves: number | null };
-        passes: { total: number | null; accuracy: string | null };
-        tackles: { total: number | null; interceptions: number | null };
-        dribbles: { attempts: number | null; success: number | null };
-        fouls: { drawn: number | null; committed: number | null };
-        cards: { yellow: number | null; red: number | null };
-        penalty: { scored: number | null; missed: number | null };
-      }>;
-    }>;
-  }>;
+  response: ApiFootballPlayerStatsEntry[];
 }
 
 /**
@@ -282,43 +289,170 @@ export async function seedApiFootballPlayerStats(pool: Pool, fixtureExternalId: 
   }
 }
 
+interface ApiFootballBulkFixturesResponse {
+  response: Array<{
+    fixture: { id: number };
+    lineups: ApiFootballLineupEntry[];
+    players: ApiFootballPlayerStatsEntry[];
+  }>;
+}
+
+const BULK_FIXTURES_CHUNK_SIZE = 20; // API-Football's `ids=` filter hard cap, per the docs
+
+/**
+ * CONFIRMED 2026-08-15 via `npm run check:bulk-fixtures` against a real
+ * API_FOOTBALL_KEY: GET /fixtures?ids=id1-id2-...-id20 embeds each
+ * fixture's lineups + player stats directly in the response (see
+ * backend/seed/raw/api-football/bulk-fixtures-check.json) -- not just the
+ * docs' prose claim. This replaces the old seedApiFootballLineup +
+ * seedApiFootballPlayerStats pair (2 calls/fixture) with 1 call per chunk
+ * of up to 20 fixtures: a real ~40x reduction in API-Football call volume
+ * for the backfill, which is what actually gates how fast 3 seasons x 3
+ * competitions of lineup depth can be pulled under the daily budget.
+ *
+ * DB writes are batched per chunk too (one INSERT for every lineup row in
+ * the chunk, one for every player-stats row), same reasoning as the
+ * football-data.co.uk odds/team-stats batching in lib/db.ts -- no reason to
+ * pay per-row round-trips here just because the API call itself got
+ * cheaper.
+ */
+export async function seedApiFootballLineupsAndStatsBulk(
+  pool: Pool,
+  fixtures: Array<{ externalId: number; fixtureId: number }>,
+): Promise<void> {
+  if (fixtures.length === 0) return;
+  if (fixtures.length > BULK_FIXTURES_CHUNK_SIZE) {
+    throw new Error(
+      `seedApiFootballLineupsAndStatsBulk got ${fixtures.length} fixtures -- API-Football's ids= filter caps at ${BULK_FIXTURES_CHUNK_SIZE} per call.`,
+    );
+  }
+
+  const fixtureIdByExternalId = new Map(fixtures.map((f) => [f.externalId, f.fixtureId]));
+  const idsParam = fixtures.map((f) => f.externalId).join('-');
+
+  const data = await callApiFootball<ApiFootballBulkFixturesResponse>(
+    `/fixtures?ids=${idsParam}`,
+    `bulk-fixtures/${idsParam}.json`,
+  );
+
+  const lineupRows: Array<{
+    fixtureId: number;
+    teamId: number;
+    playerId: number;
+    isStarting: boolean;
+    shirtNumber?: number;
+    position?: string;
+  }> = [];
+  const playerStatsRows: FixturePlayerStatsInput[] = [];
+
+  for (const item of data.response) {
+    const fixtureId = fixtureIdByExternalId.get(item.fixture.id);
+    if (fixtureId === undefined) continue; // the API only ever echoes back ids we asked for, but guard anyway
+
+    for (const teamLineup of item.lineups) {
+      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name));
+
+      for (const { player } of teamLineup.startXI) {
+        const playerId = await upsertPlayerGoldenRecord(pool, {
+          externalApiFootballId: player.id,
+          fullName: player.name,
+          position: player.pos ?? undefined,
+        });
+        lineupRows.push({ fixtureId, teamId, playerId, isStarting: true, shirtNumber: player.number ?? undefined, position: player.pos ?? undefined });
+      }
+      for (const { player } of teamLineup.substitutes) {
+        const playerId = await upsertPlayerGoldenRecord(pool, {
+          externalApiFootballId: player.id,
+          fullName: player.name,
+          position: player.pos ?? undefined,
+        });
+        lineupRows.push({ fixtureId, teamId, playerId, isStarting: false, shirtNumber: player.number ?? undefined, position: player.pos ?? undefined });
+      }
+    }
+
+    for (const teamEntry of item.players) {
+      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name));
+
+      for (const { player, statistics } of teamEntry.players) {
+        const stats = statistics[0]; // one fixture -> one stat block per player
+        if (!stats) continue;
+
+        const playerId = await upsertPlayerGoldenRecord(pool, {
+          externalApiFootballId: player.id,
+          fullName: player.name,
+          position: stats.games.position ?? undefined,
+        });
+
+        playerStatsRows.push({
+          fixtureId,
+          teamId,
+          playerId,
+          minutesPlayed: stats.games.minutes ?? undefined,
+          rating: stats.games.rating ? Number(stats.games.rating) : undefined,
+          goals: stats.goals.total ?? undefined,
+          assists: stats.goals.assists ?? undefined,
+          shots: stats.shots.total ?? undefined,
+          shotsOnTarget: stats.shots.on ?? undefined,
+          passes: stats.passes.total ?? undefined,
+          passesAccuracy: stats.passes.accuracy ? Number(stats.passes.accuracy) : undefined,
+          tackles: stats.tackles.total ?? undefined,
+          interceptions: stats.tackles.interceptions ?? undefined,
+          dribblesAttempted: stats.dribbles.attempts ?? undefined,
+          dribblesCompleted: stats.dribbles.success ?? undefined,
+          foulsDrawn: stats.fouls.drawn ?? undefined,
+          foulsCommitted: stats.fouls.committed ?? undefined,
+          yellowCards: stats.cards.yellow ?? undefined,
+          redCards: stats.cards.red ?? undefined,
+          penaltiesScored: stats.penalty.scored ?? undefined,
+          penaltiesMissed: stats.penalty.missed ?? undefined,
+          saves: stats.goals.saves ?? undefined,
+        });
+      }
+    }
+  }
+
+  await upsertFixtureLineupsBatch(pool, lineupRows);
+  await upsertFixturePlayerStatsBatch(pool, playerStatsRows);
+}
+
 /**
  * Resumable backfill: finds fixtures in the given competition-season still
- * missing lineups and/or player stats, and fetches only whatever's actually
- * missing for each one -- so a fixture that already has lineups from an
- * earlier run doesn't burn budget re-fetching them just because player
- * stats came later. Stops cleanly when the daily budget runs out; safe to
+ * missing lineups and/or player stats, and pulls them BULK_FIXTURES_CHUNK_SIZE
+ * at a time via the /fixtures?ids=... endpoint. Unlike the old per-fixture
+ * version, lineups and player stats always arrive together now (one call
+ * gets both), so a fixture missing just one of the two gets both refetched
+ * -- a harmless no-op re-upsert for whichever half it already had, not a
+ * correctness issue. Stops cleanly when the daily budget runs out; safe to
  * rerun (daily, on a paid tier or free) until it reports everything done.
+ *
+ * Ordered by kickoff_date so chunk boundaries are stable across reruns --
+ * fetchCached's cache key is the joined id list, so a run that dies partway
+ * through and gets rerun hits the same cache files instead of building
+ * different 20-fixture groupings each time.
  */
 export async function backfillLineupsForCompetitionSeason(
   pool: Pool,
   competitionSeasonId: number,
 ): Promise<{ done: number; remaining: number; stoppedOnBudget: boolean }> {
-  const { rows } = await pool.query<{
-    id: number;
-    external_api_football_id: number | null;
-    has_lineup: boolean;
-    has_player_stats: boolean;
-  }>(
-    `SELECT f.id, f.external_api_football_id,
-       EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id) AS has_lineup,
-       EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id) AS has_player_stats
+  const { rows } = await pool.query<{ id: number; external_api_football_id: number }>(
+    `SELECT f.id, f.external_api_football_id
      FROM fixtures f
      WHERE f.competition_season_id = $1
        AND f.external_api_football_id IS NOT NULL
        AND (
          NOT EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id)
          OR NOT EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id)
-       )`,
+       )
+     ORDER BY f.kickoff_date ASC`,
     [competitionSeasonId],
   );
 
   let done = 0;
-  for (const row of rows) {
+  for (let i = 0; i < rows.length; i += BULK_FIXTURES_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + BULK_FIXTURES_CHUNK_SIZE).map((r) => ({ externalId: r.external_api_football_id, fixtureId: r.id }));
     try {
-      if (!row.has_lineup) await seedApiFootballLineup(pool, row.external_api_football_id!, row.id);
-      if (!row.has_player_stats) await seedApiFootballPlayerStats(pool, row.external_api_football_id!, row.id);
-      done += 1;
+      await seedApiFootballLineupsAndStatsBulk(pool, chunk);
+      done += chunk.length;
     } catch (err) {
       if (err instanceof BudgetExhaustedError) {
         return { done, remaining: rows.length - done, stoppedOnBudget: true };
