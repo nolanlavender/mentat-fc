@@ -1941,12 +1941,25 @@ then, isn't now. Built `backend/scripts/daily-refresh.sh`: refreshes
 current-season fixtures, backfills newly-finished ones' lineups (order
 matters -- the backfill only sees `status = 'finished'` fixtures, so the
 fixture refresh has to run first), then refits the Dixon-Coles model on
-the fresh data. Wired to local `cron`/`launchd` rather than GitHub
+the fresh data. Meant for local `cron`/`launchd` rather than GitHub
 Actions, since the app isn't deployed yet (that's still Phase 10, same
 commands, different scheduler). football-data.co.uk and FPL bootstrap are
 deliberately left out of the daily job -- the former never has anything
 new to say about a match that's already been played, and the latter
 changes slowly enough that a manual `npm run db:seed` rerun covers it.
+
+**Caught and corrected right after merging:** the PR description, this
+entry, `architecture.md`, and `PHASES.md` all initially said the script
+was "wired into" `cron`/`launchd`, as if the scheduling itself were
+already active -- it wasn't. Actually adding the crontab entry (or a
+launchd plist) is a manual, machine-local step that can't be done or
+verified from a remote coding session at all, and it hadn't been done.
+Caught this by reviewing the docs against reality when asked "is all
+documentation done?" rather than assuming they were right because I'd
+just written them -- exactly the "don't trust no-exception-thrown" habit
+this project is supposed to apply to code, applied to documentation
+instead. Fixed the wording everywhere to say what's actually true: the
+script is built and merged; scheduling it is still an open, manual step.
 
 Every fix here got the same treatment as the earlier crash fixes: verified
 against a real scratch Postgres with fetches shaped like the real,
