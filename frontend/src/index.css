@@ -1,22 +1,36 @@
+/*
+ * Design system, 2026-08-15 -- Chelsea blue + an "old school royal" serif
+ * pairing. --brand is a fixed Chelsea blue used for solid elements
+ * (buttons, the nav bar) that keep the same color in both themes; --accent
+ * is the interactive/link color, which DOES shift lighter in dark mode --
+ * unlike a solid white-on-blue button, blue text needs to lighten against
+ * a dark background to keep real contrast, not just look consistent.
+ * --gold is a muted heraldic accent, used sparingly (thin rules, small
+ * badges) -- Chelsea blue carries the identity, gold is trim, not a
+ * second primary color.
+ */
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
+  --text: #3b4152;
+  --text-h: #034694;
+  --bg: #fdfcf9;
+  --border: #d7dde8;
+  --code-bg: #eef1f6;
+  --brand: #034694;
+  --brand-dark: #023268;
+  --gold: #a9812e;
+  --accent: #034694;
+  --accent-bg: rgba(3, 70, 148, 0.08);
+  --accent-border: rgba(3, 70, 148, 0.4);
+  --social-bg: rgba(238, 241, 246, 0.5);
   --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+    rgba(3, 20, 50, 0.12) 0 10px 15px -3px, rgba(3, 20, 50, 0.06) 0 4px 6px -2px;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --body: 'EB Garamond', Palatino, Georgia, serif;
+  --heading: 'Cinzel', 'Palatino Linotype', Palatino, serif;
   --mono: ui-monospace, Consolas, monospace;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
+  font: 19px/150% var(--body);
+  letter-spacing: 0.1px;
   color-scheme: light dark;
   color: var(--text);
   background: var(--bg);
@@ -26,23 +40,24 @@
   -moz-osx-font-smoothing: grayscale;
 
   @media (max-width: 1024px) {
-    font-size: 16px;
+    font-size: 17px;
   }
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
+    --text: #b9c4d6;
+    --text-h: #eef2f8;
+    --bg: #0a1628;
+    --border: #24344f;
+    --code-bg: #101f38;
+    --gold: #c9a54c;
+    --accent: #7fb2f0;
+    --accent-bg: rgba(127, 178, 240, 0.14);
+    --accent-border: rgba(127, 178, 240, 0.45);
+    --social-bg: rgba(16, 31, 56, 0.5);
     --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+      rgba(0, 0, 0, 0.45) 0 10px 15px -3px, rgba(0, 0, 0, 0.3) 0 4px 6px -2px;
   }
 
   #social .button-icon {
@@ -67,29 +82,40 @@ body {
 }
 
 h1,
-h2 {
+h2,
+h3 {
   font-family: var(--heading);
-  font-weight: 500;
   color: var(--text-h);
 }
 
 h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
+  font-size: 44px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  margin: 32px 0 8px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--gold);
   @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
+    font-size: 30px;
+    letter-spacing: 1px;
   }
 }
 h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 130%;
+  letter-spacing: 0.3px;
   margin: 0 0 8px;
   @media (max-width: 1024px) {
-    font-size: 20px;
+    font-size: 19px;
   }
+}
+h3 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  margin: 0 0 6px;
 }
 p {
   margin: 0;

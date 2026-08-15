@@ -2277,3 +2277,67 @@ issue doing this, not a hypothetical one -- the first seeded "upcoming"
 fixture was dated 2024, which the real current date (2026) treats as
 already in the past, so the page correctly showed nothing until the seed
 data was redated forward.
+
+## A real design system, not defaults (2026-08-15)
+
+First real design pass on the frontend -- until now every page ran on
+Vite's default scaffold styling (system-ui font, a generic purple
+accent, no `button` element styled at all, no `:focus-visible` styling
+anywhere). Brief: Chelsea's colors, British football flavor, an "old
+school royal" feel.
+
+**Palette**: `#034694` (Chelsea blue) as `--brand` -- a fixed color used
+for solid elements (the nav bar, buttons) that stays the *same* in both
+light and dark mode, plus `--accent`, the interactive/link color, which
+*does* lighten in dark mode (`#7fb2f0`) since blue text needs more
+lightness than a solid white-on-blue button does to stay readable
+against a dark background. Worth being explicit about that distinction --
+"the brand color" and "a color with enough contrast to read as a link"
+aren't automatically the same requirement. A muted gold (`--gold`,
+`#a9812e` light / `#c9a54c` dark) is trim only -- a rule under every
+`h1`, the nav's bottom border -- not a second primary color competing
+with the blue for attention.
+
+**Typography**: Cinzel (a serif built on Roman inscriptional lettering --
+genuinely what "old school royal" looks like, not just a generic serif)
+for headings, set uppercase with letterspacing for the heraldic/crest
+feel; EB Garamond (a classic book serif, based on Claude Garamond's
+Renaissance-era type) for body text, chosen specifically because Cinzel
+is a *display* face -- legible as a short heading, not as paragraphs of
+running text. Never use a display font for body copy just because it's
+the "theme" font; readability at length always wins there.
+
+**Two real gaps fixed that existed before this pass, not introduced by
+it**: no `button` element had any styling at all (every button in the
+app, including "Log a bet" and "Settle", rendered as a raw browser
+default), and no `:focus-visible` style existed anywhere -- keyboard
+navigation had literally no visible indicator of where focus was. Both
+are now real, app-wide rules, not per-page patches.
+
+**British slang**: applied to page titles, loading states, and empty
+states ("Hang about, fetching the sides…", "Nothing on the fixture list
+just yet.", "Nothing on the books yet — fancy a flutter?") across all six
+pages. Deliberately did *not* touch functional action-button labels
+("Log a bet", "Submit", "Settle", "Delete") -- those need to stay
+unambiguous for someone mid-workflow, and a cute label on a button you're
+about to click to spend real logged-bet data is the wrong place to spend
+personality.
+
+**Explicitly out of scope for this pass, and why**: team logos and player
+headshots. Both need a real schema change (`teams`/`players` have no
+image-URL column yet) and a seed-pipeline change to actually capture them
+-- API-Football already returns crest/photo URLs in its real responses,
+so sourcing through the API we're already licensed to use is the right
+call, not scraping them from somewhere else. That's real backend/pipeline
+work, not something to squeeze into a CSS pass just because it was asked
+for in the same breath -- follow-up units, not shortcuts taken here to
+appear more "done."
+
+**Verified in an actual browser, both themes, not just typechecked**:
+seeded real data against a scratch Postgres, ran the real backend +
+frontend dev servers, and screenshotted four real pages (team list,
+predictions, team dashboard, login) with Playwright in light mode, then
+re-screenshotted the predictions page with `colorScheme: 'dark'` to
+confirm the dark-mode palette actually works, not just that it was
+written. Both held up: real contrast, real gold rule under headings in
+both themes, no broken layouts.

@@ -292,7 +292,25 @@ choice rather than introducing a new ML paradigm.
 - [ ] Unit tests on model evaluation / aggregation / business logic
 - [ ] One E2E test (Playwright): log in → view dashboard → log a bet → see
       it tracked
-- [ ] UI polish pass against a real design system, not defaults
+- [x] UI polish pass against a real design system, not defaults -- built
+      2026-08-15: Chelsea blue (`#034694`) + a muted gold trim as the
+      palette, Cinzel (heraldic, inscriptional serif) for headings and
+      Cinzel is used ALL CAPS with a gold underline, gold rule under
+      every `h1`, and EB Garamond for body text -- both light and dark
+      mode redesigned, not just light mode with dark mode left on old
+      defaults. Added real `button`/`:focus-visible` styling that never
+      existed before this pass (every button was raw browser defaults; no
+      keyboard-focus indicator existed at all -- a real accessibility gap,
+      not just cosmetic). A light British-slang copy pass on page titles,
+      loading states, and empty states across all six pages, deliberately
+      kept off functional action-button labels so those stay unambiguous.
+      Team logos and player headshots deliberately NOT done in this pass
+      -- both need a schema change and a seed-pipeline change to actually
+      capture them from API-Football (which already returns crest/photo
+      URLs), so they're their own follow-up units, not squeezed into a
+      pure CSS/typography pass. Verified in an actual browser, both light
+      and dark, not just typechecked -- screenshotted 4 real pages with
+      real seeded data via Playwright before calling this done
 - [ ] Explain: what's worth testing vs not, test pyramid basics
 
 ## Phase 10 — Deployment & scaling plan

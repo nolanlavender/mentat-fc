@@ -97,7 +97,7 @@ export function PredictionsPage() {
       </label>
 
       {error && <p className="error">Couldn't load predictions: {error}</p>}
-      {fixtures?.length === 0 && <p>No upcoming fixtures found.</p>}
+      {fixtures?.length === 0 && <p>Nothing on the card just now.</p>}
 
       <ul className="prediction-list">{fixtures?.map((f) => <PredictionRow key={f.id} fixture={f} />)}</ul>
     </div>

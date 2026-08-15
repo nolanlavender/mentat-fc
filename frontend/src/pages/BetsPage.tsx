@@ -262,7 +262,7 @@ export function BetsPage() {
 
       <section>
         <h2>All bets</h2>
-        {bets?.length === 0 && <p>No bets logged yet.</p>}
+        {bets?.length === 0 && <p>Nothing on the books yet — fancy a flutter?</p>}
         {bets?.map((bet) => (
           <div className="bet-card" key={bet.id}>
             <div className="bet-card-header">

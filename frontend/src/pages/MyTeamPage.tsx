@@ -21,7 +21,7 @@ export function MyTeamPage() {
     <div className="page">
       <h1>My Team</h1>
 
-      {loading && <p>Loading…</p>}
+      {loading && <p>Hang about…</p>}
       {error && <p className="error">Couldn't load your team: {error.message}</p>}
 
       {data && (

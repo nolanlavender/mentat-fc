@@ -26,6 +26,9 @@ function Nav() {
 
   return (
     <header className="site-nav">
+      <Link to="/" className="nav-brand">
+        Mentat FC
+      </Link>
       <Link to="/">Teams</Link>
       <Link to="/my-team">My Team</Link>
       <Link to="/predictions">Predictions</Link>
