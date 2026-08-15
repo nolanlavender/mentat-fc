@@ -1327,3 +1327,147 @@ Postgres, and confirmed all of it -- exactly 2 fetch calls, elapsed time
 respected the 1-second `Retry-After` header, the budget counter only
 incremented once (the failed attempt didn't count), and the fixture data
 from the eventually-successful call landed correctly in Postgres.
+
+## Phase 7 — Goal scorer prediction, planned but paused (2026-08-15)
+
+Real depth in `fixture_player_stats` (minutes + goals per player per
+fixture, 3 seasons, both leagues) is what this needs, and the Pro-tier
+backfill that provides it had literally just started -- decided the
+concept and the approach now, deliberately, rather than either blocking
+on data that doesn't exist yet or building against too little of it to
+mean anything.
+
+**Why this is a genuinely harder prediction problem than match outcome,**
+not just "the same thing at finer grain":
+
+- **Attribution noise.** Dixon-Coles is estimating something slow-moving
+  and well-sampled -- a team's attack/defense strength, built from ~35-45
+  goals a season across the whole squad. A single player's own scoring
+  rate is a much smaller, noisier sample (a 15-goal season is still only
+  15 data points), so *which* of a team's likely ~2 goals a given player
+  gets is a meaningfully less certain question than *how many* goals the
+  team gets.
+- **Appearance noise.** Predictions are generated ahead of time (batch
+  inference, same architectural choice as Phase 5), before lineups are
+  announced. A player's normal 90 minutes can vanish to rotation, a knock,
+  or a suspension with zero warning available at prediction time -- a
+  whole extra source of uncertainty match-outcome prediction never has to
+  model, since a team fields *some* XI regardless.
+
+**Planned approach, decided now so it doesn't need re-litigating later:**
+Poisson allocation on top of the existing Dixon-Coles output, not a
+separate classifier. Dixon-Coles already produces
+`predicted_home_goals`/`predicted_away_goals` per fixture; a player's
+expected goals for that match become
+`team's expected goals × player's historical share of the team's goals ×
+player's expected share of available minutes`, and `1 - e^(-λ_player)`
+(the same Poisson survival-function math already used for match outcomes
+in `dixon_coles.py`) converts that into a scoring probability. Chosen over
+a logistic-regression/XGBoost classifier specifically to stay consistent
+with Phase 5's deliberate pick of an interpretable statistical model over
+a black-box one -- introducing a second, different modeling paradigm for
+one feature would cost more in "now I have to understand two different
+kinds of model" than it would likely gain in accuracy at this stage.
+
+Picked up Phase 5's original FA Cup deferral and a new predictions-page UI
+task instead, in parallel with the backfill running in the background --
+see their own entries below.
+
+## Dedicated predictions page (2026-08-15)
+
+Small, but a real gap: match predictions existed in the database since
+Phase 5 and were genuinely working, but the only place the app *showed*
+one was buried in a single team's own dashboard, one fixture at a time.
+There was no way to see "what does the model think is happening across
+the league this week" at a glance.
+
+Fix was smaller than it sounds because almost everything needed already
+existed: `GET /api/fixtures` (list endpoint) just didn't embed a
+prediction the way `GET /api/fixtures/:id` (detail endpoint) already did.
+Added the same `LEFT JOIN LATERAL` pattern already used in
+`getFixtureById` to `listFixtures`, so every fixture in a list response
+now carries its latest prediction (or `null`, same graceful-degradation
+pattern as everywhere else in the app -- a fixture with no prediction
+yet isn't an error state). `FixtureDetail` used to duplicate the
+prediction shape inline; now it just inherits `prediction` from
+`FixtureSummary` instead of redeclaring an identical type, since both
+endpoints return the exact same shape.
+
+New `/predictions` frontend page: two competition-filtered fetches
+(Premier League, Championship) merged and sorted by kickoff time
+client-side, rather than teaching the backend a multi-competition list
+filter for a feature this small. Verified against real seeded data and a
+real headless-Chromium session: a fixture with a real prediction renders
+percentages and an expected scoreline, a fixture without one renders "No
+prediction yet," and switching the competition filter to one with no
+matching fixtures renders "No upcoming fixtures found" rather than
+erroring -- all three states exercised for real, not assumed from reading
+the code.
+
+## FA Cup reconciliation: one joint fit instead of three separate ones (2026-08-15)
+
+The real Phase 5 deferral, picked back up: Premier League and Championship
+were each fit independently, so "Arsenal's attack strength is 1.3" and
+"a Championship team's attack strength is 1.3" meant two different things
+-- each fit's `mean(log_attack) == 0` recentering (see `dixon_coles.py`'s
+identifiability note) makes "1.0" mean "average team *in that fit*," and
+the two fits have no way to know which league's average is actually
+stronger. FA Cup fixtures were sitting right there in the database the
+whole time as the answer: they're the only real matches where a Premier
+League team and a Championship team play each other, which makes them the
+literal connecting data a joint fit needs to place both leagues on one
+comparable scale. Two disconnected groups of teams that never play each
+other can't be reconciled by fitting them together in one call *without*
+the FA Cup matches -- there'd be nothing tying the groups' scales
+together at all, just two independent problems sharing one home-advantage
+term. It's specifically the crossover matches that do the actual work.
+
+**Validated the claim before trusting it, with a synthetic dataset with a
+known ground truth** (not just eyeballing real predictions and hoping
+they looked plausible): built two fake leagues, one deliberately 1.8x
+stronger than the other by construction, plus a set of "FA Cup" matches
+between them. Two independent fits (mirroring the old per-competition
+approach) both recentered to essentially the same ~1.0 mean attack
+(1.026 vs. 1.051) -- statistically indistinguishable, concretely
+demonstrating the two-independent-fits problem rather than just asserting
+it. The joint fit, same data, recovered a real, correctly-directioned gap
+(2.60x -- overshooting the 1.8x ground truth some, expected MLE noise on
+a small synthetic sample, but unambiguously in the right direction and
+magnitude), and a predicted crossover fixture correctly favored the
+stronger side. This is the actual value of testing the mechanism in
+isolation with a known answer, rather than only testing against real data
+where you don't have a ground truth to check against.
+
+**Implementation:** `data.load_finished_matches` now takes a list of
+competition names instead of one, returning a `competition_name` column
+so a joint dataset can still be filtered back apart for reporting.
+`app.train` fits one `DixonColesModel` across Premier League +
+Championship + FA Cup, then predicts upcoming fixtures in all three
+(previously FA Cup was skipped entirely). `app.evaluate`'s backtest split
+changed from three independent per-competition date cutoffs to **one
+global cutoff** across the combined dataset -- necessary so the
+train/test boundary means the same point in time for every competition,
+matching how the single deployed joint fit actually works, rather than
+three different real-world dates that happened to each be "the last 20%"
+of that competition's own results.
+
+**Verified against real Postgres, not just the synthetic math:** seeded a
+small but real cross-league dataset (Championship-only matches, plus FA
+Cup matches connecting real Premier League teams already in the seed
+snapshot to the new Championship ones), ran the actual `app.train` and
+`app.evaluate` end to end. `app.train` wrote a real FA Cup prediction for
+the first time in the project's history -- Arsenal an 84.5% favorite
+against a synthetic weaker side, matching the real quality gap built into
+the synthetic data. `app.evaluate` correctly handled all three
+competitions differently: a normal Premier League backtest with a market
+comparison, a Championship competition with genuinely zero held-out
+matches in the test window (a property of the synthetic date ranges, not
+a bug -- handled without crashing), and FA Cup correctly reporting "no
+closing odds available" since football-data.co.uk has no cup coverage and
+The Odds API integration is still deliberately deferred.
+
+The app's frontend still only *displays* Premier League and Championship
+predictions (see `docs/CLAUDE.md`'s data scope note) -- FA Cup
+predictions now genuinely exist and are meaningful, but surfacing them as
+an actual feature is separate, not-yet-decided scope, not bundled into
+this fix.

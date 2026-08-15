@@ -1,9 +1,10 @@
 """
-Batch job: fit Dixon-Coles per competition on finished matches, predict every
-upcoming (unplayed) fixture in that competition, write results to
-model_predictions. This is the scheduled batch-inference job described in
-docs/architecture.md -- run on a schedule (a GitHub Actions workflow once
-deployed, per Phase 10's plan), not called live from the backend API.
+Batch job: fit a single joint Dixon-Coles model across every competition's
+finished matches, predict every upcoming (unplayed) fixture in each
+competition, write results to model_predictions. This is the scheduled
+batch-inference job described in docs/architecture.md -- run on a schedule
+(a GitHub Actions workflow once deployed, per Phase 10's plan), not called
+live from the backend API.
 
 Usage: python -m app.train
 """
@@ -18,13 +19,27 @@ from app.dixon_coles import DixonColesModel
 
 MODEL_VERSION = "dixon-coles-v1"
 
-# FA Cup deliberately excluded: it mixes Premier League and Championship
-# teams (and lower-tier sides with no fitted parameters at all), which a
-# single-competition Dixon-Coles fit can't handle -- see the note in
-# docs/learning-log.md's Phase 5 entry. Predicting those crossover fixtures
-# needs both leagues' team strengths on one comparable scale, a real problem
-# deliberately deferred, not solved here.
-COMPETITIONS = ["Premier League", "Championship"]
+# All three fit together, not three separate per-competition fits. A
+# Premier League team's attack/defense numbers and a Championship team's
+# aren't comparable on their own -- each competition-only fit lands on an
+# arbitrary, independent scale (see the identifiability note in
+# dixon_coles.py). FA Cup fixtures are what make a *joint* fit meaningful:
+# they're the only matches where a Premier League side and a Championship
+# (or lower-tier) side play each other, so they're the actual data that
+# ties the two leagues' scales together. Without them, fitting everything
+# in one call would still be two disconnected, independently-arbitrary
+# scales wearing one shared home_advantage/rho -- the FA Cup matches are
+# the load-bearing part of this, not an incidental inclusion.
+JOINT_FIT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
+
+# Predictions get written for all three now that the joint fit makes FA Cup
+# comparisons meaningful -- fulfills the original Phase 5 intent (predict
+# FA Cup fixtures where both teams are PL/Championship sides) that a
+# single-competition fit couldn't support. The app's frontend still only
+# ever displays Premier League and Championship (see docs/CLAUDE.md's data
+# scope note); writing FA Cup predictions here doesn't change that, it just
+# makes them exist for whenever that's picked up.
+PREDICT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
 
 MIN_MATCHES_TO_FIT = 50  # below this, per-team parameters are too noisy to trust
 
@@ -72,16 +87,7 @@ def upsert_prediction(conn, fixture_id: int, prediction) -> None:
         )
 
 
-def run_for_competition(conn, competition_name: str) -> None:
-    matches = load_finished_matches(conn, competition_name)
-    if len(matches) < MIN_MATCHES_TO_FIT:
-        print(f"{competition_name}: only {len(matches)} finished matches, skipping (need {MIN_MATCHES_TO_FIT}+).")
-        return
-
-    model = DixonColesModel()
-    model.fit(matches, half_life_days=HALF_LIFE_DAYS)
-    print(f"{competition_name}: fitted on {model.fitted_on} matches, home_advantage={model.home_advantage:.3f}, rho={model.rho:.4f}")
-
+def predict_for_competition(conn, model: DixonColesModel, competition_name: str) -> None:
     upcoming = load_upcoming_fixtures(conn, competition_name)
     predicted = 0
     skipped = 0
@@ -89,9 +95,10 @@ def run_for_competition(conn, competition_name: str) -> None:
         try:
             prediction = model.predict(fixture["home_team"], fixture["away_team"])
         except ValueError:
-            # A team with no finished matches yet (e.g. newly promoted, still
-            # mid-transfer-window) has no fitted attack/defense -- skip rather
-            # than guess with an arbitrary default.
+            # A team with no finished matches yet in the joint fit (e.g. a
+            # non-league FA Cup minnow with zero appearances) has no fitted
+            # attack/defense -- skip rather than guess with an arbitrary
+            # default.
             skipped += 1
             continue
         upsert_prediction(conn, fixture["fixture_id"], prediction)
@@ -104,8 +111,20 @@ def run_for_competition(conn, competition_name: str) -> None:
 def main() -> None:
     conn = get_connection()
     try:
-        for competition_name in COMPETITIONS:
-            run_for_competition(conn, competition_name)
+        matches = load_finished_matches(conn, JOINT_FIT_COMPETITIONS)
+        if len(matches) < MIN_MATCHES_TO_FIT:
+            print(f"Only {len(matches)} finished matches across {JOINT_FIT_COMPETITIONS}, skipping (need {MIN_MATCHES_TO_FIT}+).")
+            return
+
+        model = DixonColesModel()
+        model.fit(matches, half_life_days=HALF_LIFE_DAYS)
+        print(
+            f"Joint fit on {model.fitted_on} matches across {', '.join(JOINT_FIT_COMPETITIONS)}, "
+            f"{len(model.teams)} teams, home_advantage={model.home_advantage:.3f}, rho={model.rho:.4f}"
+        )
+
+        for competition_name in PREDICT_COMPETITIONS:
+            predict_for_competition(conn, model, competition_name)
     finally:
         conn.close()
 

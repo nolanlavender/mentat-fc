@@ -1,11 +1,13 @@
 """
-Backtest: split finished matches by date, fit on the earlier portion, predict
-the held-out later portion, score the model's predictions against what
-actually happened -- and against the market's own closing-odds-implied
-probabilities as a baseline. See docs/learning-log.md's Phase 5 entry for why
-"beat the market" isn't really the bar here; this is about finding out
-honestly where the model actually stands, which is the real point of this
-step.
+Backtest: split every competition's finished matches by date using one
+global cutoff, fit a single joint Dixon-Coles model (see app.train for why
+joint, not per-competition) on the earlier portion, predict the held-out
+later portion, score the model's predictions against what actually
+happened -- and against the market's own closing-odds-implied probabilities
+as a baseline, per competition. See docs/learning-log.md's Phase 5 entry
+for why "beat the market" isn't really the bar here; this is about finding
+out honestly where the model actually stands, which is the real point of
+this step.
 
 Usage: python -m app.evaluate
 """
@@ -20,6 +22,9 @@ import pandas as pd
 from app.data import load_closing_match_winner_probabilities, load_finished_matches
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
+
+FIT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
+REPORT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
 
 TEST_FRACTION = 0.2
 MIN_MATCHES_FOR_BACKTEST = 100
@@ -61,19 +66,7 @@ def _outcome_one_hot(home_score: int, away_score: int) -> list[int]:
     return [0, 0, 1]
 
 
-def run_for_competition(conn, competition_name: str) -> None:
-    matches = load_finished_matches(conn, competition_name)
-    if len(matches) < MIN_MATCHES_FOR_BACKTEST:
-        print(f"{competition_name}: only {len(matches)} matches, not enough for a meaningful backtest, skipping.")
-        return
-
-    split_idx = int(len(matches) * (1 - TEST_FRACTION))
-    train_matches = matches.iloc[:split_idx]
-    test_matches = matches.iloc[split_idx:]
-
-    model = DixonColesModel()
-    model.fit(train_matches, half_life_days=HALF_LIFE_DAYS)
-
+def _predict_and_score(model: DixonColesModel, conn, competition_name: str, test_matches: pd.DataFrame, trained_on: int) -> None:
     rows = []
     for m in test_matches.itertuples():
         try:
@@ -98,12 +91,15 @@ def run_for_competition(conn, competition_name: str) -> None:
     outcomes = np.array([_outcome_one_hot(r.actual_home_score, r.actual_away_score) for r in pred_df.itertuples()])
     model_probs = pred_df[["model_home", "model_draw", "model_away"]].to_numpy()
 
-    print(f"{competition_name}: backtest on {len(pred_df)} held-out matches (trained on {len(train_matches)})")
+    print(f"{competition_name}: backtest on {len(pred_df)} held-out matches (joint model trained on {trained_on})")
     print(f"  Model  -- Brier: {brier_score(model_probs, outcomes):.4f}  Log-loss: {log_loss(model_probs, outcomes):.4f}")
 
     market = load_closing_match_winner_probabilities(conn, pred_df["fixture_id"].tolist())
     merged = pred_df.merge(market, on="fixture_id", how="inner")
     if merged.empty:
+        # Expected for FA Cup: football-data.co.uk has no cup coverage and
+        # The Odds API integration is deliberately deferred (see Phase 6's
+        # learning-log entry) -- there's no market baseline for it at all yet.
         print("  No closing odds available for these matches -- can't compare to a market baseline.")
         return
 
@@ -127,8 +123,30 @@ def run_for_competition(conn, competition_name: str) -> None:
 def main() -> None:
     conn = get_connection()
     try:
-        for competition_name in ["Premier League", "Championship"]:
-            run_for_competition(conn, competition_name)
+        matches = load_finished_matches(conn, FIT_COMPETITIONS)
+        if len(matches) < MIN_MATCHES_FOR_BACKTEST:
+            print(f"Only {len(matches)} matches across {FIT_COMPETITIONS}, not enough for a meaningful backtest, skipping.")
+            return
+
+        # One global date cutoff across the joint dataset, not a separate
+        # per-competition split -- matches came back ordered by kickoff_date
+        # from the query, so this is genuinely chronological. Using one cutoff
+        # means the train/test boundary means the same thing across all three
+        # competitions, matching how app.train's deployed joint fit actually
+        # works (one fit, one point in time), rather than three splits that
+        # each landed on a different real-world date.
+        split_idx = int(len(matches) * (1 - TEST_FRACTION))
+        cutoff_date = matches.iloc[split_idx]["kickoff_date"]
+        train_matches = matches[matches["kickoff_date"] < cutoff_date]
+        test_matches = matches[matches["kickoff_date"] >= cutoff_date]
+
+        model = DixonColesModel()
+        model.fit(train_matches, half_life_days=HALF_LIFE_DAYS)
+        print(f"Joint fit on {model.fitted_on} matches across {', '.join(FIT_COMPETITIONS)}, cutoff {cutoff_date}")
+
+        for competition_name in REPORT_COMPETITIONS:
+            competition_test_matches = test_matches[test_matches["competition_name"] == competition_name]
+            _predict_and_score(model, conn, competition_name, competition_test_matches, len(train_matches))
     finally:
         conn.close()
 

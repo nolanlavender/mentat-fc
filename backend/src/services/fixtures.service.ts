@@ -1,5 +1,14 @@
 import { pool } from '../db/pool.js';
 
+export interface PredictionSummary {
+  modelVersion: string;
+  probHomeWin: number;
+  probDraw: number;
+  probAwayWin: number;
+  predictedHomeGoals: number | null;
+  predictedAwayGoals: number | null;
+}
+
 export interface FixtureSummary {
   id: number;
   kickoffAt: string;
@@ -11,6 +20,11 @@ export interface FixtureSummary {
   seasonLabel: string;
   homeTeam: { id: number; name: string };
   awayTeam: { id: number; name: string };
+  // null whenever no model has run for this fixture yet -- e.g. FA Cup
+  // (deliberately unmodeled, see docs/CLAUDE.md) or a newly-seeded
+  // current-season fixture app.train hasn't predicted yet. Degrade
+  // gracefully, same pattern as the rest of the app, not an error state.
+  prediction: PredictionSummary | null;
 }
 
 export interface ListFixturesFilters {
@@ -30,13 +44,22 @@ export async function listFixtures(filters: ListFixturesFilters): Promise<Fixtur
     `SELECT f.id, f.kickoff_at, f.status, f.round, f.home_score, f.away_score,
        c.name AS competition_name, s.label AS season_label,
        ht.id AS home_team_id, ht.name AS home_team_name,
-       at.id AS away_team_id, at.name AS away_team_name
+       at.id AS away_team_id, at.name AS away_team_name,
+       mp.model_version, mp.prob_home_win, mp.prob_draw, mp.prob_away_win,
+       mp.predicted_home_goals, mp.predicted_away_goals
      FROM fixtures f
      JOIN teams ht ON ht.id = f.home_team_id
      JOIN teams at ON at.id = f.away_team_id
      JOIN competition_seasons cs ON cs.id = f.competition_season_id
      JOIN competitions c ON c.id = cs.competition_id
      JOIN seasons s ON s.id = cs.season_id
+     LEFT JOIN LATERAL (
+       SELECT model_version, prob_home_win, prob_draw, prob_away_win, predicted_home_goals, predicted_away_goals
+       FROM model_predictions mp2
+       WHERE mp2.fixture_id = f.id
+       ORDER BY predicted_at DESC
+       LIMIT 1
+     ) mp ON true
      WHERE ($1::text IS NULL OR c.name = $1)
        AND ($2::int IS NULL OR f.home_team_id = $2 OR f.away_team_id = $2)
        AND ($3::timestamptz IS NULL OR f.kickoff_at >= $3)
@@ -57,6 +80,17 @@ export async function listFixtures(filters: ListFixturesFilters): Promise<Fixtur
     seasonLabel: r.season_label,
     homeTeam: { id: r.home_team_id, name: r.home_team_name },
     awayTeam: { id: r.away_team_id, name: r.away_team_name },
+    prediction:
+      r.prob_home_win === null
+        ? null
+        : {
+            modelVersion: r.model_version,
+            probHomeWin: Number(r.prob_home_win),
+            probDraw: Number(r.prob_draw),
+            probAwayWin: Number(r.prob_away_win),
+            predictedHomeGoals: r.predicted_home_goals === null ? null : Number(r.predicted_home_goals),
+            predictedAwayGoals: r.predicted_away_goals === null ? null : Number(r.predicted_away_goals),
+          },
   }));
 }
 
@@ -86,14 +120,6 @@ export interface FixtureDetail extends FixtureSummary {
   referee: string | null;
   teamStats: FixtureTeamStats[];
   odds: FixtureOdds[];
-  prediction: {
-    modelVersion: string;
-    probHomeWin: number;
-    probDraw: number;
-    probAwayWin: number;
-    predictedHomeGoals: number | null;
-    predictedAwayGoals: number | null;
-  } | null;
 }
 
 export async function getFixtureById(id: number): Promise<FixtureDetail | undefined> {
