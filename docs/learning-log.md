@@ -1244,3 +1244,49 @@ run and fixed before merging: the fixture picker didn't exclude fixtures
 already added as a leg, so building a multi-leg parlay could silently
 re-offer the same fixture and trip the duplicate-leg guard -- filtering
 already-added fixtures out of the dropdown fixed it.
+
+## Bug found running Phase 1's lineup-depth check for real (2026-08-15)
+
+First real run of `npm run check:lineup-depth` (a real `API_FOOTBALL_KEY`,
+the exact scenario the Phase 1 plan flagged as untestable in this cloud
+session and deferred to a real machine) hit a real bug immediately:
+`error: duplicate key value violates unique constraint
+"players_external_api_football_id_key"`, thrown from
+`upsertPlayerGoldenRecord` while seeding player stats for the very first
+test fixture.
+
+Root cause: `upsertPlayerGoldenRecord` (`backend/seed/lib/db.ts`) only
+ever matched an existing player two ways -- `natural_key` (name + date of
+birth) when a DOB is known, or an exact case-insensitive name match
+otherwise. It never checked `external_api_football_id` itself, even
+though that's the most reliable identifier available whenever it's
+present -- a real bug hiding in code that had never run against real
+API-Football responses before. What actually happened: `seedApiFootballLineup`
+ran first and inserted the player under one name spelling from the
+lineups endpoint; `seedApiFootballPlayerStats` ran second for the same
+fixture and got a *differently formatted* spelling of the same real
+player's name from the stats endpoint (API-Football doesn't guarantee
+identical name strings for the same player across its own endpoints --
+accents, abbreviations). The name-based lookup missed, fell through to
+INSERT, and collided on `external_api_football_id` since it was genuinely
+the same person.
+
+Fixed by checking `external_api_football_id` first, before any name-based
+logic, whenever the caller supplies one -- see the updated docstring on
+`upsertPlayerGoldenRecord` for the full match-priority ordering. The
+general lesson, worth remembering past this one function: **when you have
+two identifiers for the same real-world entity from the same source,
+prefer the stable numeric id over any string match, even a same-source
+string match** -- "same API, so the names must agree" is not a safe
+assumption. Verified the fix directly (not just re-running the depth
+check) by reproducing the exact collision in a script -- two calls with
+the same `external_api_football_id` and different name spellings, no
+DOB on either -- confirming both calls now resolve to one row, the row's
+`full_name` stays whatever the first call set (a later, differently-
+spelled call enriches other fields but never overwrites the name), and
+regression-checked the DOB-based and name-fallback paths still merge
+correctly on their own. This is exactly why Phase 1 built the depth-check
+script to run against *one* fixture before trusting a multi-day backfill
+-- this bug would otherwise have surfaced 1 fixture in either way, but
+finding it on fixture 1 instead of fixture 500 of a live backfill is the
+whole point of that ordering.
