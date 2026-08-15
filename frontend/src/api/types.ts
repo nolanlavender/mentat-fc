@@ -29,6 +29,20 @@ export interface NextMatch {
   prediction: Prediction | null;
 }
 
+export interface FixtureSummary {
+  id: number;
+  kickoffAt: string;
+  status: string;
+  round: string | null;
+  homeScore: number | null;
+  awayScore: number | null;
+  competitionName: string;
+  seasonLabel: string;
+  homeTeam: { id: number; name: string };
+  awayTeam: { id: number; name: string };
+  prediction: Prediction | null;
+}
+
 export interface TablePosition {
   competitionName: string;
   seasonLabel: string;

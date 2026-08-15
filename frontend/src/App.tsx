@@ -4,6 +4,7 @@ import { TeamListPage } from './pages/TeamListPage';
 import { TeamDashboardPage } from './pages/TeamDashboardPage';
 import { MyTeamPage } from './pages/MyTeamPage';
 import { BetsPage } from './pages/BetsPage';
+import { PredictionsPage } from './pages/PredictionsPage';
 import { LoginPage } from './pages/LoginPage';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import './App.css';
@@ -27,6 +28,7 @@ function Nav() {
     <header className="site-nav">
       <Link to="/">Teams</Link>
       <Link to="/my-team">My Team</Link>
+      <Link to="/predictions">Predictions</Link>
       <Link to="/bets">Bets</Link>
       <span className="nav-spacer" />
       {user ? (
@@ -51,6 +53,7 @@ function App() {
         <Route path="/" element={<TeamListPage />} />
         <Route path="/teams/:id" element={<TeamDashboardPage />} />
         <Route path="/my-team" element={<MyTeamPage />} />
+        <Route path="/predictions" element={<PredictionsPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route
           path="/bets"

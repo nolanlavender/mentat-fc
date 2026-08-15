@@ -13,10 +13,17 @@ def _query_df(conn: psycopg.Connection, query: str, params: dict | None = None) 
     return pd.DataFrame(rows, columns=columns)
 
 
-def load_finished_matches(conn: psycopg.Connection, competition_name: str) -> pd.DataFrame:
-    """One row per completed match: who played, when, final score."""
+def load_finished_matches(conn: psycopg.Connection, competition_names: list[str]) -> pd.DataFrame:
+    """
+    One row per completed match: who played, when, final score, and which
+    competition it was -- across every competition passed in. Takes a list,
+    not a single name, specifically so a joint fit (e.g. Premier League +
+    Championship + FA Cup together, see app.train) can be built from one
+    query instead of three separately-fetched frames stitched together by
+    the caller.
+    """
     query = """
-        SELECT f.id AS fixture_id, f.kickoff_date,
+        SELECT f.id AS fixture_id, f.kickoff_date, c.name AS competition_name,
                f.home_team_id, ht.name AS home_team,
                f.away_team_id, at.name AS away_team,
                f.home_score, f.away_score
@@ -25,12 +32,12 @@ def load_finished_matches(conn: psycopg.Connection, competition_name: str) -> pd
         JOIN teams at ON at.id = f.away_team_id
         JOIN competition_seasons cs ON cs.id = f.competition_season_id
         JOIN competitions c ON c.id = cs.competition_id
-        WHERE c.name = %(competition_name)s
+        WHERE c.name = ANY(%(competition_names)s)
           AND f.home_score IS NOT NULL
           AND f.away_score IS NOT NULL
         ORDER BY f.kickoff_date
     """
-    return _query_df(conn, query, {"competition_name": competition_name})
+    return _query_df(conn, query, {"competition_names": competition_names})
 
 
 def load_upcoming_fixtures(conn: psycopg.Connection, competition_name: str) -> pd.DataFrame:

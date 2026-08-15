@@ -110,25 +110,25 @@ full player/lineup depth. What the app actually shows is narrower, but not
 PL-only:
 
 - **Team dashboards:** Premier League **and** Championship.
-- **Match predictions:** Premier League and Championship, **fit and
-  predicted as two separate competitions** — Dixon-Coles estimates each
-  team's attack/defense strength relative to the other teams in the same
-  fit, so a Premier League team's numbers aren't on the same scale as a
-  Championship team's. **FA Cup predictions are explicitly deferred**, not
-  silently missing: the original intent (predict FA Cup fixtures where
-  both teams are PL/Championship sides) needs the two competitions' team
-  strengths reconciled onto one shared scale first, which two independent
-  single-competition fits don't give you — real follow-on modeling work,
-  see `docs/learning-log.md`'s Phase 5 entry. Until then, FA Cup fixtures
-  show a default logo and the team name, no score prediction, regardless
-  of who's playing — degrade gracefully instead of guessing.
+- **Match predictions:** Premier League, Championship, **and FA Cup**, all
+  **fit as one joint model** — Dixon-Coles estimates every team's
+  attack/defense strength in a single fit across all three competitions'
+  results, using FA Cup fixtures specifically as the connecting data that
+  makes a Premier League team's numbers comparable to a Championship
+  team's (two independent single-competition fits can't do this — each
+  lands on its own arbitrary scale with no data tying them together; see
+  `docs/learning-log.md`'s Phase 5/7 entries for the full reasoning and a
+  synthetic validation of why). The frontend still only ever *displays*
+  Premier League and Championship — FA Cup predictions exist in
+  `model_predictions` but aren't surfaced as an app feature yet, a
+  deliberate scope boundary, not a data gap.
 - **Fantasy:** Premier League only — not a scope choice, just what FPL is.
   There's no Championship fantasy data to show.
 - **Betting tracker:** Premier League only for now — unchanged, revisit
   deliberately if that ever needs to widen.
-- Championship/FA Cup data involving lower-tier opponents still feeds the
-  model as training signal even when we don't display a prediction for
-  that specific matchup.
+- Championship/FA Cup data involving lower-tier opponents feeds the joint
+  model as training signal even for matchups the app never predicts or
+  displays.
 
 Don't build Championship/FA Cup fantasy/betting features without a
 deliberate decision to expand app scope further — this note is about

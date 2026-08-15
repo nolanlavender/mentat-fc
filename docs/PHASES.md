@@ -73,6 +73,13 @@ not optional.
       exists, squad)
 - [x] Team switcher (all 20 Premier League teams)
 - [x] Explain: component structure, where state lives, client vs server state
+- [x] **New, not in the original plan, added 2026-08-15:** dedicated
+      `/predictions` page -- a league-wide (Premier League + Championship,
+      filterable) list of upcoming fixtures with the model's prediction,
+      instead of predictions only being visible buried inside each team's
+      own dashboard. Backend: `GET /api/fixtures` now embeds each fixture's
+      latest prediction (was previously only on the single-fixture detail
+      endpoint)
 
 ## Phase 4 — FPL fantasy integration
 - [x] Pull and normalize official FPL API data (players, prices, ownership,
@@ -124,19 +131,29 @@ not optional.
       model currently loses to the market (Brier 0.5416 vs. 0.4904) --
       expected, not a bug, see the learning-log entry for why that's the
       correct outcome to expect from a first pass
-- [ ] **New, not in the original plan:** FA Cup predictions need Premier
-      League and Championship team strengths reconciled onto one shared
-      scale (two independent per-competition fits don't give you that) --
-      deliberately deferred, real follow-on modeling work
-- [ ] **New, not in the original plan:** live predictions are blocked on a
-      real `API_FOOTBALL_KEY` -- `app.train` fits correctly against the
-      full historical data but has no upcoming fixtures to predict until
-      `npm run db:seed:current-season` (in `backend/`) has pulled the
-      current season's fixture list. Once a key exists: run
-      `npm run db:seed:current-season`, then `python -m app.train`,
-      manually, as often as you like. Wiring both steps into a recurring,
-      unattended job is Phase 10's "GitHub Actions scheduled workflow for
-      the model service" item below -- not duplicated here
+- [x] **Resolved 2026-08-15 (was deferred):** FA Cup predictions needed
+      Premier League and Championship team strengths reconciled onto one
+      shared scale. Solved by switching `app.train`/`app.evaluate` from
+      three independent per-competition fits to **one joint Dixon-Coles fit
+      across all three competitions** -- FA Cup fixtures are the only
+      matches where the two leagues actually play each other, so they're
+      the real connecting data that makes a joint scale meaningful, not
+      just a bigger training set. Validated with a synthetic dataset before
+      trusting it on real data: two independent fits both recentered to
+      ~1.0 mean attack regardless of true strength (statistically
+      indistinguishable, confirming the original problem), while the joint
+      fit correctly recovered a large, correctly-directioned gap between a
+      deliberately-stronger and deliberately-weaker synthetic league. Then
+      verified against real Postgres: `app.train` wrote a real FA Cup
+      prediction for the first time (Arsenal 84.5% favorite vs. a weaker
+      side), and `app.evaluate` backtests and reports each competition
+      separately (FA Cup gracefully reports "no closing odds" -- expected,
+      not a bug, since football-data.co.uk has no cup coverage). App still
+      only *displays* Premier League/Championship; FA Cup predictions exist
+      in the database now but aren't surfaced as a feature yet
+- [x] Live predictions unblocked -- a real `API_FOOTBALL_KEY` (Pro tier) is
+      now in place, `npm run db:seed:current-season` and `npm run db:seed`
+      (full lineup/player-stats backfill) are running for real
 
 ## Phase 6 — Betting tracker
 - [x] Endpoints + UI to log a bet: pick, odds, stake, fixture, result --
@@ -188,6 +205,23 @@ not optional.
       becomes something actually wanted
 
 ## Phase 7 — Goal scorer prediction
+**Deliberately paused (2026-08-15), not started:** needs real depth in
+`fixture_player_stats` (minutes played + goals per player per fixture,
+across all 3 seasons/both leagues) from the API-Football lineup/player-stats
+backfill, which was just kicked off (Pro tier, ~7,500 calls/day) and hasn't
+run long enough yet to be worth building against. Decided approach for when
+it resumes, so this isn't a re-litigation later: **Poisson allocation**,
+not a classifier -- reuse Dixon-Coles' already-fitted team-level expected
+goals (`predicted_home_goals`/`predicted_away_goals`) as the anchor, then
+`λ_player = team's expected goals × player's historical share of the
+team's goals × player's expected share of available minutes`, converted to
+`P(scores) = 1 - e^(-λ_player)` via the same Poisson math already in
+`dixon_coles.py`. Stays consistent with Phase 5's interpretable-model
+choice rather than introducing a new ML paradigm. See
+`docs/learning-log.md` for why goal-scorer prediction is harder than match
+outcome (attribution + appearance noise) -- written up even though the
+implementation is paused, since the "explain before implementing" rule
+applies to the plan, not just the code.
 - [ ] Extend the model service to predict likely goal scorers
 - [ ] Explain: why this is harder than match outcome (minutes/rotation
       variance) and how we're accounting for it
