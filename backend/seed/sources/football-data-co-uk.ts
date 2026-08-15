@@ -9,8 +9,9 @@ import {
   getOrCreateCompetitionSeason,
   getOrCreateTeam,
   upsertFixture,
-  upsertFixtureTeamStats,
-  upsertFixtureOdds,
+  upsertFixtureTeamStatsBatch,
+  upsertFixtureOddsBatch,
+  type FixtureOddsInput,
 } from '../lib/db.js';
 
 // football-data.co.uk match-winner odds: one {open, close} column pair per
@@ -129,28 +130,42 @@ export async function seedFootballDataSeason(pool: Pool, config: FootballDataSea
       referee: row.Referee || undefined,
     });
 
-    await upsertFixtureTeamStats(pool, fixtureId, homeTeamId, true, {
-      shots: num(row, 'HS'),
-      shotsOnTarget: num(row, 'HST'),
-      corners: num(row, 'HC'),
-      fouls: num(row, 'HF'),
-      yellowCards: num(row, 'HY'),
-      redCards: num(row, 'HR'),
-    });
-    await upsertFixtureTeamStats(pool, fixtureId, awayTeamId, false, {
-      shots: num(row, 'AS'),
-      shotsOnTarget: num(row, 'AST'),
-      corners: num(row, 'AC'),
-      fouls: num(row, 'AF'),
-      yellowCards: num(row, 'AY'),
-      redCards: num(row, 'AR'),
-    });
+    await upsertFixtureTeamStatsBatch(pool, [
+      {
+        fixtureId,
+        teamId: homeTeamId,
+        isHome: true,
+        shots: num(row, 'HS'),
+        shotsOnTarget: num(row, 'HST'),
+        corners: num(row, 'HC'),
+        fouls: num(row, 'HF'),
+        yellowCards: num(row, 'HY'),
+        redCards: num(row, 'HR'),
+      },
+      {
+        fixtureId,
+        teamId: awayTeamId,
+        isHome: false,
+        shots: num(row, 'AS'),
+        shotsOnTarget: num(row, 'AST'),
+        corners: num(row, 'AC'),
+        fouls: num(row, 'AF'),
+        yellowCards: num(row, 'AY'),
+        redCards: num(row, 'AR'),
+      },
+    ]);
 
-    await seedOdds(pool, fixtureId, row);
+    await upsertFixtureOddsBatch(pool, buildOddsRows(fixtureId, row));
   }
 }
 
-async function seedOdds(pool: Pool, fixtureId: number, row: CsvRow): Promise<void> {
+// Builds every odds row for one fixture in memory first (no DB calls) so
+// the caller can write them all in a single batched INSERT -- see
+// upsertFixtureOddsBatch's docstring for why that's safe (no two rows this
+// builds can ever target the same conflict key).
+function buildOddsRows(fixtureId: number, row: CsvRow): FixtureOddsInput[] {
+  const rows: FixtureOddsInput[] = [];
+
   for (const { bookmaker, open, close } of MATCH_WINNER_BOOKMAKERS) {
     for (const [snapshotType, prefix] of [
       ['opening', open],
@@ -159,9 +174,9 @@ async function seedOdds(pool: Pool, fixtureId: number, row: CsvRow): Promise<voi
       const home = num(row, `${prefix}H`);
       const draw = num(row, `${prefix}D`);
       const away = num(row, `${prefix}A`);
-      if (home) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'match_winner', outcome: 'home', line: 0, price: home, snapshotType, source: 'football_data_co_uk' });
-      if (draw) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'match_winner', outcome: 'draw', line: 0, price: draw, snapshotType, source: 'football_data_co_uk' });
-      if (away) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'match_winner', outcome: 'away', line: 0, price: away, snapshotType, source: 'football_data_co_uk' });
+      if (home) rows.push({ fixtureId, bookmaker, market: 'match_winner', outcome: 'home', line: 0, price: home, snapshotType, source: 'football_data_co_uk' });
+      if (draw) rows.push({ fixtureId, bookmaker, market: 'match_winner', outcome: 'draw', line: 0, price: draw, snapshotType, source: 'football_data_co_uk' });
+      if (away) rows.push({ fixtureId, bookmaker, market: 'match_winner', outcome: 'away', line: 0, price: away, snapshotType, source: 'football_data_co_uk' });
     }
   }
 
@@ -172,8 +187,8 @@ async function seedOdds(pool: Pool, fixtureId: number, row: CsvRow): Promise<voi
     ] as const) {
       const over = num(row, `${prefix}>2.5`);
       const under = num(row, `${prefix}<2.5`);
-      if (over) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'over_under', outcome: 'over', line: 2.5, price: over, snapshotType, source: 'football_data_co_uk' });
-      if (under) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'over_under', outcome: 'under', line: 2.5, price: under, snapshotType, source: 'football_data_co_uk' });
+      if (over) rows.push({ fixtureId, bookmaker, market: 'over_under', outcome: 'over', line: 2.5, price: over, snapshotType, source: 'football_data_co_uk' });
+      if (under) rows.push({ fixtureId, bookmaker, market: 'over_under', outcome: 'under', line: 2.5, price: under, snapshotType, source: 'football_data_co_uk' });
     }
   }
 
@@ -183,14 +198,16 @@ async function seedOdds(pool: Pool, fixtureId: number, row: CsvRow): Promise<voi
     if (openLine !== undefined) {
       const home = num(row, `${open}H`);
       const away = num(row, `${open}A`);
-      if (home) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'asian_handicap', outcome: 'home', line: openLine, price: home, snapshotType: 'opening', source: 'football_data_co_uk' });
-      if (away) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'asian_handicap', outcome: 'away', line: openLine, price: away, snapshotType: 'opening', source: 'football_data_co_uk' });
+      if (home) rows.push({ fixtureId, bookmaker, market: 'asian_handicap', outcome: 'home', line: openLine, price: home, snapshotType: 'opening', source: 'football_data_co_uk' });
+      if (away) rows.push({ fixtureId, bookmaker, market: 'asian_handicap', outcome: 'away', line: openLine, price: away, snapshotType: 'opening', source: 'football_data_co_uk' });
     }
     if (closeLine !== undefined) {
       const home = num(row, `${close}H`);
       const away = num(row, `${close}A`);
-      if (home) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'asian_handicap', outcome: 'home', line: closeLine, price: home, snapshotType: 'closing', source: 'football_data_co_uk' });
-      if (away) await upsertFixtureOdds(pool, { fixtureId, bookmaker, market: 'asian_handicap', outcome: 'away', line: closeLine, price: away, snapshotType: 'closing', source: 'football_data_co_uk' });
+      if (home) rows.push({ fixtureId, bookmaker, market: 'asian_handicap', outcome: 'home', line: closeLine, price: home, snapshotType: 'closing', source: 'football_data_co_uk' });
+      if (away) rows.push({ fixtureId, bookmaker, market: 'asian_handicap', outcome: 'away', line: closeLine, price: away, snapshotType: 'closing', source: 'football_data_co_uk' });
     }
   }
+
+  return rows;
 }
