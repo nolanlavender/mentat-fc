@@ -25,6 +25,9 @@ erDiagram
     fpl_gameweeks ||--o{ fpl_player_gameweek_stats : has
     players ||--o{ fpl_player_gameweek_stats : has
     fixtures ||--o{ model_predictions : has
+    fixtures ||--o{ player_goal_predictions : has
+    players ||--o{ player_goal_predictions : "predicted to score"
+    teams ||--o{ player_goal_predictions : has
     fixtures ||--o{ bet_legs : has
     users ||--o{ bets : places
     bets ||--o{ bet_legs : "has (1 leg = straight bet, 2+ = parlay)"
@@ -179,6 +182,16 @@ erDiagram
         numeric predicted_home_goals
         numeric predicted_away_goals
     }
+    player_goal_predictions {
+        int id PK
+        int fixture_id FK
+        int player_id FK
+        int team_id FK
+        text model_version
+        timestamptz predicted_at
+        numeric expected_goals "lambda_player: team_xg x goal_share x minutes_share"
+        numeric prob_scores "1 - e^(-expected_goals)"
+    }
     users {
         int id PK
         text email UK
@@ -325,3 +338,11 @@ erDiagram
   to actually read and write real DDL, not have it generated — `.sql`-mode
   node-pg-migrate gives migration ordering and a bookkeeping table
   (`pgmigrations`) for free without abstracting away the SQL itself.
+- **`player_goal_predictions` is not a second prediction model** — Phase 7
+  allocates the already-fitted Dixon-Coles team's expected goals across
+  its players rather than training a separate scorer model from a much
+  smaller, noisier per-player dataset. Same never-overwritten-across-
+  versions shape as `model_predictions` (versioned, upserted within a
+  version) for the same reason: backtesting needs history, not just the
+  latest run. See `model-service/app/goal_scorer.py` and
+  `docs/learning-log.md`'s Phase 7 entry for the full reasoning.

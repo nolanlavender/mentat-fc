@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import sys
 
-from app.data import load_finished_matches, load_upcoming_fixtures
+from app.data import load_finished_matches, load_player_squad_appearances, load_upcoming_fixtures
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
+from app.goal_scorer import MIN_PLAYER_MATCHES, allocate_team_goals, compute_player_shares
 
 MODEL_VERSION = "dixon-coles-v1"
+GOAL_SCORER_MODEL_VERSION = "goal-scorer-poisson-v1"
 
 # Revised 2026-08-15: originally one joint fit across all three
 # competitions, used for every prediction. Real data exposed the cost of
@@ -89,10 +91,34 @@ def upsert_prediction(conn, fixture_id: int, prediction) -> None:
         )
 
 
-def predict_for_competition(conn, model: DixonColesModel, competition_name: str) -> None:
+def upsert_player_goal_prediction(conn, fixture_id: int, team_id: int, prediction) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO player_goal_predictions (
+                fixture_id, player_id, team_id, model_version, expected_goals, prob_scores
+            ) VALUES (%(fixture_id)s, %(player_id)s, %(team_id)s, %(model_version)s, %(expected_goals)s, %(prob_scores)s)
+            ON CONFLICT (fixture_id, player_id, model_version) DO UPDATE SET
+                predicted_at = now(),
+                expected_goals = EXCLUDED.expected_goals,
+                prob_scores = EXCLUDED.prob_scores
+            """,
+            {
+                "fixture_id": fixture_id,
+                "player_id": prediction.player_id,
+                "team_id": team_id,
+                "model_version": GOAL_SCORER_MODEL_VERSION,
+                "expected_goals": prediction.expected_goals,
+                "prob_scores": prediction.prob_scores,
+            },
+        )
+
+
+def predict_for_competition(conn, model: DixonColesModel, competition_name: str, player_shares) -> None:
     upcoming = load_upcoming_fixtures(conn, competition_name)
     predicted = 0
     skipped = 0
+    goal_scorer_predictions = 0
     for _, fixture in upcoming.iterrows():
         try:
             prediction = model.predict(fixture["home_team"], fixture["away_team"])
@@ -106,8 +132,22 @@ def predict_for_competition(conn, model: DixonColesModel, competition_name: str)
         upsert_prediction(conn, fixture["fixture_id"], prediction)
         predicted += 1
 
+        # Goal-scorer allocation reuses this same match-outcome prediction's
+        # team-level expected goals -- see app.goal_scorer for why this is
+        # allocation, not a separate model trained from scratch.
+        for team_id, team_expected_goals in (
+            (fixture["home_team_id"], prediction.predicted_home_goals),
+            (fixture["away_team_id"], prediction.predicted_away_goals),
+        ):
+            for player_prediction in allocate_team_goals(team_expected_goals, team_id, player_shares):
+                upsert_player_goal_prediction(conn, fixture["fixture_id"], team_id, player_prediction)
+                goal_scorer_predictions += 1
+
     conn.commit()
-    print(f"{competition_name}: wrote {predicted} predictions, skipped {skipped} (team not in training data).")
+    print(
+        f"{competition_name}: wrote {predicted} predictions, skipped {skipped} (team not in training data), "
+        f"{goal_scorer_predictions} player goal-scorer predictions."
+    )
 
 
 def fit_and_report(matches, label: str) -> DixonColesModel | None:
@@ -141,6 +181,19 @@ def main() -> None:
         # connection, so it's the only one that gets predicted from this model.
         joint_model = fit_and_report(matches, "Joint (Premier League + Championship + FA Cup, for FA Cup predictions)")
 
+        # Player shares use the full cross-competition appearance history
+        # regardless of which team-strength model ends up allocating for a
+        # given fixture -- a player's rotation pattern and scoring rate for
+        # their team is the same real thing whether it happened in a league
+        # game or an FA Cup tie (see load_player_squad_appearances).
+        appearances = load_player_squad_appearances(conn, JOINT_FIT_COMPETITIONS)
+        as_of = matches["kickoff_date"].max()
+        player_shares = compute_player_shares(appearances, as_of, half_life_days=HALF_LIFE_DAYS)
+        print(
+            f"Player shares: {player_shares['player_id'].nunique()} players across "
+            f"{player_shares['team_id'].nunique()} teams have >= {MIN_PLAYER_MATCHES} squad appearances."
+        )
+
         models_by_competition = {
             "Premier League": pl_model,
             "Championship": championship_model,
@@ -151,7 +204,7 @@ def main() -> None:
             if model is None:
                 print(f"{competition_name}: skipped (not enough matches to fit).")
                 continue
-            predict_for_competition(conn, model, competition_name)
+            predict_for_competition(conn, model, competition_name, player_shares)
     finally:
         conn.close()
 

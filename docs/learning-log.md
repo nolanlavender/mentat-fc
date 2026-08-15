@@ -2166,3 +2166,76 @@ joint-fit contamination -- are now confirmed to have actually been
 responsible for the bad numbers, not just plausible theories that
 happened to also be true. Both fixes were verified against synthetic/
 scratch data before this, and now against the real thing too.
+
+## Phase 7: goal scorer prediction (2026-08-15)
+
+Unblocked once the backfill was genuinely caught up. Built the approach
+already decided when this phase was originally paused: **allocation, not
+a second model**. A team's Dixon-Coles-predicted expected goals for an
+upcoming fixture already exist (`predicted_home_goals`/`predicted_away_goals`,
+computed for the match-outcome prediction) -- goal-scorer prediction
+splits that number across the team's players rather than training a
+separate model on a much smaller, noisier per-player dataset:
+`λ_player = team_xg × goal_share × minutes_share`, converted to a scoring
+probability via the same Poisson math already in `dixon_coles.py`:
+`P(scores ≥ 1) = 1 - e^(-λ_player)`.
+
+**Why harder than match outcome, and how that's actually accounted for,
+not just acknowledged:** a team always "appears" for roughly a full
+match; an individual player might be rested, injured, or subbed early,
+and there's no real-time squad-news feed here. `minutes_share` is a
+historical-average proxy for playing-time involvement -- computed across
+*every* match the team played where the player was named in the squad
+(`fixture_lineups`, starting or bench), including matches where they got
+0 minutes. That last part matters concretely: averaging only over
+matches a player actually got on the pitch would make a rotated squad
+player look like a nailed-on starter. Per-player samples are also far
+smaller and noisier than team-level ones -- a player with a handful of
+appearances has almost no real signal -- so `MIN_PLAYER_MATCHES` (5)
+excludes them from prediction entirely rather than producing a
+confident-looking number built on nothing.
+
+**A subtlety worth recording, since it's easy to get wrong**: `goal_share`
+and `minutes_share` have to answer genuinely different questions, or
+multiplying them double-counts playing time. `goal_share` is computed on
+a **per-90 rate basis** (goals per 90 minutes actually played, normalized
+against teammates' rates) -- "if everyone played equal minutes, what
+fraction of the scoring would this player account for," which does *not*
+already reflect how much they actually play. `minutes_share` answers the
+separate question of how much of a match they're likely to get. Using
+raw historical goal totals for `goal_share` instead of a per-90 rate
+would have silently baked the same playing-time effect into both factors.
+
+**Scope decision**: player shares are computed from a player's *full*
+cross-competition appearance history (Premier League + Championship + FA
+Cup combined), not scoped to whichever competition the fixture being
+predicted belongs to -- unlike the match-outcome models, which were just
+split apart specifically to stop different *teams'* strength estimates
+from contaminating each other across competitions. That contamination
+risk doesn't apply here: a player's rotation pattern and scoring rate for
+their own team is the same real thing whether it happened in a league
+game or an FA Cup tie, and excluding a team's own cup appearances would
+just throw away real, relevant data about the same players.
+
+Reused `dixon_coles.py`'s exact time-decay formula (`time_weight`, made
+public rather than duplicated) and its 180-day half-life, rather than
+inventing a second weighting scheme -- consistency with an already-tuned
+value beats guessing at a new one.
+
+**Verified against a real scratch Postgres, with a known ground truth,
+not just read for correctness:** seeded one team with three players --
+"Starman" (started all 19 matches, full 90 minutes, 17 goals), "Fringe"
+(named as a substitute in all 19 matches but rarely got on, 50 total
+minutes, 1 goal), and "TooFewApps" (only 2 appearances, deliberately
+below the reliability threshold). Ran the real `python -m app.train`:
+Starman's real predicted scoring probability came out **31.7%**, Fringe's
+**2.3%** -- correctly and dramatically directioned, not just "both
+nonzero." TooFewApps got no prediction at all, confirming the reliability
+threshold actually excludes low-sample players rather than just
+existing in the code. Reran the same command a second time and confirmed
+the row count stayed at exactly 2 -- the `ON CONFLICT` upsert is
+idempotent, not silently duplicating.
+
+Deliberately not surfaced in the frontend yet -- same "predictions exist
+in the database, not yet an app feature" boundary already used for FA Cup
+predictions in Phase 5.

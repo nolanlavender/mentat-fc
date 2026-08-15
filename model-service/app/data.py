@@ -58,6 +58,37 @@ def load_upcoming_fixtures(conn: psycopg.Connection, competition_name: str) -> p
     return _query_df(conn, query, {"competition_name": competition_name})
 
 
+def load_player_squad_appearances(conn: psycopg.Connection, competition_names: list[str]) -> pd.DataFrame:
+    """
+    One row per (team, player, fixture) where the player was named in the
+    matchday squad -- starting XI or substitute -- for a finished match,
+    including appearances with 0 minutes played (an unused substitute).
+    That last part matters for app.goal_scorer's minutes-share calculation:
+    averaging only over matches a player actually got on the pitch would
+    make a rotated squad player look like a nailed-on starter. Deliberately
+    not filtered to one competition the way load_finished_matches is for
+    the match-outcome fits -- a player's rotation pattern and scoring rate
+    for their team is the same real thing whether it happened in a league
+    game or an FA Cup tie, so goal_scorer always uses the full cross-
+    competition appearance history regardless of which team-strength model
+    (single-competition or joint) is being allocated for that fixture.
+    """
+    query = """
+        SELECT fl.team_id, fl.player_id, f.kickoff_date,
+               COALESCE(fps.minutes_played, 0) AS minutes_played,
+               COALESCE(fps.goals, 0) AS goals
+        FROM fixture_lineups fl
+        JOIN fixtures f ON f.id = fl.fixture_id
+        LEFT JOIN fixture_player_stats fps ON fps.fixture_id = fl.fixture_id AND fps.player_id = fl.player_id
+        JOIN competition_seasons cs ON cs.id = f.competition_season_id
+        JOIN competitions c ON c.id = cs.competition_id
+        WHERE c.name = ANY(%(competition_names)s)
+          AND f.status = 'finished'
+        ORDER BY f.kickoff_date
+    """
+    return _query_df(conn, query, {"competition_names": competition_names})
+
+
 def load_closing_match_winner_probabilities(conn: psycopg.Connection, fixture_ids: list[int]) -> pd.DataFrame:
     """
     Market-implied win/draw/loss probabilities from closing odds, for use as an
