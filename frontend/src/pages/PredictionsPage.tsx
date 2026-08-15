@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiUrl } from '../api/client';
 import type { FixtureSummary } from '../api/types';
+import { Crest, PlayerPhoto } from '../components/Crest';
 
 const COMPETITIONS = ['Premier League', 'Championship'] as const;
 type CompetitionFilter = (typeof COMPETITIONS)[number] | 'all';
@@ -19,8 +20,10 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
   return (
     <li className="prediction-row">
       <div className="prediction-fixture">
-        <strong>
+        <strong className="fixture-teams">
+          <Crest src={fixture.homeTeam.logoUrl} alt="" />
           {fixture.homeTeam.name} vs {fixture.awayTeam.name}
+          <Crest src={fixture.awayTeam.logoUrl} alt="" />
         </strong>
         <span className="prediction-meta">
           {fixture.competitionName} · {new Date(fixture.kickoffAt).toLocaleString()}
@@ -39,10 +42,13 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
           {topScorers.length > 0 && (
             <span className="prediction-scorers">
               Likely scorers:{' '}
-              {topScorers
-                .slice(0, SCORERS_SHOWN)
-                .map((s) => `${s.playerName} (${formatPercent(s.probScores)})`)
-                .join(', ')}
+              {topScorers.slice(0, SCORERS_SHOWN).map((s, i) => (
+                <span key={s.playerId} className="scorer-chip">
+                  <PlayerPhoto src={s.playerPhotoUrl} alt="" size={18} />
+                  {s.playerName} ({formatPercent(s.probScores)})
+                  {i < Math.min(topScorers.length, SCORERS_SHOWN) - 1 ? ', ' : ''}
+                </span>
+              ))}
             </span>
           )}
         </div>

@@ -153,7 +153,9 @@ select {
 }
 
 .team-list a {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 10px 14px;
   border-radius: 6px;
   border: 1px solid var(--border);
@@ -356,4 +358,51 @@ section + section {
   font-size: 0.9em;
   color: var(--text-h);
   opacity: 0.6;
+}
+
+.crest {
+  object-fit: contain;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+.player-photo {
+  object-fit: cover;
+  border-radius: 50%;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+.team-dashboard-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fixture-teams {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.squad-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.myteam-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.scorer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 4px;
 }

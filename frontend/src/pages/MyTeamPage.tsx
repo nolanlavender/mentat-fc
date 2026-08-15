@@ -1,12 +1,22 @@
 import { useFetch } from '../hooks/useFetch';
 import { apiUrl } from '../api/client';
 import type { MyTeam, MyTeamPlayer } from '../api/types';
+import { Crest, PlayerPhoto } from '../components/Crest';
 
 function PlayerRow({ player }: { player: MyTeamPlayer }) {
   return (
     <li>
+      <PlayerPhoto src={player.photoUrl} alt="" />
       {player.fullName}
-      {player.team ? ` — ${player.team.name}` : ''}
+      {player.team ? (
+        <>
+          {' — '}
+          <Crest src={player.team.logoUrl} alt="" size={18} />
+          {player.team.name}
+        </>
+      ) : (
+        ''
+      )}
       {player.position ? ` (${player.position})` : ''}
       {player.isCaptain && ' (C)'}
       {player.isViceCaptain && ' (VC)'}

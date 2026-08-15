@@ -9,11 +9,12 @@ export interface Team {
   id: number;
   name: string;
   shortName: string | null;
+  logoUrl: string | null;
 }
 
 export async function listTeams(): Promise<Team[]> {
-  const { rows } = await pool.query<{ id: number; name: string; short_name: string | null }>(
-    `SELECT DISTINCT t.id, t.name, t.short_name
+  const { rows } = await pool.query<{ id: number; name: string; short_name: string | null; logo_url: string | null }>(
+    `SELECT DISTINCT t.id, t.name, t.short_name, t.logo_url
      FROM teams t
      JOIN fixtures f ON f.home_team_id = t.id OR f.away_team_id = t.id
      JOIN competition_seasons cs ON cs.id = f.competition_season_id
@@ -22,16 +23,16 @@ export async function listTeams(): Promise<Team[]> {
      ORDER BY t.name`,
     [DASHBOARD_COMPETITIONS],
   );
-  return rows.map((r) => ({ id: r.id, name: r.name, shortName: r.short_name }));
+  return rows.map((r) => ({ id: r.id, name: r.name, shortName: r.short_name, logoUrl: r.logo_url }));
 }
 
 export async function getTeamById(id: number): Promise<Team | undefined> {
-  const { rows } = await pool.query<{ id: number; name: string; short_name: string | null }>(
-    `SELECT id, name, short_name FROM teams WHERE id = $1`,
+  const { rows } = await pool.query<{ id: number; name: string; short_name: string | null; logo_url: string | null }>(
+    `SELECT id, name, short_name, logo_url FROM teams WHERE id = $1`,
     [id],
   );
   if (!rows[0]) return undefined;
-  return { id: rows[0].id, name: rows[0].name, shortName: rows[0].short_name };
+  return { id: rows[0].id, name: rows[0].name, shortName: rows[0].short_name, logoUrl: rows[0].logo_url };
 }
 
 export interface NextMatch {
@@ -40,8 +41,8 @@ export interface NextMatch {
   status: string;
   round: string | null;
   competitionName: string;
-  homeTeam: { id: number; name: string };
-  awayTeam: { id: number; name: string };
+  homeTeam: { id: number; name: string; logoUrl: string | null };
+  awayTeam: { id: number; name: string; logoUrl: string | null };
   prediction: {
     modelVersion: string;
     probHomeWin: number;
@@ -60,8 +61,8 @@ async function getNextMatch(teamId: number): Promise<NextMatch | undefined> {
   // See docs/CLAUDE.md's "Data scope vs. app scope."
   const { rows } = await pool.query(
     `SELECT f.id, f.kickoff_at, f.status, f.round, c.name AS competition_name,
-       ht.id AS home_team_id, ht.name AS home_team_name,
-       at.id AS away_team_id, at.name AS away_team_name
+       ht.id AS home_team_id, ht.name AS home_team_name, ht.logo_url AS home_team_logo_url,
+       at.id AS away_team_id, at.name AS away_team_name, at.logo_url AS away_team_logo_url
      FROM fixtures f
      JOIN teams ht ON ht.id = f.home_team_id
      JOIN teams at ON at.id = f.away_team_id
@@ -92,8 +93,8 @@ async function getNextMatch(teamId: number): Promise<NextMatch | undefined> {
     status: fixture.status,
     round: fixture.round,
     competitionName: fixture.competition_name,
-    homeTeam: { id: fixture.home_team_id, name: fixture.home_team_name },
-    awayTeam: { id: fixture.away_team_id, name: fixture.away_team_name },
+    homeTeam: { id: fixture.home_team_id, name: fixture.home_team_name, logoUrl: fixture.home_team_logo_url },
+    awayTeam: { id: fixture.away_team_id, name: fixture.away_team_name, logoUrl: fixture.away_team_logo_url },
     prediction: p
       ? {
           modelVersion: p.model_version,
@@ -165,6 +166,7 @@ export interface SquadPlayer {
   id: number;
   fullName: string;
   position: string | null;
+  photoUrl: string | null;
 }
 
 async function getSquad(teamId: number): Promise<SquadPlayer[]> {
@@ -172,11 +174,11 @@ async function getSquad(teamId: number): Promise<SquadPlayer[]> {
   // FPL has no Championship data. Championship team dashboards get an empty
   // squad until fixture_lineups is backfilled and becomes the real source
   // for this. See docs/erd.md's note on players.current_team_id.
-  const { rows } = await pool.query<{ id: number; full_name: string; position: string | null }>(
-    `SELECT id, full_name, position FROM players WHERE current_team_id = $1 ORDER BY position, full_name`,
+  const { rows } = await pool.query<{ id: number; full_name: string; position: string | null; photo_url: string | null }>(
+    `SELECT id, full_name, position, photo_url FROM players WHERE current_team_id = $1 ORDER BY position, full_name`,
     [teamId],
   );
-  return rows.map((r) => ({ id: r.id, fullName: r.full_name, position: r.position }));
+  return rows.map((r) => ({ id: r.id, fullName: r.full_name, position: r.position, photoUrl: r.photo_url }));
 }
 
 export interface TeamDashboard {
