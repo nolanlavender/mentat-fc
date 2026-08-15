@@ -1965,3 +1965,68 @@ Every fix here got the same treatment as the earlier crash fixes: verified
 against a real scratch Postgres with fetches shaped like the real,
 confirmed data (not just typechecked), not assumed correct because the
 code "looked right."
+
+## A model worse than guessing led to three real duplicate clubs (2026-08-15)
+
+Ran `python -m app.evaluate` for real once the historical-link fix had
+enough data to matter, and Premier League's result was genuinely bad:
+Brier 0.7205. Checked the actual formula in `evaluate.py` rather than
+trust a gut feeling that this "seemed low" -- it's mean squared error
+against a one-hot outcome, and for that formula, guessing uniformly
+(33/33/33 every match) scores 0.667. The model was *worse than guessing*.
+Championship was roughly a wash with guessing; FA Cup was actually fine.
+Same model code ran all three, so this wasn't a Dixon-Coles bug -- it had
+to be something specific to the data feeding PL and Championship.
+
+Traced it with real queries, not assumptions, at each step:
+1. A season-fixture-count check showed Championship's historical seasons
+   inflated by 51-138 fixtures over the real 552 -- but a follow-up query
+   grouping by exact `(home_team_id, away_team_id)` pairs found the
+   *legitimate* explanation for part of it first: EFL Championship
+   play-offs. Two teams that already met twice in the regular season can
+   meet again in the play-offs (semi-final, 2 legs + a final), reusing one
+   of the two existing home/away directions -- confirmed by every single
+   "duplicate" pair's second date landing in the real, narrow May play-off
+   window, and matching exactly 552 + 5 = 557 (the number the very first
+   backfill run had already reported).
+2. That only explained 5-6 of the ~51-138 excess per season, though --
+   nowhere near enough. A distinct-team-count query was the actual
+   smoking gun: Championship seasons that should have exactly 24 real
+   clubs showed 25-27. Listing every team name that's appeared in a
+   Championship fixture, sorted alphabetically, made the culprits obvious
+   by eye: **Oxford** / **Oxford United**, **Sheffield Wednesday** /
+   **Sheffield Weds**, and **Sheffield United** / **Sheffield Utd** -- three
+   real clubs, each split across two `teams` rows because
+   `team-aliases.ts` had no entry mapping API-Football's spelling to
+   football-data.co.uk's. Every match those three clubs played got
+   inserted twice, once under each team_id -- which meant Dixon-Coles was
+   training on two separate, artificially weaker versions of each real
+   club instead of one team's true record, for three clubs playing in
+   the same division as everyone else in the backtest.
+
+Fixed with 3 new entries in `TEAM_NAME_ALIASES`, deliberately breaking
+this file's usual "map to the fuller/more official name" convention:
+these map to whichever spelling already carries the real odds/team-stats
+data (football-data.co.uk's, the only source for historical odds -- not
+re-fetchable from anywhere else), not the more official-sounding one.
+The other side's data (lineups) is cheap to re-fetch once the alias
+makes both sources agree, so keeping the odds-bearing row was the lower-
+risk choice.
+
+**Verified for real, both directions:** reproduced the exact bug first --
+the same real match seeded once as football-data.co.uk would name it
+("Oxford") and once as API-Football would ("Oxford United") -- against a
+real scratch Postgres on the pre-fix code, and got exactly the
+duplication seen in production (2 teams, 2 fixtures for the same game).
+Reran against the fix: 1 team, 1 fixture, correctly enriched with the
+external id from the second call instead of creating a duplicate.
+
+Fixing the already-duplicated production rows themselves is a separate,
+deliberately un-automated step -- it means deleting real rows (fixtures,
+their cascaded dependents, and the duplicate team rows) from a live
+database, so a reviewed, transactional cleanup script was handed off
+rather than run directly, gated behind an explicit check that no real
+logged bet (`bet_legs`) touches any of the affected fixtures first. Once
+applied and the backfill rerun, the plan is to rerun `python -m
+app.evaluate` again for a real, clean number -- not assumed better,
+checked.
