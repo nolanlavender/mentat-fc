@@ -2030,3 +2030,41 @@ logged bet (`bet_legs`) touches any of the affected fixtures first. Once
 applied and the backfill rerun, the plan is to rerun `python -m
 app.evaluate` again for a real, clean number -- not assumed better,
 checked.
+
+## Per-chunk progress logging, and a hidden daily cost (2026-08-15)
+
+Two small, related fixes asked for together after the multi-hour backfill
+runs made both gaps obvious.
+
+**Progress logging**: `backfillLineupsForCompetitionSeason` used to print
+exactly one line per whole competition-season -- for Championship (~28
+chunks needed), that meant long stretches with zero output during a real,
+working run, indistinguishable from a hang (this is what prompted the
+earlier "is this taking longer than you'd think?" question). Changed
+`seedApiFootballLineupsAndStatsBulk` to return real counts (lineup rows
+written, player-stat rows written, fixtures with no data available)
+instead of `void`, and log one line per chunk from the caller, which
+already tracks chunk position. Verified against a real scratch Postgres
+with a 25-fixture backfill (forces a 20+5 split): confirmed two separate
+log lines print, one per chunk, with real counts, not one line at the end.
+
+**The daily-refresh cost question** turned up something worth fixing
+before it became a permanent daily tax: `linkHistoricalSeasonsToApiFootball`
+(the historical-season-linking fix from two entries back) unconditionally
+re-fetches and re-upserts all 3 historical PL/Championship seasons --
+~2,700 individual fixture upserts -- on *every single call*, including
+from the daily-refresh script. The API calls themselves are cache-hits
+(cheap), but nothing skipped the DB upsert loop even once a season was
+fully linked and could never change again. Unlike `seedCurrentSeasonFixtureLists`
+(which *needs* to re-check the current season daily to catch newly-
+finished matches -- that cost is real and necessary), this one was pure
+waste in steady state.
+
+Fixed with a cheap `EXISTS` check per season before the fetch+upsert:
+if no fixture in that competition-season still has a null
+`external_api_football_id`, skip it entirely. Verified against a real
+scratch Postgres: seeded one already-fully-linked season and one
+not-yet-linked one, ran `backfillLineups()`, and confirmed zero fetch
+calls for the linked season while the unlinked one still got linked
+correctly -- the short-circuit doesn't just look right, it measurably
+changes what gets called.

@@ -85,6 +85,12 @@ manual step:
     and now only ever considers `status = 'finished'` fixtures, so a match
     that went final since the last run becomes a real backfill candidate
     the moment its status is refreshed.
+  - `linkHistoricalSeasonsToApiFootball` (called at the start of
+    `backfillLineups`) now skips a season entirely once nothing's left to
+    link, via a cheap `EXISTS` check -- it used to unconditionally
+    re-upsert all 3 historical PL/Championship seasons (~2,700 DB
+    round-trips) on every single call, which would have made the daily job
+    pay that cost forever even once fully caught up.
   - `python -m app.train` (model-service) refits Dixon-Coles on the fresh
     data and writes new predictions.
   - football-data.co.uk and FPL bootstrap are *not* part of the daily

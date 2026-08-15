@@ -360,11 +360,17 @@ const BULK_FIXTURES_CHUNK_SIZE = 20; // API-Football's `ids=` filter hard cap, p
  * pay per-row round-trips here just because the API call itself got
  * cheaper.
  */
+export interface BulkChunkResult {
+  lineupRows: number;
+  playerStatsRows: number;
+  emptyFixtures: number;
+}
+
 export async function seedApiFootballLineupsAndStatsBulk(
   pool: Pool,
   fixtures: Array<{ externalId: number; fixtureId: number }>,
-): Promise<void> {
-  if (fixtures.length === 0) return;
+): Promise<BulkChunkResult> {
+  if (fixtures.length === 0) return { lineupRows: 0, playerStatsRows: 0, emptyFixtures: 0 };
   if (fixtures.length > BULK_FIXTURES_CHUNK_SIZE) {
     throw new Error(
       `seedApiFootballLineupsAndStatsBulk got ${fixtures.length} fixtures -- API-Football's ids= filter caps at ${BULK_FIXTURES_CHUNK_SIZE} per call.`,
@@ -487,6 +493,8 @@ export async function seedApiFootballLineupsAndStatsBulk(
     pool,
     fixtures.map((f) => f.fixtureId),
   );
+
+  return { lineupRows: dedupedLineupRows.length, playerStatsRows: dedupedPlayerStatsRows.length, emptyFixtures: emptyFixtureCount };
 }
 
 function dedupeByFixturePlayer<T extends { fixtureId: number; playerId: number }>(rows: T[], label: string): T[] {
@@ -550,9 +558,11 @@ export async function backfillLineupsForCompetitionSeason(
     [competitionSeasonId],
   );
 
+  const totalChunks = Math.ceil(rows.length / BULK_FIXTURES_CHUNK_SIZE);
   let done = 0;
   for (let i = 0; i < rows.length; i += BULK_FIXTURES_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + BULK_FIXTURES_CHUNK_SIZE).map((r) => ({ externalId: r.external_api_football_id, fixtureId: r.id }));
+    const chunkNumber = i / BULK_FIXTURES_CHUNK_SIZE + 1;
 
     // Real crash hit here: "Connection terminated unexpectedly" from pg,
     // mid-multi-hour run -- a pooled connection that sat idle through an
@@ -566,7 +576,16 @@ export async function backfillLineupsForCompetitionSeason(
     // idempotent upsert.
     for (let attempt = 0; ; attempt++) {
       try {
-        await seedApiFootballLineupsAndStatsBulk(pool, chunk);
+        // Per-chunk, not just per-competition-season: a long Championship
+        // backfill (~28 chunks) used to print exactly one line at the very
+        // end, so a real, slow-but-working run looked identical to a hang
+        // for the whole time in between. This is the fix asked for after
+        // that exact confusion.
+        const result = await seedApiFootballLineupsAndStatsBulk(pool, chunk);
+        console.log(
+          `  chunk ${chunkNumber}/${totalChunks} (${chunk.length} fixtures): +${result.lineupRows} lineup rows, +${result.playerStatsRows} player-stat rows` +
+            (result.emptyFixtures > 0 ? `, ${result.emptyFixtures} fixture(s) had no data` : ''),
+        );
         done += chunk.length;
         break;
       } catch (err) {
