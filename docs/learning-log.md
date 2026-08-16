@@ -3339,3 +3339,39 @@ pattern as `team-aliases.ts`/`team-short-codes.ts`) for just the handful
 of clubs whose canonical name is long enough to wrap -- everything else
 passes through unchanged. Verified with a real Playwright script against
 all three clubs plus a control (Watford, untouched).
+
+**A second, subtler gap in the "most recent club" fix, found from a real
+live prediction.** Harry Wilson showed up as a likely scorer for Fulham
+vs. Chelsea, despite (per the user's real-world knowledge) no longer
+playing for Fulham. A real diagnostic ruled out the obvious suspects
+first: only one player row (no duplicate-identity issue), and the
+prediction was freshly computed that same day (not stale data left over
+from before any of the day's fixes). What it actually showed: every one
+of his recorded `fixture_lineups` appearances was for Fulham -- but
+`players.current_team_id` already pointed at Leeds United. FPL's
+bootstrap-static data is live and reflects a transfer the instant it
+happens; match/lineup data can only catch up once the new club has
+actually played a fixture that's been backfilled. There's a real window
+between those two moments, and the earlier "most recent club" fix
+(deliberately built to ignore `current_team_id`, since it's null for
+every Championship player) had no way to see across it.
+
+Fixed in the same query, `model-service/app/data.py`'s
+`load_player_squad_appearances`: now prefers `players.current_team_id`
+when it's set -- a strictly more current signal than one derived from
+match data, for the players FPL actually covers -- and only falls back to
+the appearance-derived most-recent club when `current_team_id` is null
+(Championship). A player transferred per FPL but with zero appearances
+yet for the new club simply has no rows survive the join: he drops out of
+`goal_scorer`'s shares table entirely and gets no prediction at all, until
+real matches exist for that club -- the same "no confident answer yet,
+not a confidently wrong one" outcome the original fix was already built
+around, just triggered by a fresher, more authoritative signal. Verified
+against a real reproduction of all three shapes at once, run through the
+actual `load_player_squad_appearances` query rather than a mock: Harry
+Wilson's transfer-with-no-new-club-data case correctly returns zero rows,
+Joao Pedro's transfer-with-new-club-data case still correctly returns
+only his new-club appearances (proving the original fix's intent survived
+the change), and a Championship player with no `current_team_id` at all
+still correctly falls back to the appearance-derived club, untouched by
+this change.
