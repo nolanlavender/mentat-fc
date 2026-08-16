@@ -2616,3 +2616,34 @@ the locator to the card header specifically, then reran the full flow
 twice more end-to-end to confirm it passes reliably, not just once by
 coincidence -- the same discipline as every other "verify, don't assume"
 pass in this project, just aimed at the test itself this time.
+
+## 2026-08-16 -- Deciding not to schedule the daily refresh locally
+
+Phase 2's daily-refresh script (`backend/scripts/daily-refresh.sh`) has
+been sitting built-and-merged but not actually scheduled since it was
+written -- the plan had always been a local `cron`/`launchd` entry as a
+stopgap, since GitHub Actions can't run anything for an app that isn't
+deployed yet. Revisited that plan today rather than just doing the
+originally-planned local step by default: since Phase 10 (deployment)
+was always going to replace that local scheduler with a GitHub Actions
+workflow running the *exact same script and commands*, the only thing
+that changes at deployment is which system presses the button. Scheduling
+it locally now would mean setting up a crontab entry (or a launchd
+.plist, plus granting cron Full Disk Access on macOS, plus knowing a
+sleeping laptop just skips its scheduled runs) and then tearing all of
+that down again a short while later at Phase 10 -- real setup effort
+for a mechanism with a deliberately short shelf life.
+
+**The actual call**: skip local scheduling entirely, run the refresh
+script by hand when it's useful in the meantime (it's idempotent and
+safe to run any time), and do the scheduling exactly once, for real, as
+part of Phase 10's GitHub Actions setup. This is a genuinely different
+decision from "haven't gotten around to it yet" -- the earlier entry
+above (Phase 2, 2026-08-15) was honest that scheduling was still an open
+manual step; this entry is the deliberate choice not to take that step
+at all in its originally-planned form. Updated `docs/PHASES.md` to mark
+the refresh-job item done (the real deliverable -- a working, resumable
+script -- is complete; scheduling is intentionally deferred, not
+missing) and `docs/architecture.md` plus the script's own header comment
+to say so, rather than leaving three places in the docs quietly implying
+"still meaning to get to this."

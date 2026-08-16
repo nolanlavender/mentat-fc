@@ -12,6 +12,15 @@ set -euo pipefail
 # since yesterday needs its status updated first, or the backfill won't
 # see it as a candidate yet.
 #
+# --- Scheduling ---
+# Decided 2026-08-16: not scheduled locally. This script was always going
+# to get replaced by an equivalent GitHub Actions scheduled workflow once
+# the app is deployed (Phase 10) -- same commands, just a different
+# trigger -- so a local cron/launchd entry now would mean setting one up
+# and tearing it down again shortly after. The one-time-setup notes below
+# are kept for reference (e.g. if you want to run this unattended before
+# Phase 10 for some reason), not because it's the current plan.
+#
 # --- One-time setup (macOS) ---
 # cron is the simplest option, but two things to know: (1) modern macOS
 # requires granting cron's process (/usr/sbin/cron) Full Disk Access in

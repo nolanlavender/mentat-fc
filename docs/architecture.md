@@ -67,13 +67,18 @@ Notes:
   request handler reaches out to a third party directly, and it's
   deliberate, not a crack in the pattern.
 
-## Keeping data current (designed in Phase 1, script built 2026-08-15, not yet scheduled)
+## Keeping data current (designed in Phase 1, script built 2026-08-15, scheduling deferred to Phase 10)
 
 The seed pipeline (`backend/seed/`) populates historical data once, but the
 *current* season keeps moving: new fixtures get scheduled, results go
 final, and the model's predictions go stale without a refit. The script
-exists now; it isn't actually running on a schedule yet -- that's still a
-manual step:
+exists and is merged, but it isn't running on a schedule yet -- and won't
+be until Phase 10, deliberately. It was originally meant to run via the
+local machine's `cron`/`launchd` in the meantime, but since Phase 10
+swaps in a GitHub Actions scheduled workflow running the exact same
+commands, that local scheduling step would just get set up and torn down
+again a short while later. Not worth doing twice -- see the note below.
+Until then it only runs when invoked by hand:
 
 - **No new fetching logic needed.** Every seed source module already does
   idempotent upserts (`ON CONFLICT ... DO UPDATE`), so "refresh" is just
@@ -101,12 +106,16 @@ manual step:
   → `npm run db:seed:backfill-lineups` → `python -m app.train`, in that
   order (order matters: the backfill only sees a fixture as a candidate
   once its status says `finished`, so the fixture-list refresh has to run
-  first). Meant for the local machine's `cron`/`launchd` (see the script's
-  header comment for setup) rather than GitHub Actions, since the app isn't
-  deployed yet — Phase 10 replaces this with the equivalent scheduled
-  workflow once it is, same commands, different scheduler. **The script is
-  written and merged, but nothing has actually added it to `cron`/`launchd`
-  yet** -- until that manual step happens, it only runs if invoked by hand.
+  first). Written to run under either a local `cron`/`launchd` entry or a
+  GitHub Actions scheduled workflow -- same script, same commands, only
+  the trigger differs. **Decided 2026-08-16: skip the local `cron`/
+  `launchd` step entirely and wire this up once, in Phase 10, as the
+  GitHub Actions workflow.** The local-scheduler step was only ever a
+  stopgap for "before the app is deployed" -- since Phase 10 was always
+  going to replace it with the exact same commands under a different
+  trigger, scheduling it locally now would mean setting it up and tearing
+  it down again shortly after, for no real benefit. Until Phase 10, the
+  script only runs when invoked by hand.
 - **What this explicitly doesn't cover**: live/in-play score updates (this
   app is not building a live-score ticker) and live betting odds (Phase 6,
   The Odds API, a separate concern from historical odds).
