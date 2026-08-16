@@ -2437,3 +2437,34 @@ Verified by priming a scratch cache file with synthetic fixture data
 `seedApiFootballFixtures` -- the exact function the new script calls in a
 loop -- reads it and lands real logo URLs on all four teams with no
 network call at all.
+
+**Follow-up, same day**: narrowed `backfillTeamLogos` to current season
+only (was looping all 4 seasons + 3 FA Cup years), and added
+`npm run db:seed:photos` for player headshots on the same "current season
+only" principle -- a deliberate call, not a shortcut: a team/player's
+crest or headshot is effectively static, so the only real reason to
+reach into older seasons is to catch a team/player that's since dropped
+out of PL/Championship entirely, and that's a small, acceptable gap in
+exchange for a small, predictable, fast script.
+
+Headshots specifically needed a different endpoint than the logo script
+uses, not just a smaller loop: `/fixtures/players` (what the full lineup
+backfill already calls) is scoped to one fixture, so reaching real
+current-season coverage that way means looping every fixture -- thousands
+of calls. API-Football's `/players?league=&season=` is a *different*
+endpoint: it returns every player who appeared in a given league-season
+directly, ~20 per page, each already carrying a headshot URL. A full
+current-season PL/Championship pull this way is ~25-30 pages per league
+(bounded, predictable), not thousands of per-fixture calls for the same
+coverage -- the same "use the right endpoint for the shape of data you
+actually need" lesson `seedApiFootballLineupsAndStatsBulk`'s bulk
+`/fixtures?ids=` switch taught earlier in Phase 2, applied to a different
+endpoint pair.
+
+Verified the pagination loop and the golden-record upsert together: primed
+a 2-page scratch cache (3 players total, split across pages) and confirmed
+`seedApiFootballPlayerPhotosForSeason` walks both pages, lands
+photo/nationality/position on all 3, and a second run is idempotent (same
+3 rows, no duplicates) -- proving both the multi-page walk and the
+external-id-matched upsert work correctly before trusting it against a
+real API-Football key.

@@ -3,6 +3,7 @@ import { seedFootballDataSeason } from './sources/football-data-co-uk.js';
 import { seedFplBootstrap, seedFplPlayerGameweekHistory } from './sources/fpl.js';
 import {
   seedApiFootballFixtures,
+  seedApiFootballPlayerPhotosForSeason,
   backfillLineupsForCompetitionSeason,
   BudgetExhaustedError,
 } from './sources/api-football.js';
@@ -132,61 +133,112 @@ async function seedFaCupFixtures(): Promise<void> {
  * run over an hour, almost all of it the per-fixture lineup/player-stats
  * backfill in backfillLineups below): team logos only ever come from the
  * fixtures-list response, the cheap call every full seed already makes
- * once per competition-season, so this just replays those same calls.
+ * once per competition-season, so this just replays that call.
+ *
+ * Current season only, not every historical season -- a team's crest is
+ * effectively static, so the only real reason to look at older seasons at
+ * all is to catch a team that's since dropped out of PL/Championship
+ * entirely (relegated below the Championship, or a one-off FA Cup
+ * minnow), and that's a small enough gap to accept in exchange for this
+ * running in a handful of calls instead of the 11 a full historical sweep
+ * needs. Rerun `npm run db:seed` (or manually call seedApiFootballFixtures
+ * for older seasons) if a specific historical team's logo is ever needed.
  *
  * On a machine that's already run a full seed before, this costs zero new
- * API-Football requests: every one of these fixture-list responses is
+ * API-Football requests: the current season's fixture-list response is
  * already sitting in the on-disk cache (backend/seed/raw/api-football/
  * fixtures/*.json -- see lib/cache.ts's fetch-if-absent behavior), so this
  * is just re-reading cached JSON and upserting teams.logo_url for whichever
  * teams don't have one yet (getOrCreateTeam's COALESCE means teams that
- * already have a logo are untouched). Should finish in well under a
- * minute, not the better part of an hour.
+ * already have a logo are untouched).
  */
 export async function backfillTeamLogos(): Promise<void> {
   if (!process.env.API_FOOTBALL_KEY) {
     throw new Error('API_FOOTBALL_KEY is not set -- required to pull team logos from API-Football.');
   }
 
+  const currentSeasonCode = SEASON_CODES[SEASON_CODES.length - 1];
+  const seasonLabel = `20${currentSeasonCode.slice(0, 2)}/${currentSeasonCode.slice(2, 4)}`;
+  const externalSeasonYear = Number(`20${currentSeasonCode.slice(0, 2)}`);
+
   const leagues: Array<{ name: string; externalLeagueId: number }> = [
     { name: 'Premier League', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.premierLeague },
     { name: 'Championship', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.championship },
   ];
 
-  for (const seasonCode of SEASON_CODES) {
-    const seasonLabel = `20${seasonCode.slice(0, 2)}/${seasonCode.slice(2, 4)}`;
-    const externalSeasonYear = Number(`20${seasonCode.slice(0, 2)}`);
-    for (const league of leagues) {
-      console.log(`Pulling ${league.name} ${seasonLabel} fixtures (for team logos)...`);
-      await seedApiFootballFixtures(pool, {
-        competitionName: league.name,
-        competitionType: 'league',
-        externalLeagueId: league.externalLeagueId,
-        seasonLabel,
-        externalSeasonYear,
-        seasonStart: `${externalSeasonYear}-08-01`,
-        seasonEnd: `${externalSeasonYear + 1}-06-30`,
-      });
-    }
-  }
-
-  for (const year of FA_CUP_SEASON_YEARS) {
-    console.log(`Pulling FA Cup ${year}/${String(year + 1).slice(2)} fixtures (for team logos)...`);
+  for (const league of leagues) {
+    console.log(`Pulling ${league.name} ${seasonLabel} fixtures (for team logos)...`);
     await seedApiFootballFixtures(pool, {
-      competitionName: 'FA Cup',
-      competitionType: 'cup',
-      externalLeagueId: API_FOOTBALL_LEAGUE_IDS.faCup,
-      seasonLabel: `${year}/${String(year + 1).slice(2)}`,
-      externalSeasonYear: year,
-      seasonStart: `${year}-08-01`,
-      seasonEnd: `${year + 1}-06-30`,
+      competitionName: league.name,
+      competitionType: 'league',
+      externalLeagueId: league.externalLeagueId,
+      seasonLabel,
+      externalSeasonYear,
+      seasonStart: `${externalSeasonYear}-08-01`,
+      seasonEnd: `${externalSeasonYear + 1}-06-30`,
     });
   }
+
+  const currentFaCupYear = FA_CUP_SEASON_YEARS[FA_CUP_SEASON_YEARS.length - 1];
+  console.log(`Pulling FA Cup ${currentFaCupYear}/${String(currentFaCupYear + 1).slice(2)} fixtures (for team logos)...`);
+  await seedApiFootballFixtures(pool, {
+    competitionName: 'FA Cup',
+    competitionType: 'cup',
+    externalLeagueId: API_FOOTBALL_LEAGUE_IDS.faCup,
+    seasonLabel: `${currentFaCupYear}/${String(currentFaCupYear + 1).slice(2)}`,
+    externalSeasonYear: currentFaCupYear,
+    seasonStart: `${currentFaCupYear}-08-01`,
+    seasonEnd: `${currentFaCupYear + 1}-06-30`,
+  });
 
   const { rows } = await pool.query<{ total: string; with_logo: string }>(
     `SELECT count(*) AS total, count(logo_url) AS with_logo FROM teams`,
   );
   console.log(`Done: ${rows[0].with_logo}/${rows[0].total} teams now have a logo_url.`);
+}
+
+/**
+ * Standalone, bounded-cost path to capture player headshots -- for
+ * `npm run db:seed:photos`, exported so seed/backfill-photos.ts can run
+ * just this on its own. Uses /players?league=&season= (a whole-league-
+ * season player list, ~20 players/page, each already carrying a photo
+ * URL) instead of the per-fixture /fixtures/players endpoint the full
+ * lineup backfill uses -- looping every fixture's players to reach the
+ * same coverage would mean thousands of calls; this is ~25-30 pages per
+ * league for one season.
+ *
+ * Current season only, same reasoning as backfillTeamLogos above: this is
+ * about getting headshots for the squads actually playing right now, not
+ * an exhaustive historical sweep, and it keeps a rerun's cost small and
+ * predictable rather than growing with 4 seasons' worth of squads. A
+ * player who's already in the DB (from lineups or FPL) gets matched by
+ * external_api_football_id and enriched with a photo; nothing here
+ * touches which team a player is "on" (players.current_team_id stays
+ * FPL's alone to set, see lib/db.ts's setPlayerCurrentTeam).
+ */
+export async function backfillPlayerPhotos(): Promise<void> {
+  if (!process.env.API_FOOTBALL_KEY) {
+    throw new Error('API_FOOTBALL_KEY is not set -- required to pull player photos from API-Football.');
+  }
+
+  const currentSeasonCode = SEASON_CODES[SEASON_CODES.length - 1];
+  const externalSeasonYear = Number(`20${currentSeasonCode.slice(0, 2)}`);
+
+  const leagues: Array<{ name: string; externalLeagueId: number }> = [
+    { name: 'Premier League', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.premierLeague },
+    { name: 'Championship', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.championship },
+  ];
+
+  for (const league of leagues) {
+    console.log(`Pulling ${league.name} ${externalSeasonYear}/${String(externalSeasonYear + 1).slice(2)} player photos from API-Football...`);
+    const result = await seedApiFootballPlayerPhotosForSeason(pool, league.externalLeagueId, externalSeasonYear);
+    console.log(`  ${result.playersSeen} player(s) seen.`);
+  }
+
+  const { rows } = await pool.query<{ total: string; with_photo: string }>(
+    `SELECT count(*) AS total, count(photo_url) AS with_photo FROM players`,
+  );
+  console.log(`Done: ${rows[0].with_photo}/${rows[0].total} players now have a photo_url.`);
 }
 
 /**
