@@ -2812,3 +2812,45 @@ today's bugs were caught only because the app actually got used for real
 and something looked wrong on screen. Real production data keeps
 surfacing exactly the class of gap this project's whole "verify against
 real data, not just no-exception-thrown" philosophy exists for.
+
+**A third real production bug, same day, different shape**: relegated
+teams (Luton, spotted by name on the live site) still showing up under
+"Premier League" on the team list. Not corrupted data this time -- Luton
+really did play in the Premier League, just in an earlier stored season
+(3 years kept for model training). `listTeams`'s join only checked
+competition, never season, so "played a Premier League fixture ever"
+quietly stood in for "is a Premier League team right now." Fixed by
+scoping to each competition's most-recent season by `start_date` -- the
+same stand-in `getTablePosition` already uses elsewhere in this file,
+since `competition_seasons.is_current` still isn't reliably set. Verified
+with a real reproduction: a team seeded with a fixture only in an old
+season, alongside one seeded in the current season, confirmed the old
+one disappears from the filtered list and the current one doesn't.
+
+**Player detail pages and team form**, the actual feature work requested
+alongside the bug reports. Extended the already-existing (but unused by
+the frontend) `GET /api/players/:id` rather than adding a parallel
+endpoint -- nothing depended on its old minimal shape, so there was no
+reason to fork it. Season stats picks the player's most-recently-played
+season by matching against real `fixture_player_stats` rows, not "the
+current calendar season," so a player with no recent appearances still
+gets a real season's totals instead of an empty one. "Last 5 matches"
+form is derived from the game log's own rows (already exactly 5, no
+separate query); "last 30 days" form is a genuinely separate query, since
+that window can hold a different number of matches than 5, not just a
+shorter or longer prefix of the same list. Team-level form deliberately
+spans every competition a team's played, not just its league season --
+the everyday meaning of "form" is the last few results regardless of
+competition, unlike table position, which only ever makes sense scoped to
+one league table. Both reused `team_fixture_results`, the view already
+built in Phase 2 for table standings, rather than duplicating its
+win/draw/loss logic.
+
+Verified end to end with a real Playwright screenshot against seeded
+data with known values (5 matches, specific goals/assists/minutes/ratings
+per match) -- confirmed the season totals and form numbers on screen
+match hand-computed sums exactly, not just that the page rendered without
+an error. Also caught and fixed a small pre-existing spacing bug while
+verifying ("Arsenal vsCoventry" with no space) -- a missing crest and a
+missing literal space between "vs" and the next team name had been
+silently relying on each other for the visual gap.

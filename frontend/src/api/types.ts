@@ -71,11 +71,77 @@ export interface SquadPlayer {
   photoUrl: string | null;
 }
 
+export interface TeamFormMatch {
+  fixtureId: number;
+  kickoffDate: string;
+  competitionName: string;
+  opponent: { id: number; name: string; logoUrl: string | null };
+  isHome: boolean;
+  goalsFor: number;
+  goalsAgainst: number;
+  result: 'W' | 'D' | 'L';
+}
+
+export interface TeamForm {
+  matches: TeamFormMatch[];
+  wins: number;
+  draws: number;
+  losses: number;
+  goalsFor: number;
+  goalsAgainst: number;
+}
+
 export interface TeamDashboard {
   team: Team;
   nextMatch?: NextMatch;
   tablePosition?: TablePosition;
+  form: TeamForm;
   squad: SquadPlayer[];
+}
+
+export interface PlayerFormSummary {
+  matches: number;
+  goals: number;
+  assists: number;
+  minutesPlayed: number;
+  avgRating: number | null;
+}
+
+export interface PlayerSeasonStats extends PlayerFormSummary {
+  seasonLabel: string;
+  yellowCards: number;
+  redCards: number;
+}
+
+export interface PlayerGameLogEntry {
+  fixtureId: number;
+  kickoffAt: string;
+  competitionName: string;
+  seasonLabel: string;
+  isHome: boolean;
+  opponent: { id: number; name: string; logoUrl: string | null };
+  homeScore: number | null;
+  awayScore: number | null;
+  minutesPlayed: number | null;
+  goals: number | null;
+  assists: number | null;
+  rating: number | null;
+  yellowCards: number | null;
+  redCards: number | null;
+}
+
+export interface PlayerDetail {
+  id: number;
+  fullName: string;
+  dateOfBirth: string | null;
+  nationality: string | null;
+  position: string | null;
+  photoUrl: string | null;
+  currentTeam: { id: number; name: string; logoUrl: string | null } | null;
+  seasonStats: PlayerSeasonStats | null;
+  last5Form: PlayerFormSummary | null;
+  last30DaysForm: PlayerFormSummary | null;
+  gameLog: PlayerGameLogEntry[];
 }
 
 export interface MyTeamPlayer {

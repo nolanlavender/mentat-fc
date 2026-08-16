@@ -23,13 +23,31 @@ export async function listTeams(filters: { competitionName?: string } = {}): Pro
     ? DASHBOARD_COMPETITIONS.filter((c) => c === filters.competitionName)
     : DASHBOARD_COMPETITIONS;
 
+  // Scoped to each competition's most recent season, not "ever played a
+  // fixture in this competition" -- real bug, found on the live site: a
+  // team relegated out of the Premier League in an earlier stored season
+  // (3 years of historical data are kept for model training, see
+  // docs/CLAUDE.md) still showed up under "Premier League" here, since the
+  // old unscoped join only checked competition, never season. is_current on
+  // competition_seasons isn't reliably set yet (see getTablePosition's own
+  // note below), so most-recent-by-start_date is the same stand-in already
+  // used there, applied per competition independently via the correlated
+  // subquery (Premier League and Championship don't necessarily share a
+  // "most recent" season row).
   const { rows } = await pool.query<{ id: number; name: string; short_name: string | null; logo_url: string | null }>(
     `SELECT DISTINCT t.id, t.name, t.short_name, t.logo_url
      FROM teams t
      JOIN fixtures f ON f.home_team_id = t.id OR f.away_team_id = t.id
      JOIN competition_seasons cs ON cs.id = f.competition_season_id
      JOIN competitions c ON c.id = cs.competition_id
+     JOIN seasons s ON s.id = cs.season_id
      WHERE c.name = ANY($1)
+       AND s.start_date = (
+         SELECT max(s2.start_date)
+         FROM competition_seasons cs2
+         JOIN seasons s2 ON s2.id = cs2.season_id
+         WHERE cs2.competition_id = c.id
+       )
      ORDER BY t.name`,
     [competitions],
   );
@@ -172,6 +190,69 @@ async function getTablePosition(teamId: number): Promise<TablePosition | undefin
   };
 }
 
+export interface TeamFormMatch {
+  fixtureId: number;
+  kickoffDate: string;
+  competitionName: string;
+  opponent: { id: number; name: string; logoUrl: string | null };
+  isHome: boolean;
+  goalsFor: number;
+  goalsAgainst: number;
+  result: 'W' | 'D' | 'L';
+}
+
+export interface TeamForm {
+  matches: TeamFormMatch[]; // most recent first
+  wins: number;
+  draws: number;
+  losses: number;
+  goalsFor: number;
+  goalsAgainst: number;
+}
+
+const FORM_MATCHES = 5;
+
+// Across every competition the team's played, not just its current
+// league season -- "form" in the everyday football sense means the last
+// few results regardless of competition (a cup match still tells you
+// something about how a team's playing right now), unlike tablePosition
+// above which is deliberately scoped to one league table.
+async function getTeamForm(teamId: number): Promise<TeamForm> {
+  const { rows } = await pool.query(
+    `SELECT tfr.fixture_id, tfr.kickoff_date, c.name AS competition_name,
+       tfr.opponent_team_id, o.name AS opponent_name, o.logo_url AS opponent_logo_url,
+       tfr.is_home, tfr.goals_for, tfr.goals_against, tfr.result
+     FROM team_fixture_results tfr
+     JOIN teams o ON o.id = tfr.opponent_team_id
+     JOIN competition_seasons cs ON cs.id = tfr.competition_season_id
+     JOIN competitions c ON c.id = cs.competition_id
+     WHERE tfr.team_id = $1 AND tfr.result IS NOT NULL
+     ORDER BY tfr.kickoff_date DESC
+     LIMIT $2`,
+    [teamId, FORM_MATCHES],
+  );
+
+  const matches: TeamFormMatch[] = rows.map((r) => ({
+    fixtureId: r.fixture_id,
+    kickoffDate: r.kickoff_date,
+    competitionName: r.competition_name,
+    opponent: { id: r.opponent_team_id, name: r.opponent_name, logoUrl: r.opponent_logo_url },
+    isHome: r.is_home,
+    goalsFor: r.goals_for,
+    goalsAgainst: r.goals_against,
+    result: r.result,
+  }));
+
+  return {
+    matches,
+    wins: matches.filter((m) => m.result === 'W').length,
+    draws: matches.filter((m) => m.result === 'D').length,
+    losses: matches.filter((m) => m.result === 'L').length,
+    goalsFor: matches.reduce((acc, m) => acc + m.goalsFor, 0),
+    goalsAgainst: matches.reduce((acc, m) => acc + m.goalsAgainst, 0),
+  };
+}
+
 export interface SquadPlayer {
   id: number;
   fullName: string;
@@ -195,6 +276,7 @@ export interface TeamDashboard {
   team: Team;
   nextMatch: NextMatch | undefined;
   tablePosition: TablePosition | undefined;
+  form: TeamForm;
   squad: SquadPlayer[];
 }
 
@@ -202,6 +284,11 @@ export async function getTeamDashboard(id: number): Promise<TeamDashboard | unde
   const team = await getTeamById(id);
   if (!team) return undefined;
 
-  const [nextMatch, tablePosition, squad] = await Promise.all([getNextMatch(id), getTablePosition(id), getSquad(id)]);
-  return { team, nextMatch, tablePosition, squad };
+  const [nextMatch, tablePosition, form, squad] = await Promise.all([
+    getNextMatch(id),
+    getTablePosition(id),
+    getTeamForm(id),
+    getSquad(id),
+  ]);
+  return { team, nextMatch, tablePosition, form, squad };
 }

@@ -1,9 +1,13 @@
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { useFetch } from '../hooks/useFetch';
 import { apiUrl } from '../api/client';
 import type { TeamDashboard } from '../api/types';
 import { TeamSwitcher } from '../components/TeamSwitcher';
 import { Crest, PlayerPhoto } from '../components/Crest';
+
+function resultClass(result: 'W' | 'D' | 'L'): string {
+  return `form-badge form-badge-${result.toLowerCase()}`;
+}
 
 export function TeamDashboardPage() {
   const { id } = useParams<{ id: string }>();
@@ -37,12 +41,38 @@ export function TeamDashboardPage() {
           )}
 
           <section>
+            <h2>Form</h2>
+            {data.form.matches.length === 0 ? (
+              <p>Nothing in the results book yet.</p>
+            ) : (
+              <>
+                <p>
+                  {data.form.wins}W {data.form.draws}D {data.form.losses}L (last {data.form.matches.length}) ·{' '}
+                  {data.form.goalsFor}-{data.form.goalsAgainst} goals
+                </p>
+                <ul className="form-list">
+                  {data.form.matches.map((m) => (
+                    <li key={m.fixtureId} className="fixture-teams">
+                      <span className={resultClass(m.result)}>{m.result}</span>
+                      {m.isHome ? 'vs' : '@'} <Crest src={m.opponent.logoUrl} alt="" />
+                      {m.opponent.name} {m.goalsFor}-{m.goalsAgainst}
+                      <span className="prediction-meta">
+                        {new Date(m.kickoffDate).toLocaleDateString()} · {m.competitionName}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </section>
+
+          <section>
             <h2>Next match</h2>
             {data.nextMatch ? (
               <>
                 <p className="fixture-teams">
                   <Crest src={data.nextMatch.homeTeam.logoUrl} alt="" />
-                  {data.nextMatch.homeTeam.name} vs
+                  {data.nextMatch.homeTeam.name} vs{' '}
                   <Crest src={data.nextMatch.awayTeam.logoUrl} alt="" />
                   {data.nextMatch.awayTeam.name}
                   {' — '}
@@ -71,9 +101,11 @@ export function TeamDashboardPage() {
               <ul className="squad-list">
                 {data.squad.map((player) => (
                   <li key={player.id}>
-                    <PlayerPhoto src={player.photoUrl} alt="" />
-                    {player.fullName}
-                    {player.position ? ` (${player.position})` : ''}
+                    <Link to={`/players/${player.id}`} className="squad-link">
+                      <PlayerPhoto src={player.photoUrl} alt="" />
+                      {player.fullName}
+                      {player.position ? ` (${player.position})` : ''}
+                    </Link>
                   </li>
                 ))}
               </ul>
