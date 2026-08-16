@@ -2468,3 +2468,89 @@ photo/nationality/position on all 3, and a second run is idempotent (same
 3 rows, no duplicates) -- proving both the multi-page walk and the
 external-id-matched upsert work correctly before trusting it against a
 real API-Football key.
+
+## 2026-08-16 -- Unit tests: what's worth testing, and the test pyramid
+
+First real automated tests in the project -- everything up to now was
+verified by hand each session (scratch Postgres, real screenshots, real
+`npm run db:seed` output). That verification style is still right for
+*integration-shaped* questions ("does this SQL actually return the right
+rows," "does this render correctly in dark mode") -- it just doesn't scale
+as a way to keep re-checking pure logic that has no I/O in it at all every
+time something nearby changes. That's the gap unit tests fill.
+
+**The test pyramid, briefly**: lots of fast, narrow unit tests at the
+bottom (pure functions, no network/DB/filesystem, run in milliseconds),
+fewer integration tests in the middle (a real DB, real HTTP calls between
+services), and very few slow, brittle end-to-end tests at the top (a real
+browser driving the whole real app). The shape matters because cost and
+fragility both increase going up: a unit test either passes or it doesn't,
+and when it fails you know exactly which function is wrong; an E2E test
+can fail for a dozen reasons unrelated to the thing it's nominally
+testing (a slow network, a flaky selector, timing), so you want as few of
+them as will still catch real regressions in outcomes that only show up
+once everything's wired together.
+
+**What actually got unit tests here, and why those things specifically**:
+functions with real branching logic and zero I/O -- the sweet spot for a
+unit test, since nothing needs mocking and a failure points at exactly one
+thing. `bets.service.ts`'s `rowsToBet` is the clearest example in the
+whole codebase: given a parlay's leg rows, it derives the overall result,
+combined odds, model probability, edge, and payout, with real rules that
+are easy to get backwards (a void leg drops out of the combined *price*
+but the rest of the parlay still has to win; "lost" beats "pending" beats
+"won" when picking the overall result, not just "first leg's result
+wins"). `dixon_coles.py`'s `time_weight`/`_tau`, `evaluate.py`'s
+`brier_score`/`log_loss`, and `goal_scorer.py`'s `compute_player_shares`/
+`allocate_team_goals` are the same shape of thing on the model-service
+side: real math with a right and a wrong answer, not something you can
+verify by glancing at the code.
+
+**What deliberately did NOT get a unit test**: anything that's mostly a
+SQL query (`teams.service.ts`, `fixtures.service.ts`'s `listFixtures`,
+etc.) -- testing those meaningfully means testing the query against a
+real database, which is an integration test, not a unit test; mocking
+`pool.query` to return canned rows would just be re-asserting the mock,
+not verifying the SQL is correct. Those stay covered by this project's
+existing scratch-Postgres-plus-real-verification habit instead. Full
+`DixonColesModel.fit()` end-to-end accuracy (does the model predict real
+football well) is also explicitly NOT a unit-test question -- that's what
+`python -m app.evaluate`'s backtest against real historical data is for
+(see the Phase 5/2026-08-15 entries); a unit test here only checks that
+`fit()`+`predict()` behave sanely on a small synthetic case (probabilities
+sum to 1, a clearly stronger team is favored), not that the model is
+*good*.
+
+**Setup mechanics worth remembering**: both `bets.service.ts` and
+`evaluate.py` transitively import a config module that reads
+`DATABASE_URL` (and `JWT_SECRET` on the backend) at *import time*, not
+lazily -- `requireEnv`/`_require_env` throw immediately if the variable
+is missing. None of the functions under test touch the database, but
+importing the file they live in still needs that env var to exist just to
+not crash. Fixed with a dummy value set before test collection: vitest's
+`setupFiles` (`backend/vitest.setup.ts`) on the Node side, a `conftest.py`
+(`os.environ.setdefault(...)`) on the pytest side -- both patterns exist
+specifically so "make the import not blow up" doesn't require an actual
+running Postgres for a unit test suite that never opens a connection.
+
+**Caught real bugs -- in the tests, not the app**: three of the new tests
+failed on the first run, and none of them were app bugs. One used a
+perfectly deterministic synthetic dataset (Strong always wins 3-0, every
+single match, home and away) for the Dixon-Coles fit -- with literally
+zero variance to explain, the correlation parameter `rho` is
+unconstrained and the optimizer drove it somewhere that made one grid
+cell's probability negative. Real numerical behavior of the log-likelihood
+surface, not a bug in `dixon_coles.py` -- fixed by giving the synthetic
+data actual match-to-match variance, the same way real football score
+lines vary. The other two assumed a "prolific full-time starter" would
+have a higher per-90 goal *rate* than a "rarely-used sub" -- not
+necessarily true, and the constructed numbers happened to give the sub
+1 goal in 100 minutes (a very high rate in a tiny sample) against the
+starter's 5 goals in 900 (a lower, steadier rate). That's actually
+correct, intended `goal_share` behavior (see the Phase 7 entry: it's a
+rate, not a volume, on purpose) -- the test's assumption was wrong, not
+the code. Fixed by reshaping the fixture data so the starter genuinely
+had both the higher rate and the higher minutes share. Exactly the
+"discover the fixture was wrong before trusting the code was right" loop
+this project has run against real data all along, just now automated and
+running in under 2 seconds instead of requiring a scratch Postgres.
