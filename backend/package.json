@@ -21,6 +21,7 @@
     "db:seed:photos": "tsx seed/backfill-photos.ts",
     "db:seed:fpl": "tsx seed/backfill-fpl.ts",
     "db:seed:backfill-lineups": "tsx seed/backfill-lineups.ts",
+    "db:seed:repair-duplicate-players": "tsx seed/repair-duplicate-players.ts",
     "db:dump": "tsx seed/dump.ts",
     "db:restore": "tsx seed/restore.ts",
     "check:lineup-depth": "tsx seed/check-lineup-depth.ts",
