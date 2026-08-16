@@ -73,23 +73,33 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
     competition appearance history regardless of which team-strength model
     (single-competition or joint) is being allocated for that fixture.
 
-    Restricted to each player's most-recent club: real bug found in
-    production 2026-08-16 -- Joao Pedro (transferred Brighton -> Chelsea)
-    kept showing up as a "reliable" Brighton goalscorer pick indefinitely,
-    because his old Brighton appearances alone cleared goal_scorer's
-    MIN_PLAYER_MATCHES threshold and nothing here checked whether he still
-    played there. players.current_team_id can't fix this generally -- it's
-    only ever populated from the FPL bootstrap, i.e. Premier League only
-    (see teams.service.ts), so it goes NULL for every Championship player
-    and would silently zero out Championship (and the FA Cup joint fit's
-    Championship side) goal-scorer predictions entirely. Deriving "current
-    club" from this same appearance data instead -- whichever team_id a
-    player's most recent finished-match appearance was for -- needs no
-    extra data source and works uniformly across every competition. A
-    just-transferred player may have too few appearances for their new
-    club yet to clear MIN_PLAYER_MATCHES and simply won't get a scorer
-    prediction for a while; that's the correct outcome (no confident data
-    yet), not a confident wrong-team one.
+    Restricted to each player's current club: real bug found in production
+    2026-08-16 -- Joao Pedro (transferred Brighton -> Chelsea) kept showing
+    up as a "reliable" Brighton goalscorer pick indefinitely, because his
+    old Brighton appearances alone cleared goal_scorer's MIN_PLAYER_MATCHES
+    threshold and nothing here checked whether he still played there.
+    Originally fixed by deriving "current club" from this same appearance
+    data -- whichever team_id a player's most recent finished-match
+    appearance was for -- since players.current_team_id is FPL-only
+    (Premier League) and null for every Championship player.
+
+    That derived version had its own real gap, found the same day: it can
+    only be as fresh as the match data itself. Harry Wilson's
+    current_team_id already pointed at Leeds United (FPL's bootstrap-static
+    is live -- it reflects a transfer the instant it happens), but he had
+    zero recorded fixture_lineups appearances there yet -- so the
+    appearance-derived logic still landed on Fulham, his last club with any
+    actual match data, and confidently predicted him to score there.
+
+    Now prefers players.current_team_id when it's set (a strictly more
+    current signal than a derived one, for the players FPL covers), falling
+    back to the appearance-derived most-recent club only when
+    current_team_id is null (Championship players). A player transferred
+    per FPL but with no appearances yet for the new club simply has zero
+    rows survive the join below -- correctly no data, not stale data, so
+    they drop out of goal_scorer's shares table and get no prediction until
+    real matches exist for that club, same "no confident answer yet" outcome
+    the original fix was already built around.
     """
     query = """
         WITH appearances AS (
@@ -108,10 +118,15 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
             SELECT DISTINCT ON (player_id) player_id, team_id
             FROM appearances
             ORDER BY player_id, kickoff_date DESC
+        ),
+        effective_club AS (
+            SELECT mrc.player_id, COALESCE(p.current_team_id, mrc.team_id) AS team_id
+            FROM most_recent_club mrc
+            JOIN players p ON p.id = mrc.player_id
         )
         SELECT a.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals
         FROM appearances a
-        JOIN most_recent_club mrc ON mrc.player_id = a.player_id AND mrc.team_id = a.team_id
+        JOIN effective_club ec ON ec.player_id = a.player_id AND ec.team_id = a.team_id
         ORDER BY a.kickoff_date
     """
     return _query_df(conn, query, {"competition_names": competition_names})
