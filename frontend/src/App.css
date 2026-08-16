@@ -312,6 +312,28 @@ section + section {
   color: var(--text-h);
 }
 
+.prediction-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.top-picks-list {
+  list-style: none;
+  padding: 0;
+}
+
+.top-picks-list li {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.top-pick-call {
+  margin-left: auto;
+  font-weight: 600;
+  color: var(--accent);
+}
+
 .prediction-list {
   list-style: none;
   padding: 0;
