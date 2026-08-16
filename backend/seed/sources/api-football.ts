@@ -613,3 +613,58 @@ function isTransientDbConnectionError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /connection terminated|connection reset|ECONNRESET|ETIMEDOUT/i.test(message);
 }
+
+interface ApiFootballPlayersListEntry {
+  player: { id: number; name: string; nationality: string | null; photo: string | null };
+  statistics: Array<{ games: { position: string | null } }>;
+}
+
+interface ApiFootballPlayersListResponse {
+  response: ApiFootballPlayersListEntry[];
+  paging: { current: number; total: number };
+}
+
+/**
+ * GET /players?league=&season= -- a *different* endpoint from
+ * /fixtures/players above, which is scoped to one fixture. This one
+ * returns every player who's appeared in a given league-season, ~20 per
+ * page, each already carrying a headshot URL -- so pulling a whole
+ * league-season's worth of photos is a bounded, predictable ~25-30 calls
+ * (page count), not the thousands a per-fixture loop over lineups would
+ * need. Existing players (already seeded via lineups or FPL) get matched
+ * by external_api_football_id and enriched with a photo through the same
+ * golden-record upsert used everywhere else -- this never creates a
+ * *fixture* row or lineup entry, it only enriches player identity data.
+ */
+export async function seedApiFootballPlayerPhotosForSeason(
+  pool: Pool,
+  leagueId: number,
+  seasonYear: number,
+): Promise<{ playersSeen: number }> {
+  let page = 1;
+  let totalPages = 1;
+  let playersSeen = 0;
+
+  do {
+    const data = await callApiFootball<ApiFootballPlayersListResponse>(
+      `/players?league=${leagueId}&season=${seasonYear}&page=${page}`,
+      `players/${leagueId}_${seasonYear}_page${page}.json`,
+    );
+
+    for (const entry of data.response) {
+      await upsertPlayerGoldenRecord(pool, {
+        externalApiFootballId: entry.player.id,
+        fullName: entry.player.name,
+        nationality: entry.player.nationality ?? undefined,
+        position: entry.statistics[0]?.games.position ?? undefined,
+        photoUrl: entry.player.photo ?? undefined,
+      });
+      playersSeen++;
+    }
+
+    totalPages = data.paging.total;
+    page++;
+  } while (page <= totalPages);
+
+  return { playersSeen };
+}
