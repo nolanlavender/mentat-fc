@@ -106,15 +106,25 @@ const teamIdCache = new Map<string, number>();
 // season, but teamIdCache means only the first sighting per process run
 // actually reaches this query, so there's no point re-sending it on every
 // cache hit.
-export async function getOrCreateTeam(pool: Pool, name: string, logoUrl?: string): Promise<number> {
+// externalApiFootballId is optional and only ever fills a gap (COALESCE),
+// same reasoning as logoUrl. Real gap found in production 2026-08-16: every
+// API-Football team payload (fixtures, lineups, player-stats) carries the
+// source's own numeric team id, but nothing ever passed it through here --
+// teams.external_api_football_id has existed since the Phase 1 schema and
+// was never once written to, which silently blocked anything needing a
+// team-scoped API-Football call (e.g. GET /players/squads?team=).
+export async function getOrCreateTeam(pool: Pool, name: string, logoUrl?: string, externalApiFootballId?: number): Promise<number> {
   const cached = teamIdCache.get(name);
   if (cached !== undefined) return cached;
 
   const { rows } = await pool.query<{ id: number }>(
-    `INSERT INTO teams (name, logo_url) VALUES ($1, $2)
-     ON CONFLICT (natural_key) DO UPDATE SET name = teams.name, logo_url = COALESCE(teams.logo_url, EXCLUDED.logo_url)
+    `INSERT INTO teams (name, logo_url, external_api_football_id) VALUES ($1, $2, $3)
+     ON CONFLICT (natural_key) DO UPDATE SET
+       name = teams.name,
+       logo_url = COALESCE(teams.logo_url, EXCLUDED.logo_url),
+       external_api_football_id = COALESCE(teams.external_api_football_id, EXCLUDED.external_api_football_id)
      RETURNING id`,
-    [name, logoUrl ?? null],
+    [name, logoUrl ?? null, externalApiFootballId ?? null],
   );
   teamIdCache.set(name, rows[0].id);
   return rows[0].id;
