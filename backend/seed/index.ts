@@ -3,7 +3,7 @@ import { seedFootballDataSeason } from './sources/football-data-co-uk.js';
 import { seedFplBootstrap, seedFplPlayerGameweekHistory } from './sources/fpl.js';
 import {
   seedApiFootballFixtures,
-  seedApiFootballPlayerPhotosForSeason,
+  seedApiFootballTeamSquadPhotos,
   backfillLineupsForCompetitionSeason,
   BudgetExhaustedError,
 } from './sources/api-football.js';
