@@ -2647,3 +2647,67 @@ script -- is complete; scheduling is intentionally deferred, not
 missing) and `docs/architecture.md` plus the script's own header comment
 to say so, rather than leaving three places in the docs quietly implying
 "still meaning to get to this."
+
+## 2026-08-16 -- Phase 10: deployment config, and where the line actually is
+
+Phase 10 splits cleanly into two very different kinds of work, and it's
+worth being explicit about why, since it's a real pattern for any project
+that reaches "deploy this somewhere real": everything that's a *file in
+the repo* (CI/CD workflow definitions, a Render blueprint, a Vercel SPA
+rewrite rule) is something a coding session can build and actually verify
+end to end. Everything that's an *account* -- creating one, connecting a
+real GitHub repo to a third-party service, typing a real database
+connection string or API key into someone else's dashboard -- fundamentally
+can't be, not as a policy choice but as a hard capability boundary: this
+session has no Render/Vercel credentials and shouldn't be handed any.
+Built the first kind for real this session; the second kind is a runbook
+(`docs/deployment.md`) for the parts that need actual hands.
+
+**GitHub Actions CI** (`.github/workflows/ci.yml`) is the one piece of
+this phase that's genuinely, fully done and verified, not just written --
+it needs no external account at all (Actions is already part of any
+GitHub repo) and no live database (backend and model-service's test
+suites were built specifically to run without one -- see the unit-test
+entry above). Verified by literally running every command the workflow
+runs, by hand, against the actual current state of the repo, before
+committing it: if `npx tsc --noEmit` or `npm run test` had failed locally,
+the workflow file would have been correct but the repo it's checking
+would have been broken, which is exactly the distinction that matters --
+a CI config is only as good as what it actually catches, and the only way
+to know that is to run the checks yourself first.
+
+**The scheduled daily-refresh workflow**
+(`.github/workflows/daily-refresh.yml`) is the direct payoff of
+yesterday's decision not to schedule the script locally -- this is that
+"schedule it exactly once, for real, at Phase 10" moment. It's real,
+committed, cron-triggered config, but it genuinely cannot be verified end
+to end from this session: it needs three repository secrets
+(`DATABASE_URL`, `API_FOOTBALL_KEY`, `JWT_SECRET`) that only exist once
+added by hand in GitHub's Settings UI. Marked done in `PHASES.md` anyway,
+same reasoning as the local-refresh-script decision: the actual
+deliverable (working, correctly-ordered, idempotent scheduled automation)
+is complete -- adding the secrets is a five-minute manual step documented
+in `docs/deployment.md`, not remaining engineering work.
+
+**`render.yaml` and `frontend/vercel.json`** are the same shape of thing
+for the hosting side: real, committed config that turns "deploy this" into
+a few dashboard clicks instead of manually filling in every build setting
+by hand, but neither one can actually deploy anything without a real
+account behind it. The SPA rewrite in `vercel.json` is worth remembering
+as a general lesson, not just a Vercel quirk: any client-side-routed app
+(React Router here) breaks on a plain static host without an explicit
+fallback rule, because a path like `/teams/5` isn't a real file on disk --
+only `index.html` is, and the router only takes over *after* it loads.
+Forgetting this is a classic "works in dev, breaks in prod" gap, since
+`npm run dev`'s dev server already handles that fallback for you
+invisibly.
+
+**What's honestly still open**: the app isn't actually live yet, and
+won't be until account creation and secret-typing happen on a real
+machine with real credentials -- `docs/deployment.md`'s steps 1-4. The
+load-check against the 50-concurrent-user target is explicitly blocked on
+that: there's no meaningful way to load-test a URL that doesn't exist,
+and pretending otherwise (e.g. load-testing `localhost`) would prove
+nothing about the actual deployed stack's behavior. Left it unchecked
+rather than substitute a fake version of the check just to close out the
+box.

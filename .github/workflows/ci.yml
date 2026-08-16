@@ -1,0 +1,61 @@
+name: CI
+
+# Gates every push to main and every PR on the same checks this project
+# already runs by hand before merging (see backend/src/services/
+# bets.service.test.ts and model-service/tests/): typecheck, unit tests,
+# and a production build for each of the three packages. No live Postgres
+# involved -- the backend/model-service test suites both use dummy env
+# values specifically so they never need a real database connection (see
+# backend/vitest.setup.ts and model-service/tests/conftest.py).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run test
+      - run: npm run build
+
+  model-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: model-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m py_compile app/*.py
+      - run: python -m pytest
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
