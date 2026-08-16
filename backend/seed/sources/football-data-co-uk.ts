@@ -109,8 +109,23 @@ export async function seedFootballDataSeason(pool: Pool, config: FootballDataSea
   const seasonId = await getOrCreateSeason(pool, seasonLabel(config.seasonCode), start, end);
   const competitionSeasonId = await getOrCreateCompetitionSeason(pool, competitionId, seasonId);
 
+  let wrongDivisionSkipped = 0;
   for (const row of rows) {
     if (!row.HomeTeam || !row.AwayTeam) continue; // trailing blank lines some seasons' CSVs have
+
+    // Confirmed for real 2026-08-16: the current season's E0 (Premier
+    // League) file contained a real row whose own Div column said "EC"
+    // (Conference/National League) -- "Boston Utd vs Aldershot", two real
+    // non-league clubs, ended up seeded as a Premier League fixture and
+    // showed up in the actual PL table on the live site. Every row was
+    // trusted to belong to whatever division this function was called for,
+    // with no check against the row's own data. Rather than assume this
+    // was a one-off and move on, guard against it structurally: skip (and
+    // count) any row whose own Div doesn't match what we asked for.
+    if (row.Div && row.Div !== config.div) {
+      wrongDivisionSkipped++;
+      continue;
+    }
 
     const homeTeamId = await getOrCreateTeam(pool, canonicalTeamName(row.HomeTeam));
     const awayTeamId = await getOrCreateTeam(pool, canonicalTeamName(row.AwayTeam));
@@ -156,6 +171,10 @@ export async function seedFootballDataSeason(pool: Pool, config: FootballDataSea
     ]);
 
     await upsertFixtureOddsBatch(pool, buildOddsRows(fixtureId, row));
+  }
+
+  if (wrongDivisionSkipped > 0) {
+    console.log(`  ${config.div} ${config.seasonCode}: skipped ${wrongDivisionSkipped} row(s) whose own Div column didn't match ${config.div}.`);
   }
 }
 

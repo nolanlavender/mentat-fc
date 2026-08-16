@@ -2778,3 +2778,37 @@ on one more real diagnostic query (whether the fixture's
 set, the bug is upstream, in what API-Football's own `league=39` query
 actually returned; if it's null, it came from the football-data.co.uk CSV
 importer instead, a completely different code path to investigate.
+
+**Boston United, resolved.** `external_api_football_id` came back null,
+ruling out API-Football. Asked for one more piece of real evidence before
+writing any fix -- the actual cached CSV line -- rather than guess from
+just the DB row. It was worth it: the real cached `E0_2627.csv` (Premier
+League, current season) contains a genuine row whose own `Div` column
+says `EC` (football-data.co.uk's code for the Conference/National
+League), not `E0` -- "Boston Utd vs Aldershot", two real non-league
+clubs. `seedFootballDataSeason` never checked a row's own `Div` column
+against the division it was told to fetch; it just trusted every row in
+whatever file it downloaded belonged to that competition. Whatever caused
+football-data.co.uk to serve (or this environment's cache to hold) a
+stray non-league row inside the Premier League file, the importer had no
+guard against it -- so it seeded a real English club nobody's ever seen
+in a Premier League table as literally... a Premier League team, with a
+real (fake) league position.
+
+Fixed structurally, not by special-casing this one match: skip (and
+count, with a log line) any row whose own `Div` doesn't match
+`config.div`. Verified with a direct reproduction of the exact failure --
+a synthetic 3-row CSV with the real "EC,...,Boston Utd,Aldershot,..." line
+mixed in among two genuine E0 rows -- confirming the bad row gets skipped
+and logged, the two real rows still seed correctly, and (the sharpest
+check) no "Boston Utd" team row gets created in the database at all.
+
+**Same underlying lesson as the whole FPL bug above, from a different
+angle**: this project's seed importers generally trust their sources'
+shape rather than re-validating every field, which is usually fine (API-
+Football and football-data.co.uk are established data feeds, not
+adversarial input) -- but "usually fine" isn't "always fine," and both of
+today's bugs were caught only because the app actually got used for real
+and something looked wrong on screen. Real production data keeps
+surfacing exactly the class of gap this project's whole "verify against
+real data, not just no-exception-thrown" philosophy exists for.
