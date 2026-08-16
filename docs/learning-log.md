@@ -3071,3 +3071,61 @@ dedicated repair script needed for production -- `seedCurrentSeasonFixtureLists`
 Premier League and Championship fixture unconditionally on every run, so
 one rerun backfills every current team's external id as a side effect,
 for free.
+
+**A real data point that changed the schema: API-Football isn't one id
+space.** Running `check:squads-endpoint` against real Chelsea data (once
+teams finally had an external id to query with) surfaced something worth
+stopping for: "R. James" in the `/players/squads` response carried
+`id: 19545` -- but Reece James's actual merged row already held
+`external_api_football_id: 19890`, confirmed a few turns earlier from
+`/fixtures/lineups`. Same real person, two different numbers, both from
+API-Football, depending only on which endpoint answered. A second
+confirmed instance of exactly the same shape of problem as the Bruno
+Fernandes case found earlier the same day (`1485` vs. `459407`) -- enough
+real evidence, twice independently, to treat it as a genuine
+characteristic of the data rather than a one-off glitch.
+
+Given that, `players.external_api_football_id` (a single column) can
+structurally never represent "this player is known by more than one
+number." Weighed two ways to handle it: keep the flat column and write a
+bespoke, scoped matcher for every endpoint whose id disagrees (which is
+what got built for squads specifically, out of necessity, before this was
+fully understood as a pattern rather than a one-off) -- or build a proper
+crosswalk table, `player_external_ids(player_id, source, external_id)`,
+so every source's id space is recorded on its own terms and any future
+disagreement is just another `source` value, not another special case in
+code. Chose the crosswalk table: two independent confirmations of the
+same failure mode in one day is a real pattern, not a hypothetical one,
+and the alternative (a growing pile of bespoke matchers, one per endpoint
+quirk) is exactly the kind of debt worth flagging rather than
+accumulating.
+
+`players.external_api_football_id`/`external_fpl_id` were deliberately
+**not** migrated away -- they stay as the fast, correct lookup for the
+`'api_football'`/`'fpl'` sources specifically (used everywhere they
+already were, no reason to touch working code), and the new table is
+purely additive: `upsertPlayerGoldenRecord` now checks
+`player_external_ids` first (via a `findPlayerByExternalId` helper) and
+records every external id it resolves through `linkPlayerExternalId`
+(idempotent -- a no-op if already recorded) before returning, so a repeat
+sighting under the exact same id resolves in one indexed lookup instead of
+re-running the abbreviated-name/exact-name matching every time.
+`upsertPlayerPhotoForTeam` (the squads-endpoint matcher) does the same
+under its own `'api_football_squads'` source -- team-scoped name matching
+only on a genuinely *new* id, an instant crosswalk hit on any repeat.
+
+The migration (`1701000000023`) backfills the new table from the existing
+flat columns in the same `up` step, so every player already linked keeps
+that exact identity, just also recorded in the new table. Verified with a
+scratch-Postgres reproduction built directly from the real Chelsea data:
+Cole Palmer (whose squads-endpoint id agrees with his stored one) and
+Reece James (whose id disagrees) both resolve to their real, single rows
+-- and a second simulated squads pull for James, under the same
+mismatched id, resolves via the crosswalk on the second call, proving the
+"solve it once, not every time" property actually holds. Also replaced
+the photo backfill's data source entirely: `seedApiFootballTeamSquadPhotos`
+(one call per team via `/players/squads`) instead of
+`seedApiFootballPlayerPhotosForSeason` (paged through an entire league's
+player-stats list, ~25-35 pages, and was the reason coverage had stalled
+at 57/573 rostered players) -- removed the old function outright rather
+than leaving it as unused dead code.

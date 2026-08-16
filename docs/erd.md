@@ -19,6 +19,7 @@ erDiagram
     teams ||--o{ fixture_lineups : has
     players ||--o{ fixture_lineups : appears_in
     teams ||--o{ players : "current squad (PL only)"
+    players ||--o{ player_external_ids : "known as"
     fixtures ||--o{ fixture_player_stats : has
     teams ||--o{ fixture_player_stats : has
     players ||--o{ fixture_player_stats : performed_in
@@ -69,8 +70,14 @@ erDiagram
         text photo_url "from API-Football's fixtures/players response"
         int current_team_id FK "from FPL, PL players only"
         text natural_key UK "generated: md5(name + date_of_birth)"
-        int external_api_football_id UK
+        int external_api_football_id UK "the 'api_football' id space, specifically"
         int external_fpl_id UK
+    }
+    player_external_ids {
+        int id PK
+        int player_id FK
+        text source "'fpl' | 'api_football' | 'api_football_squads' -- UNIQUE with external_id"
+        int external_id
     }
     fixtures {
         int id PK
@@ -360,3 +367,20 @@ erDiagram
   broken-image icon) when a URL is missing or fails to load, the same
   "degrade gracefully" pattern used for missing predictions/squad data
   elsewhere in the app.
+- **`player_external_ids`** (2026-08-16) — `players.external_api_football_id`
+  assumed API-Football was one consistent id space per real person; it
+  isn't. Confirmed twice with real production data on the same day: Bruno
+  Fernandes is `1485` via one endpoint family but `459407` via another, and
+  Reece James is `19890` via `/fixtures/lineups`/`/fixtures/players` but
+  `19545` via `/players/squads`. A single flat column can only hold one of
+  those, so this table records every `(source, external_id)` sighting that
+  ever resolves to a real player, keyed so the same id always resolves
+  instantly on a repeat sighting instead of re-solving the same name-
+  matching ambiguity every time (see `seed/lib/db.ts`'s
+  `linkPlayerExternalId`/`findPlayerByExternalId` and
+  `upsertPlayerPhotoForTeam`'s comment). `players.external_api_football_id`
+  and `players.external_fpl_id` were deliberately left in place rather than
+  migrated away — they're still the cheap, correct lookup for the
+  `'api_football'`/`'fpl'` sources specifically, used everywhere they
+  already were; this table is purely additive on top of them, for sources
+  whose id space doesn't agree with that column 1:1.

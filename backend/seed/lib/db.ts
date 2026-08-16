@@ -155,20 +155,52 @@ export interface PlayerInput {
   photoUrl?: string;
 }
 
+// Records that (source, externalId) genuinely is this player, going
+// forward -- see migration 1701000000023's comment for why this exists
+// separately from players.external_api_football_id/external_fpl_id (those
+// stay as the "primary"/first-linked id for each, used everywhere they
+// already are; this is the general fix for a source having more than one
+// internal id for the same real person). ON CONFLICT DO NOTHING, not DO
+// UPDATE: if (source, externalId) is already recorded, the caller already
+// resolved to the same player_id through the exact-id lookup below, so
+// there's nothing to change -- and silently repointing an existing
+// mapping to a different player would be exactly the kind of misattribution
+// this table exists to prevent.
+export async function linkPlayerExternalId(pool: Pool, playerId: number, source: string, externalId: number): Promise<void> {
+  await pool.query(
+    `INSERT INTO player_external_ids (player_id, source, external_id) VALUES ($1, $2, $3)
+     ON CONFLICT (source, external_id) DO NOTHING`,
+    [playerId, source, externalId],
+  );
+}
+
+async function findPlayerByExternalId(pool: Pool, source: string, externalId: number): Promise<{ id: number; full_name: string } | null> {
+  const { rows } = await pool.query<{ id: number; full_name: string }>(
+    `SELECT p.id, p.full_name FROM player_external_ids pei JOIN players p ON p.id = pei.player_id
+     WHERE pei.source = $1 AND pei.external_id = $2`,
+    [source, externalId],
+  );
+  return rows[0] ?? null;
+}
+
 /**
  * One golden-record entry point for both sources, instead of a separate
  * upsert per external ID (which is what let the same real player get two
  * disconnected rows -- one from FPL, one from API-Football -- with no link
  * between them). Match priority, most reliable identifier first:
  *
- * 1. external_api_football_id, if we have one -- a stable numeric id from
- *    the source itself, so it's checked before any name-based logic. Two
- *    different API-Football endpoints (lineups vs. player stats) don't
- *    always spell the same player's name identically, which is exactly
- *    what made this the right first check, not an optimization: without
- *    it, the same real player calling in with two name spellings across
- *    two endpoint calls for one fixture produced two INSERTs racing for
- *    the same external id and a unique-constraint violation.
+ * 1. player_external_ids, source='api_football' -- a stable numeric id
+ *    from the source itself, so it's checked before any name-based logic.
+ *    Two different API-Football endpoints (lineups vs. player stats)
+ *    don't always spell the same player's name identically, which is
+ *    exactly what made this the right first check, not an optimization:
+ *    without it, the same real player calling in with two name spellings
+ *    across two endpoint calls for one fixture produced two INSERTs
+ *    racing for the same external id and a unique-constraint violation.
+ *    (This is the same "api_football" id space players.external_api_football_id
+ *    has always tracked -- callers seeing a DIFFERENT API-Football id
+ *    space, like /players/squads, use their own source name and their own
+ *    matching, see upsertPlayerPhotoForTeam.)
  * 2. players.natural_key (full name + date of birth, generated column),
  *    the merge target when we know a DOB -- normally an FPL-sourced call.
  * 3. An exact case-insensitive name match against an existing row, for the
@@ -180,24 +212,19 @@ export interface PlayerInput {
  *    neither having an external_api_football_id yet) would incorrectly
  *    merge. Acceptable at Premier League/Championship scale; revisit if
  *    FA Cup's lower-tier entrants make that collision observably real.
+ *
+ * Every exit path links whatever external ids this call carried into
+ * player_external_ids (idempotent -- a no-op if already recorded), so a
+ * future sighting under the exact same id resolves in one indexed lookup
+ * via step 1, without needing to re-solve the same name-matching ambiguity
+ * every time.
  */
 export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Promise<number> {
   // Check the reliable external id first, before any name-based matching.
-  // Real bug this fixed: API-Football's lineups endpoint and its
-  // fixtures/players (stats) endpoint don't always spell the same player's
-  // name identically (accents, abbreviations) -- the lineup call inserts
-  // the player under external_api_football_id X, then the stats call for
-  // the same fixture fails the name match, falls through to INSERT, and
-  // collides on players_external_api_football_id_key since it's genuinely
-  // the same real player. A numeric id from the source is more trustworthy
-  // than a name string from the same source, so it's checked first.
   if (p.externalApiFootballId !== undefined) {
-    const existingById = await pool.query<{ id: number; full_name: string }>(
-      `SELECT id, full_name FROM players WHERE external_api_football_id = $1`,
-      [p.externalApiFootballId],
-    );
-    if (existingById.rows[0]) {
-      const { id, full_name: existingFullName } = existingById.rows[0];
+    const existing = await findPlayerByExternalId(pool, 'api_football', p.externalApiFootballId);
+    if (existing) {
+      const { id, full_name: existingFullName } = existing;
       // Real bug found in production 2026-08-16: leaving full_name
       // permanently untouched here meant whichever API-Football endpoint
       // happened to see a player FIRST decided their name forever --
@@ -221,6 +248,7 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
          WHERE id = $1`,
         [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.photoUrl ?? null, shouldUpgradeName, p.fullName],
       );
+      if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
       return id;
     }
 
@@ -258,6 +286,7 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
            WHERE id = $1`,
           [id, p.externalApiFootballId, p.position ?? null, p.photoUrl ?? null],
         );
+        await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
         return id;
       }
     }
@@ -276,7 +305,10 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
        RETURNING id`,
       [p.fullName, p.dateOfBirth, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
     );
-    return rows[0].id;
+    const id = rows[0].id;
+    if (p.externalApiFootballId !== undefined) await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
+    if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+    return id;
   }
 
   const existingByName = await pool.query<{ id: number }>(`SELECT id FROM players WHERE lower(full_name) = lower($1) LIMIT 1`, [
@@ -293,6 +325,8 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
        WHERE id = $1`,
       [id, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
     );
+    if (p.externalApiFootballId !== undefined) await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
+    if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
     return id;
   }
 
@@ -307,7 +341,73 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
      RETURNING id`,
     [p.fullName, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
   );
-  return inserted.rows[0].id;
+  const id = inserted.rows[0].id;
+  if (p.externalApiFootballId !== undefined) await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
+  if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+  return id;
+}
+
+/**
+ * Enrichment-only upsert for GET /players/squads?team={id} -- deliberately
+ * NOT routed through upsertPlayerGoldenRecord's usual external-id-first
+ * matching, because that checks the 'api_football' source specifically.
+ * Real, confirmed quirk in production data 2026-08-16: this endpoint can
+ * carry a DIFFERENT internal player id than /fixtures/lineups or
+ * /fixtures/players use for the exact same real person (Reece James is
+ * external_api_football_id 19890 via lineups, but 19545 via this endpoint
+ * -- same shape of issue already seen with Bruno Fernandes across two
+ * other endpoints). This id space gets its own source, 'api_football_squads',
+ * in player_external_ids -- checked first, so a repeat sighting of the
+ * same squads-endpoint id resolves in one lookup without re-solving the
+ * name ambiguity below every time.
+ *
+ * On a first sighting, since this call is already scoped to one team, the
+ * match is scoped the same way: look for a CURRENT roster player on THIS
+ * team by exact name or the same abbreviated initial+surname fallback used
+ * elsewhere, a much smaller and safer candidate set (~25-30 players) than
+ * a global lookup. Only ever touches photo_url on the players row itself --
+ * never overwrites players.external_api_football_id with this endpoint's
+ * possibly-different id, since the one already linked there is presumably
+ * the one every other row (lineups, player-stats) already points at.
+ */
+export async function upsertPlayerPhotoForTeam(
+  pool: Pool,
+  teamId: number,
+  p: { externalApiFootballId: number; fullName: string; photoUrl?: string },
+): Promise<number> {
+  const existing = await findPlayerByExternalId(pool, 'api_football_squads', p.externalApiFootballId);
+  if (existing) {
+    await pool.query(`UPDATE players SET photo_url = COALESCE(photo_url, $2) WHERE id = $1`, [existing.id, p.photoUrl ?? null]);
+    return existing.id;
+  }
+
+  const abbreviated = parseAbbreviatedName(p.fullName);
+  const { rows: candidates } = await pool.query<{ id: number }>(
+    `SELECT id FROM players
+     WHERE current_team_id = $1
+       AND (
+         lower(full_name) = lower($2)
+         OR ($3::text IS NOT NULL AND lower(left(full_name, 1)) = $3 AND lower(split_part(full_name, ' ', -1)) = $4)
+       )`,
+    [teamId, p.fullName, abbreviated?.initial ?? null, abbreviated?.surname ?? null],
+  );
+  if (candidates.length === 1) {
+    const id = candidates[0].id;
+    await pool.query(`UPDATE players SET photo_url = COALESCE(photo_url, $2) WHERE id = $1`, [id, p.photoUrl ?? null]);
+    await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
+    return id;
+  }
+
+  // No confident match against this team's current roster (new signing not
+  // yet linked elsewhere, or a genuinely ambiguous name) -- fall through to
+  // the normal golden-record path, same as any other API-Football sighting.
+  const id = await upsertPlayerGoldenRecord(pool, {
+    externalApiFootballId: p.externalApiFootballId,
+    fullName: p.fullName,
+    photoUrl: p.photoUrl,
+  });
+  await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
+  return id;
 }
 
 export async function upsertFplGameweek(
