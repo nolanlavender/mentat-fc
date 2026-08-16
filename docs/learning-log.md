@@ -3267,3 +3267,63 @@ this page's needs, so it moved to a small shared `lib/teamDisplay.ts`
 instead of copy-pasting a third time -- both pages now import the same
 function. Verified with a real Playwright screenshot against the exact
 numbers from the screenshot that prompted the request.
+
+**The Brazilian/South American name bug wasn't just a photo problem --
+it was reaching the model.** Asked directly whether the squads-endpoint
+fix from earlier could also be affecting predictions, and the honest
+answer was no -- that fix only touches `/players/squads`, which never
+writes to `fixture_lineups`/`fixture_player_stats`, the tables the goal-
+scorer model actually trains on. Those get populated by a *different*
+endpoint pair (`/fixtures/lineups`, `/fixtures/players`) through the
+general-purpose `upsertPlayerGoldenRecord`, which never got either of the
+day's two matching fixes. A real diagnostic confirmed it was live: Estêvão,
+Moisés Caicedo, and Pedro Neto all had orphan rows holding 28-119 real
+appearances and 34-71 real `player_goal_predictions` rows, while their
+actual FPL-linked player showed zero of either -- goal-scorer predictions
+for three of Chelsea's most important attackers were being computed
+correctly, then written to the wrong `player_id`, disconnected from the
+identity the rest of the app treats as canonical for them.
+
+Two distinct root causes, not one:
+1. **Moisés Caicedo Corozo** revealed a genuinely different bug from the
+   full-legal-name case: the abbreviated-name matcher (`parseAbbreviatedName`
+   + initial/surname) only ever compared against the *last* word of a full
+   name. Hispanic naming convention stacks two surnames, paternal then
+   maternal ("Caicedo" then "Corozo") -- API-Football's "M. Caicedo" only
+   ever matched on "Corozo", the surname nobody actually calls him by.
+   Fixed by matching the surname against *any* word after the first
+   (`$2 = ANY((string_to_array(lower(full_name), ' '))[2:])`), not just
+   the last -- a one-line SQL change, but one only found because a real
+   diagnostic surfaced a real player it was failing for.
+2. **Estêvão and Pedro Neto** were the same full-legal-name-vs-common-name
+   gap already fixed for squads-endpoint photos, just never extended to
+   the path that feeds the model. Fixed the same way: `namesLikelyMatch`'s
+   word-subsequence check, gated behind an optional `teamId` on
+   `PlayerInput` that only fires when the caller actually knows which team
+   a sighting is for (every lineups/player-stats call site does, threaded
+   through from the same `getOrCreateTeam` call already resolving it) --
+   same non-negotiable uniqueness-within-one-team safety rule as before.
+   Verified deliberately *without* `teamId` too, proving the safety net
+   stays inactive (falls through to a fresh insert, not a guess) for any
+   future caller that doesn't have team context.
+
+**Production cleanup needed real disambiguation, not just a bigger
+hammer.** Asked for one more diagnostic before writing any repair SQL:
+were the confirmed cases isolated, or was there a genuinely ambiguous one
+hiding in the data? There was -- two separate orphan rows both named some
+form of "João Pedro" with substantial real appearance data each (70 rows
+apiece). A team-appearance breakdown resolved it cleanly: one had 41
+Chelsea + 29 Brighton appearances (exactly the shape of a real Brighton
+-> Chelsea transfer), the other had 36 Hull City + 34 Brighton and *zero*
+Chelsea -- a completely different real person who happens to share a very
+common Portuguese first-and-second-name combination, not a split
+identity. `repair-duplicate-players.ts` was extended (not replaced) with
+this exact logic as a second pass: derive which team an orphan most
+likely played for from its own `fixture_lineups`/`fixture_player_stats`
+rows (a dominant team, more than half of total appearances, required --
+not just a plurality), then fuzzy-match only against *that* team's
+current roster. Verified against a scratch-Postgres reproduction built
+directly from the real numbers in that diagnostic: the real transfer case
+merged and renamed correctly, and the unrelated Hull City/Brighton player
+was left completely untouched, still holding its own real data, exactly
+as it should.
