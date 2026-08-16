@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { apiUrl } from '../api/client';
 import type { FixtureSummary, ScorerPrediction } from '../api/types';
 import { Crest, PlayerPhoto } from '../components/Crest';
@@ -11,12 +12,23 @@ type CompetitionFilter = (typeof COMPETITIONS)[number] | 'all';
 // comparable across competitions, but "the next 14 days" is a robust
 // stand-in for "next 2 matchweeks" for leagues that play weekly, without
 // needing to parse that string at all. The matchweek dropdown below is a
-// client-side narrowing of whatever rounds land inside this window, not
-// the primary windowing mechanism.
+// client-side narrowing of whatever calendar weeks land inside this
+// window, not the primary windowing mechanism.
 const DAYS_AHEAD = 14;
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
+}
+
+// A team's stored short_name is backfilled going forward by
+// getOrCreateTeam (see backend/seed/lib/team-short-codes.ts), but existing
+// production teams won't have it until the next reseed -- this fallback
+// mirrors that same derivation client-side so the scoreboard-style labels
+// below never show a blank/null while that catches up.
+function shortCode(team: { name: string; shortName: string | null }): string {
+  if (team.shortName) return team.shortName;
+  const letters = team.name.replace(/[^A-Za-z]/g, '').toUpperCase();
+  return letters.slice(0, 3) || '???';
 }
 
 // Top 3 only, even though the API can return up to 5 -- this is a compact
@@ -24,21 +36,21 @@ function formatPercent(value: number): string {
 // clutter for a "likely scorers" glance rather than a full breakdown.
 const SCORERS_SHOWN = 3;
 const TOP_PICKS_SHOWN = 5;
-const TOP_SCORER_PICKS_SHOWN = 8;
+const TOP_SCORER_PICKS_SHOWN = 10;
 
 interface TopPick {
   fixture: FixtureSummary;
-  outcome: 'Home' | 'Draw' | 'Away';
+  label: string; // a team's short code, or "Draw"
   probability: number;
 }
 
 function topOutcome(fixture: FixtureSummary): TopPick | null {
   const p = fixture.prediction;
   if (!p) return null;
-  const options: Array<{ outcome: TopPick['outcome']; probability: number }> = [
-    { outcome: 'Home', probability: p.probHomeWin },
-    { outcome: 'Draw', probability: p.probDraw },
-    { outcome: 'Away', probability: p.probAwayWin },
+  const options: Array<{ label: string; probability: number }> = [
+    { label: shortCode(fixture.homeTeam), probability: p.probHomeWin },
+    { label: 'Draw', probability: p.probDraw },
+    { label: shortCode(fixture.awayTeam), probability: p.probAwayWin },
   ];
   return { fixture, ...options.reduce((a, b) => (b.probability > a.probability ? b : a)) };
 }
@@ -47,8 +59,35 @@ interface TopScorerPick extends ScorerPrediction {
   fixture: FixtureSummary;
 }
 
+// Monday of the week containing `date` -- getDay() is 0 (Sun) .. 6 (Sat),
+// so Sunday needs -6 to reach that same week's Monday while every other
+// day just walks back to day 1.
+function mondayOf(date: Date): Date {
+  const d = new Date(date);
+  const day = d.getDay();
+  d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day));
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function formatWeekLabel(monday: Date): string {
+  const sunday = new Date(monday);
+  sunday.setDate(sunday.getDate() + 6);
+  const fmt = (d: Date) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return `${fmt(monday)} - ${fmt(sunday)}`;
+}
+
+function inWeek(kickoffAt: string, monday: Date): boolean {
+  const sundayEnd = new Date(monday);
+  sundayEnd.setDate(sundayEnd.getDate() + 7); // exclusive upper bound
+  const t = new Date(kickoffAt);
+  return t >= monday && t < sundayEnd;
+}
+
 function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
   const { prediction, topScorers } = fixture;
+  const homeCode = shortCode(fixture.homeTeam);
+  const awayCode = shortCode(fixture.awayTeam);
   return (
     <li className="prediction-row">
       <div className="prediction-fixture">
@@ -63,12 +102,16 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
       </div>
       {prediction ? (
         <div className="prediction-probs">
-          <span>Home {formatPercent(prediction.probHomeWin)}</span>
+          <span>
+            {homeCode} {formatPercent(prediction.probHomeWin)}
+          </span>
           <span>Draw {formatPercent(prediction.probDraw)}</span>
-          <span>Away {formatPercent(prediction.probAwayWin)}</span>
+          <span>
+            {awayCode} {formatPercent(prediction.probAwayWin)}
+          </span>
           {prediction.predictedHomeGoals !== null && prediction.predictedAwayGoals !== null && (
             <span className="prediction-expected-goals">
-              expected {prediction.predictedHomeGoals.toFixed(2)} - {prediction.predictedAwayGoals.toFixed(2)}
+              {homeCode} {prediction.predictedHomeGoals.toFixed(2)} - {awayCode} {prediction.predictedAwayGoals.toFixed(2)}
             </span>
           )}
           {topScorers.length > 0 && (
@@ -98,7 +141,7 @@ export function PredictionsPage() {
   const [fixtures, setFixtures] = useState<FixtureSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [competition, setCompetition] = useState<CompetitionFilter>('all');
-  const [matchweek, setMatchweek] = useState<string>('all');
+  const [matchweek, setMatchweek] = useState<'all' | 'week1' | 'week2'>('all');
 
   useEffect(() => {
     const today = new Date();
@@ -122,24 +165,28 @@ export function PredictionsPage() {
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [competition]);
 
-  // Distinct rounds present in the fetched window, ordered by their
-  // earliest kickoff -- not alphabetically, since "Regular Season - 10"
-  // would otherwise sort before "Regular Season - 2" as plain strings.
-  const matchweeks = useMemo(() => {
-    if (!fixtures) return [];
-    const earliestKickoffByRound = new Map<string, string>();
-    for (const f of fixtures) {
-      if (!f.round) continue;
-      const existing = earliestKickoffByRound.get(f.round);
-      if (!existing || f.kickoffAt < existing) earliestKickoffByRound.set(f.round, f.kickoffAt);
-    }
-    return [...earliestKickoffByRound.entries()].sort((a, b) => a[1].localeCompare(b[1])).map(([round]) => round);
-  }, [fixtures]);
+  // "Next 2 matchweeks" as real calendar weeks (Monday-Sunday), not
+  // API-Football's round strings -- rounds aren't guaranteed comparable
+  // across competitions, but a calendar week means the same thing for
+  // both. Week 1 starts on the Monday of the week containing TOMORROW
+  // (not today), so a fixture still to be played later today isn't
+  // stranded outside both weeks, and a week that's already mostly elapsed
+  // doesn't get relabeled as "upcoming".
+  const { week1Start, week2Start } = useMemo(() => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const w1 = mondayOf(tomorrow);
+    const w2 = new Date(w1);
+    w2.setDate(w2.getDate() + 7);
+    return { week1Start: w1, week2Start: w2 };
+  }, []);
 
   const filteredFixtures = useMemo(() => {
     if (!fixtures) return [];
-    return matchweek === 'all' ? fixtures : fixtures.filter((f) => f.round === matchweek);
-  }, [fixtures, matchweek]);
+    if (matchweek === 'week1') return fixtures.filter((f) => inWeek(f.kickoffAt, week1Start));
+    if (matchweek === 'week2') return fixtures.filter((f) => inWeek(f.kickoffAt, week2Start));
+    return fixtures;
+  }, [fixtures, matchweek, week1Start, week2Start]);
 
   const topPicks = useMemo(
     () =>
@@ -176,13 +223,10 @@ export function PredictionsPage() {
         </label>
         <label className="competition-filter">
           Matchweek
-          <select value={matchweek} onChange={(e) => setMatchweek(e.target.value)}>
+          <select value={matchweek} onChange={(e) => setMatchweek(e.target.value as 'all' | 'week1' | 'week2')}>
             <option value="all">Next {DAYS_AHEAD} days</option>
-            {matchweeks.map((round) => (
-              <option key={round} value={round}>
-                {round}
-              </option>
-            ))}
+            <option value="week1">{formatWeekLabel(week1Start)}</option>
+            <option value="week2">{formatWeekLabel(week2Start)}</option>
           </select>
         </label>
       </div>
@@ -203,7 +247,7 @@ export function PredictionsPage() {
                 </span>
                 <Crest src={pick.fixture.awayTeam.logoUrl} alt="" />
                 <span className="top-pick-call">
-                  {pick.outcome} {formatPercent(pick.probability)}
+                  {pick.label} {formatPercent(pick.probability)}
                 </span>
               </li>
             ))}
@@ -214,11 +258,14 @@ export function PredictionsPage() {
       {topScorerPicks.length > 0 && (
         <section>
           <h2>Top goalscorer picks</h2>
-          <ul className="top-picks-list">
-            {topScorerPicks.map((pick) => (
+          <ol className="top-picks-list">
+            {topScorerPicks.map((pick, i) => (
               <li key={`${pick.fixture.id}-${pick.playerId}`} className="fixture-teams">
-                <PlayerPhoto src={pick.playerPhotoUrl} alt="" />
-                {pick.playerName}
+                <span className="top-pick-rank">{i + 1}</span>
+                <Link to={`/players/${pick.playerId}`} className="top-pick-player-link">
+                  <PlayerPhoto src={pick.playerPhotoUrl} alt="" />
+                  {pick.playerName}
+                </Link>
                 <span className="prediction-meta">
                   {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name} ·{' '}
                   {new Date(pick.fixture.kickoffAt).toLocaleString()}
@@ -226,7 +273,7 @@ export function PredictionsPage() {
                 <span className="top-pick-call">{formatPercent(pick.probScores)}</span>
               </li>
             ))}
-          </ul>
+          </ol>
         </section>
       )}
 

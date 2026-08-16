@@ -29,8 +29,8 @@ export interface FixtureSummary {
   awayScore: number | null;
   competitionName: string;
   seasonLabel: string;
-  homeTeam: { id: number; name: string; logoUrl: string | null };
-  awayTeam: { id: number; name: string; logoUrl: string | null };
+  homeTeam: { id: number; name: string; shortName: string | null; logoUrl: string | null };
+  awayTeam: { id: number; name: string; shortName: string | null; logoUrl: string | null };
   // null whenever no model has run for this fixture yet -- e.g. FA Cup
   // (deliberately unmodeled, see docs/CLAUDE.md) or a newly-seeded
   // current-season fixture app.train hasn't predicted yet. Degrade
@@ -60,8 +60,8 @@ export async function listFixtures(filters: ListFixturesFilters): Promise<Fixtur
   const { rows } = await pool.query(
     `SELECT f.id, f.kickoff_at, f.status, f.round, f.home_score, f.away_score,
        c.name AS competition_name, s.label AS season_label,
-       ht.id AS home_team_id, ht.name AS home_team_name, ht.logo_url AS home_team_logo_url,
-       at.id AS away_team_id, at.name AS away_team_name, at.logo_url AS away_team_logo_url,
+       ht.id AS home_team_id, ht.name AS home_team_name, ht.short_name AS home_team_short_name, ht.logo_url AS home_team_logo_url,
+       at.id AS away_team_id, at.name AS away_team_name, at.short_name AS away_team_short_name, at.logo_url AS away_team_logo_url,
        mp.model_version, mp.prob_home_win, mp.prob_draw, mp.prob_away_win,
        mp.predicted_home_goals, mp.predicted_away_goals,
        COALESCE(scorers.top_scorers, '[]') AS top_scorers
@@ -110,8 +110,8 @@ export async function listFixtures(filters: ListFixturesFilters): Promise<Fixtur
     awayScore: r.away_score,
     competitionName: r.competition_name,
     seasonLabel: r.season_label,
-    homeTeam: { id: r.home_team_id, name: r.home_team_name, logoUrl: r.home_team_logo_url },
-    awayTeam: { id: r.away_team_id, name: r.away_team_name, logoUrl: r.away_team_logo_url },
+    homeTeam: { id: r.home_team_id, name: r.home_team_name, shortName: r.home_team_short_name, logoUrl: r.home_team_logo_url },
+    awayTeam: { id: r.away_team_id, name: r.away_team_name, shortName: r.away_team_short_name, logoUrl: r.away_team_logo_url },
     prediction:
       r.prob_home_win === null
         ? null
@@ -171,8 +171,8 @@ export async function getFixtureById(id: number): Promise<FixtureDetail | undefi
   const fixtureResult = await pool.query(
     `SELECT f.id, f.kickoff_at, f.status, f.round, f.home_score, f.away_score, f.venue, f.referee,
        c.name AS competition_name, s.label AS season_label,
-       ht.id AS home_team_id, ht.name AS home_team_name, ht.logo_url AS home_team_logo_url,
-       at.id AS away_team_id, at.name AS away_team_name, at.logo_url AS away_team_logo_url
+       ht.id AS home_team_id, ht.name AS home_team_name, ht.short_name AS home_team_short_name, ht.logo_url AS home_team_logo_url,
+       at.id AS away_team_id, at.name AS away_team_name, at.short_name AS away_team_short_name, at.logo_url AS away_team_logo_url
      FROM fixtures f
      JOIN teams ht ON ht.id = f.home_team_id
      JOIN teams at ON at.id = f.away_team_id
@@ -227,8 +227,8 @@ export async function getFixtureById(id: number): Promise<FixtureDetail | undefi
     referee: f.referee,
     competitionName: f.competition_name,
     seasonLabel: f.season_label,
-    homeTeam: { id: f.home_team_id, name: f.home_team_name, logoUrl: f.home_team_logo_url },
-    awayTeam: { id: f.away_team_id, name: f.away_team_name, logoUrl: f.away_team_logo_url },
+    homeTeam: { id: f.home_team_id, name: f.home_team_name, shortName: f.home_team_short_name, logoUrl: f.home_team_logo_url },
+    awayTeam: { id: f.away_team_id, name: f.away_team_name, shortName: f.away_team_short_name, logoUrl: f.away_team_logo_url },
     teamStats: statsResult.rows.map((r) => ({
       teamId: r.team_id,
       isHome: r.is_home,
