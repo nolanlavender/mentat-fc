@@ -3027,3 +3027,47 @@ matchup, unlike the "All fixtures" list below them) -- verified with a
 real Playwright screenshot against a seeded fixture with a known kickoff
 time, confirming it renders in both sections without breaking the
 existing flex layout.
+
+**Chasing the photo problem led to a team-level version of the same class
+of gap.** Current-roster photo coverage was 57/573, and Cole Palmer --
+about as prominent a player as exists, already correctly linked via
+`external_api_football_id` -- had no photo at all. That ruled out identity
+matching as the cause; something about the pull itself was the problem.
+`seedApiFootballPlayerPhotosForSeason` pages through an entire league's
+player-STATS list (~25-35 pages) to find a team's current squad, which
+looked like a bad fit even before finding out why it was actually
+failing. API-Football's dedicated `/players/squads?team={id}` endpoint --
+one call per team, no season or pagination needed, current roster with a
+photo on every player -- looked like a much better source, so per this
+project's standing rule (confirm a new endpoint's real shape with one
+live call before building anything on it, same as `check-lineup-depth.ts`
+and `check-bulk-fixtures-endpoint.ts`), a `check:squads-endpoint` script
+was added first.
+
+Running it against Chelsea failed immediately: "Chelsea's row is missing
+an external_api_football_id." Reading `getOrCreateTeam` (`seed/lib/db.ts`)
+explained why -- it never accepted an external id parameter at all, and
+grepping every call site in `api-football.ts` (fixtures, lineups,
+player-stats, the bulk endpoint -- six call sites total) confirmed none of
+them ever passed one through, even though every one of those API-Football
+responses carries the source's own numeric team id right next to the name
+and logo already being captured. `teams.external_api_football_id` has
+existed in the schema since the Phase 1 migration and had never once been
+written to -- a real gap, not a data-availability question, and the same
+shape of bug as the player-identity issues found earlier in the day (a
+column existing in the schema is not the same thing as anything actually
+populating it).
+
+Fixed by adding an optional `externalApiFootballId` parameter to
+`getOrCreateTeam`, COALESCE'd into the upsert exactly like `logoUrl`
+already was (never overwrites an existing value, only fills a gap), and
+threading `.id` through from all six call sites. Verified with a
+scratch-Postgres reproduction proving the important safety property: a
+team row created without an external id in one process run gets that id
+backfilled onto the *same* row (matched via the existing `natural_key`
+upsert) when a later run sees it with one, not a duplicate row. No
+dedicated repair script needed for production -- `seedCurrentSeasonFixtureLists`
+(wired to `npm run db:seed:current-season`) already reseeds every current
+Premier League and Championship fixture unconditionally on every run, so
+one rerun backfills every current team's external id as a side effect,
+for free.

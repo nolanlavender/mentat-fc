@@ -164,8 +164,8 @@ export async function seedApiFootballFixtures(pool: Pool, spec: CompetitionSeaso
   );
 
   for (const item of data.response) {
-    const homeTeamId = await getOrCreateTeam(pool, canonicalTeamName(item.teams.home.name), item.teams.home.logo ?? undefined);
-    const awayTeamId = await getOrCreateTeam(pool, canonicalTeamName(item.teams.away.name), item.teams.away.logo ?? undefined);
+    const homeTeamId = await getOrCreateTeam(pool, canonicalTeamName(item.teams.home.name), item.teams.home.logo ?? undefined, item.teams.home.id);
+    const awayTeamId = await getOrCreateTeam(pool, canonicalTeamName(item.teams.away.name), item.teams.away.logo ?? undefined, item.teams.away.id);
     const kickoffAt = new Date(item.fixture.date);
 
     await upsertFixture(pool, {
@@ -239,7 +239,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
   );
 
   for (const teamLineup of data.response) {
-    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name), teamLineup.team.logo ?? undefined);
+    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name), teamLineup.team.logo ?? undefined, teamLineup.team.id);
 
     for (const { player } of teamLineup.startXI ?? []) {
       const playerId = await upsertPlayerGoldenRecord(pool, {
@@ -293,7 +293,7 @@ export async function seedApiFootballPlayerStats(pool: Pool, fixtureExternalId: 
   );
 
   for (const teamEntry of data.response) {
-    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name), teamEntry.team.logo ?? undefined);
+    const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name), teamEntry.team.logo ?? undefined, teamEntry.team.id);
 
     for (const { player, statistics } of teamEntry.players ?? []) {
       const stats = statistics[0]; // one fixture -> one stat block per player
@@ -401,7 +401,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
     if (fixtureId === undefined) continue; // the API only ever echoes back ids we asked for, but guard anyway
 
     for (const teamLineup of item.lineups ?? []) {
-      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name), teamLineup.team.logo ?? undefined);
+      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name), teamLineup.team.logo ?? undefined, teamLineup.team.id);
 
       for (const { player } of teamLineup.startXI ?? []) {
         const playerId = await upsertPlayerGoldenRecord(pool, {
@@ -422,7 +422,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
     }
 
     for (const teamEntry of item.players ?? []) {
-      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name), teamEntry.team.logo ?? undefined);
+      const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamEntry.team.name), teamEntry.team.logo ?? undefined, teamEntry.team.id);
 
       for (const { player, statistics } of teamEntry.players ?? []) {
         const stats = statistics[0]; // one fixture -> one stat block per player
