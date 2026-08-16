@@ -136,6 +136,13 @@ entirely local, including training and running the model on your machine.
 
 ## Deployment target (Phase 10)
 
+**Config built and merged 2026-08-16** (`render.yaml`, `frontend/vercel.json`,
+`.github/workflows/ci.yml`, `.github/workflows/daily-refresh.yml`) --
+**not yet actually live**. See `docs/deployment.md` for the runbook;
+everything below describes the target, most of which now exists as
+config in the repo, with account creation/connecting/secrets as the
+remaining manual steps only a human can do.
+
 Originally planned around Azure's managed tiers, but reconsidered for cost:
 Azure's cheapest *always-on* Postgres + App Service combo runs roughly
 $25-40/mo before any real traffic. This project's actual scale (~50

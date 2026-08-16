@@ -1,0 +1,58 @@
+name: Daily data refresh
+
+# The GitHub Actions replacement for backend/scripts/daily-refresh.sh's
+# local cron/launchd plan (see docs/learning-log.md's 2026-08-16 entry --
+# deliberately deferred to land here, at deployment, rather than scheduled
+# locally and then torn down again). Same three commands, same order --
+# current-season fixtures have to refresh before the lineup backfill runs,
+# since backfillLineupsForCompetitionSeason only considers fixtures with
+# status = 'finished'.
+#
+# Requires three repository secrets (Settings > Secrets and variables >
+# Actions): DATABASE_URL (the production Neon connection string),
+# API_FOOTBALL_KEY, and JWT_SECRET (not actually used by any of these
+# scripts, but backend/src/config/env.ts requires it just to import
+# src/db/pool.ts -- see the unit-test learning-log entry for the same
+# gotcha). Any non-empty string works for JWT_SECRET here.
+on:
+  schedule:
+    - cron: '0 6 * * *' # 6am UTC daily -- see architecture.md's note on Actions cron delay tolerance
+  workflow_dispatch: {} # manual "Run workflow" button, for testing or catching up on demand
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Refresh current-season fixtures (Premier League + Championship)
+        working-directory: backend
+        run: npm run db:seed:current-season
+
+      - name: Backfill lineups/player-stats for newly-finished fixtures
+        working-directory: backend
+        run: npm run db:seed:backfill-lineups
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+
+      - name: Refit the prediction model on fresh data
+        working-directory: model-service
+        run: python -m app.train

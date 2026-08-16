@@ -390,17 +390,50 @@ choice rather than introducing a new ML paradigm.
       cost: Azure's cheapest always-on tiers run ~$25-40/mo before any real
       traffic, versus this stack scaling down to near-$0 between visits.
       See `docs/architecture.md`'s "Deployment target" section for the
-      full reasoning.
-- [ ] GitHub Actions CI/CD pipeline for frontend + backend
-- [ ] GitHub Actions scheduled workflow for the model service (batch
-      inference, no hosted compute needed -- see architecture.md). Two
-      steps in sequence, both already built and manually runnable as of
-      Phase 5: `npm run db:seed:current-season` (`backend/`) to refresh the
-      fixture list, then `python -m app.train` (`model-service/`) to
-      refit and write predictions. This item is "put those two commands on
-      a schedule," not build them from scratch
-- [ ] Document the next scaling step for each component
-- [ ] Load-check against the 50-concurrent-user target
+      full reasoning. **The config side of this is built and merged,
+      2026-08-16**: `render.yaml` (one-click backend Blueprint --
+      migrations run automatically on every deploy via `startCommand`,
+      health-checked at `/health`) and `frontend/vercel.json` (the SPA
+      fallback rewrite React Router needs on a static host, or a
+      404 replaces the app on any refresh/deep-link). **Not actually live
+      yet** -- account creation, connecting the repo, and typing real
+      secret values into each dashboard are manual steps only I can do,
+      not something an agent session has credentials for. Full runbook in
+      `docs/deployment.md`; stays unchecked until confirmed actually
+      reachable on the public internet, not just configured
+- [x] GitHub Actions CI/CD pipeline for frontend + backend -- built
+      2026-08-16, `.github/workflows/ci.yml`. Three jobs (backend,
+      model-service, frontend), each running the same typecheck/test/
+      build commands already run by hand before every merge in this
+      project. No live database needed -- both test suites use dummy env
+      values specifically so they never touch a real Postgres connection.
+      Verified for real, not just written: ran every command in the
+      workflow locally before committing it (`npx tsc --noEmit`,
+      `npm run test`, `npm run build` for backend; `py_compile` +
+      `pytest` for model-service; `npm run lint` + `npm run build` for
+      frontend) and confirmed all of them pass with the actual current
+      state of the repo
+- [x] GitHub Actions scheduled workflow for the model service (batch
+      inference, no hosted compute needed -- see architecture.md) --
+      built 2026-08-16, `.github/workflows/daily-refresh.yml`. Same two
+      steps already built and manually runnable as of Phase 5
+      (`npm run db:seed:current-season` then
+      `npm run db:seed:backfill-lineups`, `backend/`) plus
+      `python -m app.train` (`model-service/`), on a daily cron plus a
+      manual `workflow_dispatch` trigger for testing. This is the workflow
+      that was deliberately deferred here rather than scheduled locally
+      (see the 2026-08-16 learning-log entry) -- the actual scheduling
+      mechanism now exists, but the first scheduled run won't succeed
+      until `DATABASE_URL`/`API_FOOTBALL_KEY`/`JWT_SECRET` are added as
+      real repository secrets (a manual GitHub Settings step, see
+      `docs/deployment.md`)
+- [x] Document the next scaling step for each component -- already done
+      as part of the original Phase 10 architecture write-up; see
+      `docs/architecture.md`'s "Scaling path" table
+- [ ] Load-check against the 50-concurrent-user target -- can't run this
+      meaningfully against a URL that doesn't exist yet. Ready to run for
+      real the moment the backend has a live public URL (see
+      `docs/deployment.md`'s step 5)
 
 ## Phase 11 (stretch) — Lineup optimizer
 - [ ] Predict expected fantasy points per player, per gameweek

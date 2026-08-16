@@ -1,0 +1,34 @@
+# Render "Blueprint" -- lets you deploy the backend with one click (New +
+# > Blueprint in the Render dashboard, point it at this repo) instead of
+# manually filling in every field. No secrets live here: `sync: false`
+# means Render prompts you to type each value in during setup instead of
+# reading it from anywhere, so real credentials never touch the repo.
+#
+# startCommand runs migrations before starting the server on every deploy
+# -- safe because node-pg-migrate tracks what's already been applied
+# (pgmigrations table), so a deploy where nothing changed just no-ops that
+# step. Render injects its own PORT env var at runtime, which
+# backend/src/config/env.ts already reads (`process.env.PORT ?? 4000`), so
+# nothing needs setting for that.
+services:
+  - type: web
+    name: mentat-fc-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm run migrate:up && npm start
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false
+    # FPL_ENTRY_ID is deliberately not listed here -- it's optional (the app
+    # boots fine without it, only /api/fpl/my-team needs it, see
+    # backend/src/config/env.ts), and Render blueprint env vars are prompted
+    # for at setup time regardless of whether you actually have a value.
+    # Add it manually afterward, in the service's Environment tab, if you
+    # want that endpoint to work.
