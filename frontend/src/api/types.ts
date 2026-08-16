@@ -91,12 +91,26 @@ export interface TeamForm {
   goalsAgainst: number;
 }
 
+export interface TeamStatLeader {
+  playerId: number;
+  fullName: string;
+  photoUrl: string | null;
+  value: number;
+}
+
+export interface TeamTopStats {
+  seasonLabel: string;
+  topScorers: TeamStatLeader[];
+  topAssisters: TeamStatLeader[];
+}
+
 export interface TeamDashboard {
   team: Team;
   nextMatch?: NextMatch;
   tablePosition?: TablePosition;
   form: TeamForm;
   squad: SquadPlayer[];
+  topStats?: TeamTopStats;
 }
 
 export interface PlayerFormSummary {

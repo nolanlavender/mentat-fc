@@ -272,23 +272,102 @@ async function getSquad(teamId: number): Promise<SquadPlayer[]> {
   return rows.map((r) => ({ id: r.id, fullName: r.full_name, position: r.position, photoUrl: r.photo_url }));
 }
 
+export interface TeamStatLeader {
+  playerId: number;
+  fullName: string;
+  photoUrl: string | null;
+  value: number;
+}
+
+export interface TeamTopStats {
+  seasonLabel: string;
+  topScorers: TeamStatLeader[];
+  topAssisters: TeamStatLeader[];
+}
+
+const TOP_STATS_LEADERS_SHOWN = 3;
+
+// fixture_player_stats.team_id (not players.current_team_id) is the
+// source of "played for this team" here -- it records who a player
+// actually turned out for in each specific match, so a mid-season
+// transfer's stats split correctly between old and new club instead of
+// all landing on whichever team they're on today. Same reasoning as the
+// "most recent club" fix in model-service/app/data.py the same week: team
+// attribution should come from the appearance record itself, not a
+// current-roster pointer.
+async function getTeamTopStats(teamId: number): Promise<TeamTopStats | undefined> {
+  const relevantSeason = await pool.query(
+    `SELECT cs.id AS competition_season_id, s.label AS season_label
+     FROM competition_seasons cs
+     JOIN seasons s ON s.id = cs.season_id
+     JOIN competitions c ON c.id = cs.competition_id
+     JOIN fixtures f ON f.competition_season_id = cs.id AND (f.home_team_id = $1 OR f.away_team_id = $1)
+     WHERE c.name = ANY($2)
+     ORDER BY s.start_date DESC
+     LIMIT 1`,
+    [teamId, DASHBOARD_COMPETITIONS],
+  );
+  const season = relevantSeason.rows[0];
+  if (!season) return undefined;
+
+  const { rows } = await pool.query<{
+    player_id: number;
+    full_name: string;
+    photo_url: string | null;
+    goals: string;
+    assists: string;
+  }>(
+    `SELECT p.id AS player_id, p.full_name, p.photo_url,
+       coalesce(sum(fps.goals), 0) AS goals,
+       coalesce(sum(fps.assists), 0) AS assists
+     FROM fixture_player_stats fps
+     JOIN fixtures f ON f.id = fps.fixture_id
+     JOIN players p ON p.id = fps.player_id
+     WHERE fps.team_id = $1 AND f.competition_season_id = $2 AND f.status = 'finished'
+     GROUP BY p.id, p.full_name, p.photo_url`,
+    [teamId, season.competition_season_id],
+  );
+
+  const toLeader = (r: (typeof rows)[number], value: number): TeamStatLeader => ({
+    playerId: r.player_id,
+    fullName: r.full_name,
+    photoUrl: r.photo_url,
+    value,
+  });
+
+  const topScorers = rows
+    .map((r) => toLeader(r, Number(r.goals)))
+    .filter((r) => r.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, TOP_STATS_LEADERS_SHOWN);
+  const topAssisters = rows
+    .map((r) => toLeader(r, Number(r.assists)))
+    .filter((r) => r.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, TOP_STATS_LEADERS_SHOWN);
+
+  return { seasonLabel: season.season_label, topScorers, topAssisters };
+}
+
 export interface TeamDashboard {
   team: Team;
   nextMatch: NextMatch | undefined;
   tablePosition: TablePosition | undefined;
   form: TeamForm;
   squad: SquadPlayer[];
+  topStats: TeamTopStats | undefined;
 }
 
 export async function getTeamDashboard(id: number): Promise<TeamDashboard | undefined> {
   const team = await getTeamById(id);
   if (!team) return undefined;
 
-  const [nextMatch, tablePosition, form, squad] = await Promise.all([
+  const [nextMatch, tablePosition, form, squad, topStats] = await Promise.all([
     getNextMatch(id),
     getTablePosition(id),
     getTeamForm(id),
     getSquad(id),
+    getTeamTopStats(id),
   ]);
-  return { team, nextMatch, tablePosition, form, squad };
+  return { team, nextMatch, tablePosition, form, squad, topStats };
 }
