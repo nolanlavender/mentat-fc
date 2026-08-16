@@ -32,6 +32,49 @@ export function parseAbbreviatedName(fullName: string): { initial: string; surna
   return { initial: match[1].toLowerCase(), surname: match[2].trim().toLowerCase() };
 }
 
+function normalizeNameWords(name: string): string[] {
+  return name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // drops NFD-decomposed accent marks so accented and unaccented spellings of the same name compare equal
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function isWordSubsequence(shorter: string[], longer: string[]): boolean {
+  let i = 0;
+  for (const word of longer) {
+    if (i < shorter.length && word === shorter[i]) i++;
+  }
+  return i === shorter.length;
+}
+
+/**
+ * True if one name's words appear, in order, inside the other's -- e.g.
+ * "Pedro Neto" inside "Pedro Lomba Neto", or "João Pedro" inside "João
+ * Pedro Junqueira de Jesus". Deliberately bidirectional: real production
+ * data confirmed 2026-08-16 that either source can be the longer one --
+ * FPL had the fuller legal name for João Pedro, but API-Football's squads
+ * endpoint had the fuller name ("Geovany Tcherno Quenda") for a player FPL
+ * stores under the shorter "Geovany Quenda". A lone single-word name has
+ * to match the other name's FIRST word specifically (not just appear
+ * anywhere in it) -- a bare first name like "Pedro" turning up anywhere
+ * isn't a strong enough signal by itself, but matching the start of the
+ * full name is.
+ */
+export function namesLikelyMatch(a: string, b: string): boolean {
+  const wa = normalizeNameWords(a);
+  const wb = normalizeNameWords(b);
+  if (wa.length === 0 || wb.length === 0) return false;
+  const [shorter, longer] = wa.length <= wb.length ? [wa, wb] : [wb, wa];
+  if (shorter.length === 1) return longer[0] === shorter[0];
+  return isWordSubsequence(shorter, longer);
+}
+
+function nameWordCount(name: string): number {
+  return normalizeNameWords(name).length;
+}
+
 export async function getOrCreateCompetition(
   pool: Pool,
   name: string,
@@ -407,6 +450,42 @@ export async function upsertPlayerPhotoForTeam(
     await pool.query(`UPDATE players SET photo_url = COALESCE(photo_url, $2) WHERE id = $1`, [id, p.photoUrl ?? null]);
     await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
     return id;
+  }
+
+  if (candidates.length === 0) {
+    // Real bug found in production 2026-08-16: several Brazilian/South
+    // American players (João Pedro, Estêvão, Moisés Caicedo...) never
+    // matched here at all -- FPL's full_name is sometimes their full
+    // LEGAL name ("João Pedro Junqueira de Jesus") while API-Football's
+    // squads endpoint uses their common football name ("João Pedro"),
+    // and neither exact nor abbreviated-initial+surname matching bridges
+    // that gap. namesLikelyMatch's word-subsequence check catches it in
+    // both directions without needing to know in advance which source has
+    // the longer form. Still scoped to this team's small roster and still
+    // requires a unique match, so the false-positive risk that made this
+    // too risky to do as a *global* fallback (see upsertPlayerGoldenRecord)
+    // doesn't apply here. When it matches, the stored name is upgraded to
+    // whichever of the two is shorter -- the common football name is
+    // consistently the shorter one in every real case seen so far,
+    // regardless of which source it came from.
+    const { rows: roster } = await pool.query<{ id: number; full_name: string }>(
+      `SELECT id, full_name FROM players WHERE current_team_id = $1`,
+      [teamId],
+    );
+    const fuzzyMatches = roster.filter((r) => namesLikelyMatch(r.full_name, p.fullName));
+    if (fuzzyMatches.length === 1) {
+      const match = fuzzyMatches[0];
+      const preferIncomingName = nameWordCount(p.fullName) < nameWordCount(match.full_name);
+      await pool.query(
+        `UPDATE players SET
+           full_name = CASE WHEN $3 THEN $4 ELSE full_name END,
+           photo_url = COALESCE(photo_url, $2)
+         WHERE id = $1`,
+        [match.id, p.photoUrl ?? null, preferIncomingName, p.fullName],
+      );
+      await linkPlayerExternalId(pool, match.id, 'api_football_squads', p.externalApiFootballId);
+      return match.id;
+    }
   }
 
   // No confident match against this team's current roster (new signing not
