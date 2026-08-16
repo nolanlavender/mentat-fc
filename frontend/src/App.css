@@ -413,9 +413,77 @@ section + section {
   padding: 4px 0;
 }
 
+.squad-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-h);
+  text-decoration: none;
+}
+
+.squad-link:hover {
+  color: var(--accent);
+}
+
 .scorer-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   margin-right: 4px;
+}
+
+.form-list {
+  list-style: none;
+  padding: 0;
+}
+
+.form-list li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.form-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 0.8em;
+  font-weight: 700;
+  color: #fff;
+}
+
+.form-badge-w {
+  background: #1a7a3a;
+}
+
+.form-badge-d {
+  background: var(--text-h);
+  opacity: 0.6;
+}
+
+.form-badge-l {
+  background: #d33;
+}
+
+.game-log {
+  list-style: none;
+  padding: 0;
+}
+
+.game-log-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.game-log-stats {
+  font-size: 0.9em;
+  opacity: 0.8;
+  white-space: nowrap;
 }

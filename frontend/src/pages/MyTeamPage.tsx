@@ -1,13 +1,25 @@
+import { Link } from 'react-router-dom';
 import { useFetch } from '../hooks/useFetch';
 import { apiUrl } from '../api/client';
 import type { MyTeam, MyTeamPlayer } from '../api/types';
 import { Crest, PlayerPhoto } from '../components/Crest';
 
 function PlayerRow({ player }: { player: MyTeamPlayer }) {
-  return (
-    <li>
+  const nameContent = (
+    <>
       <PlayerPhoto src={player.photoUrl} alt="" />
       {player.fullName}
+    </>
+  );
+  return (
+    <li>
+      {player.playerId > 0 ? (
+        <Link to={`/players/${player.playerId}`} className="squad-link">
+          {nameContent}
+        </Link>
+      ) : (
+        nameContent
+      )}
       {player.team ? (
         <>
           {' — '}

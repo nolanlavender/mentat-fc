@@ -2,6 +2,7 @@ import { Routes, Route, Navigate, Link, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { TeamListPage } from './pages/TeamListPage';
 import { TeamDashboardPage } from './pages/TeamDashboardPage';
+import { PlayerPage } from './pages/PlayerPage';
 import { MyTeamPage } from './pages/MyTeamPage';
 import { BetsPage } from './pages/BetsPage';
 import { PredictionsPage } from './pages/PredictionsPage';
@@ -55,6 +56,7 @@ function App() {
       <Routes>
         <Route path="/" element={<TeamListPage />} />
         <Route path="/teams/:id" element={<TeamDashboardPage />} />
+        <Route path="/players/:id" element={<PlayerPage />} />
         <Route
           path="/my-team"
           element={
