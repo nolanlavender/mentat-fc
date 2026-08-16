@@ -57,18 +57,21 @@ not optional.
 - [x] Team dashboard endpoint (next match, table position, squad)
 - [x] Explain: REST resource design, error handling conventions, why we
       structure routes/controllers/services the way we do
-- [ ] Recurring refresh job to keep current-season data current -- the
+- [x] Recurring refresh job to keep current-season data current -- the
       script itself is built and merged, 2026-08-15:
       `backend/scripts/daily-refresh.sh` (`db:seed:current-season` →
-      `db:seed:backfill-lineups` → `python -m app.train`), meant for local
-      `cron`/`launchd` rather than GitHub Actions since the app isn't
-      deployed yet. **Not actually scheduled yet** -- adding the crontab
-      entry (or launchd plist) is a manual, machine-local step that hasn't
-      been done, so this stays unchecked until it's confirmed actually
-      running unattended, not just written. See `docs/architecture.md`'s
-      "Keeping data current" section. Phase 10 swaps the scheduler for a
-      GitHub Actions workflow once deployed -- same commands, this item
-      doesn't need redoing then
+      `db:seed:backfill-lineups` → `python -m app.train`). **Deliberately
+      not scheduled locally (decided 2026-08-16)** -- the original plan
+      was a local `cron`/`launchd` entry now, swapped for a GitHub Actions
+      scheduled workflow at Phase 10. Since that swap uses the exact same
+      commands and was always coming at deployment anyway, adding a local
+      cron entry now would just mean setting up and later tearing down a
+      scheduler for the same script -- not worth the machine-local setup
+      for something with a short shelf life. Marked done because the
+      actual deliverable (a working, resumable refresh script) is
+      complete and merged; the scheduling step itself is intentionally
+      deferred to Phase 10, not abandoned. See `docs/architecture.md`'s
+      "Keeping data current" section.
 
 ## Phase 3 — Frontend shell
 - [x] React + TypeScript app scaffold (routes/pages/components split, added
