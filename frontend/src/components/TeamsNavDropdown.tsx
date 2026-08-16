@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { apiUrl } from '../api/client';
 import type { Team } from '../api/types';
 import { Crest } from './Crest';
+import { navDisplayName } from '../lib/teamDisplay';
 
 const COMPETITIONS = ['Premier League', 'Championship'] as const;
 
@@ -56,7 +57,7 @@ export function TeamsNavDropdown() {
                   <li key={team.id}>
                     <Link to={`/teams/${team.id}`} onClick={() => setOpen(false)}>
                       <Crest src={team.logoUrl} alt="" size={18} />
-                      {team.name}
+                      {navDisplayName(team)}
                     </Link>
                   </li>
                 ))}
