@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { apiUrl } from '../api/client';
 import type { FixtureSummary, ScorerPrediction } from '../api/types';
 import { Crest, PlayerPhoto } from '../components/Crest';
+import { shortCode } from '../lib/teamDisplay';
 
 const COMPETITIONS = ['Premier League', 'Championship'] as const;
 type CompetitionFilter = (typeof COMPETITIONS)[number] | 'all';
@@ -18,17 +19,6 @@ const DAYS_AHEAD = 14;
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
-}
-
-// A team's stored short_name is backfilled going forward by
-// getOrCreateTeam (see backend/seed/lib/team-short-codes.ts), but existing
-// production teams won't have it until the next reseed -- this fallback
-// mirrors that same derivation client-side so the scoreboard-style labels
-// below never show a blank/null while that catches up.
-function shortCode(team: { name: string; shortName: string | null }): string {
-  if (team.shortName) return team.shortName;
-  const letters = team.name.replace(/[^A-Za-z]/g, '').toUpperCase();
-  return letters.slice(0, 3) || '???';
 }
 
 // Top 3 only, even though the API can return up to 5 -- this is a compact

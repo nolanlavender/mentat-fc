@@ -4,6 +4,7 @@ import { apiUrl } from '../api/client';
 import type { SquadPlayer, TeamDashboard } from '../api/types';
 import { TeamSwitcher } from '../components/TeamSwitcher';
 import { Crest, PlayerPhoto } from '../components/Crest';
+import { shortCode } from '../lib/teamDisplay';
 
 function resultClass(result: 'W' | 'D' | 'L'): string {
   return `form-badge form-badge-${result.toLowerCase()}`;
@@ -129,7 +130,7 @@ export function TeamDashboardPage() {
                   <p>
                     Model prediction:{' '}
                     {data.nextMatch.prediction.predictedHomeGoals !== null && data.nextMatch.prediction.predictedAwayGoals !== null
-                      ? `${data.nextMatch.prediction.predictedHomeGoals.toFixed(2)} - ${data.nextMatch.prediction.predictedAwayGoals.toFixed(2)}`
+                      ? `${shortCode(data.nextMatch.homeTeam)} ${data.nextMatch.prediction.predictedHomeGoals.toFixed(2)} - ${shortCode(data.nextMatch.awayTeam)} ${data.nextMatch.prediction.predictedAwayGoals.toFixed(2)}`
                       : '?'}{' '}
                     (home win {formatPercent(data.nextMatch.prediction.probHomeWin)})
                   </p>

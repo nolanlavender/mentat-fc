@@ -34,8 +34,8 @@ export interface NextMatch {
   status: string;
   round: string | null;
   competitionName: string;
-  homeTeam: { id: number; name: string; logoUrl: string | null };
-  awayTeam: { id: number; name: string; logoUrl: string | null };
+  homeTeam: { id: number; name: string; shortName: string | null; logoUrl: string | null };
+  awayTeam: { id: number; name: string; shortName: string | null; logoUrl: string | null };
   prediction: Prediction | null;
 }
 
