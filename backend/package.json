@@ -25,7 +25,8 @@
     "db:dump": "tsx seed/dump.ts",
     "db:restore": "tsx seed/restore.ts",
     "check:lineup-depth": "tsx seed/check-lineup-depth.ts",
-    "check:bulk-fixtures": "tsx seed/check-bulk-fixtures-endpoint.ts"
+    "check:bulk-fixtures": "tsx seed/check-bulk-fixtures-endpoint.ts",
+    "check:squads-endpoint": "tsx seed/check-squads-endpoint.ts"
   },
   "license": "ISC",
   "dependencies": {
