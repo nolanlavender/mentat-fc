@@ -66,7 +66,7 @@ export interface Bet {
   payout: number | null; // null while result is 'pending' -- not yet knowable
 }
 
-function assertValidLeg(leg: CreateLegInput): void {
+export function assertValidLeg(leg: CreateLegInput): void {
   if (!Number.isInteger(leg.fixtureId) || leg.fixtureId <= 0) {
     throw new AppError('Each leg needs a valid fixtureId', 400);
   }
@@ -81,7 +81,7 @@ function assertValidLeg(leg: CreateLegInput): void {
   }
 }
 
-function assertValidCreateInput(input: CreateBetInput): void {
+export function assertValidCreateInput(input: CreateBetInput): void {
   if (typeof input.stake !== 'number' || !(input.stake > 0)) {
     throw new AppError('stake must be a positive number', 400);
   }
@@ -129,7 +129,7 @@ export async function createBet(userId: number, input: CreateBetInput): Promise<
   }
 }
 
-interface BetLegRow {
+export interface BetLegRow {
   bet_id: number;
   stake: string;
   placed_at: string;
@@ -155,7 +155,7 @@ interface BetLegRow {
   prob_away_win: string | null;
 }
 
-function legModelProbability(row: BetLegRow): number | null {
+export function legModelProbability(row: BetLegRow): number | null {
   if (row.market !== 'match_winner' || row.prob_home_win === null) return null;
   if (row.selection === 'home') return Number(row.prob_home_win);
   if (row.selection === 'draw') return Number(row.prob_draw);
@@ -163,7 +163,7 @@ function legModelProbability(row: BetLegRow): number | null {
   return null;
 }
 
-function rowsToBet(rows: BetLegRow[]): Bet {
+export function rowsToBet(rows: BetLegRow[]): Bet {
   const first = rows[0];
   const legs: BetLeg[] = rows.map((r) => ({
     id: r.leg_id,

@@ -289,7 +289,33 @@ choice rather than introducing a new ML paradigm.
       all shared/public reads), a password-reset flow, and treating login
       as a first-class polish pass (this session's `/login` page is
       functional, not designed)
-- [ ] Unit tests on model evaluation / aggregation / business logic
+- [x] Unit tests on model evaluation / aggregation / business logic --
+      built 2026-08-16. Backend: vitest, testing `bets.service.ts`'s
+      `rowsToBet` (the real business logic in that file -- deriving a
+      parlay's overall result/combined odds/edge/payout from its legs,
+      including the two easy-to-get-backwards rules: a void leg drops out
+      of the combined price but the remaining legs still have to win, and
+      "lost" beats "pending" beats "won" when deciding the overall
+      result) and the synchronous validation `createBet` runs before ever
+      touching the DB. Model-service: pytest, testing `dixon_coles.py`
+      (`time_weight`'s decay curve, `_tau`'s low-score correlation
+      adjustment, and a full fit+predict sanity check -- probabilities
+      sum to 1, a clearly stronger team is favored, an unknown team
+      raises), `evaluate.py` (`brier_score`/`log_loss` against known
+      hand-computed values), and `goal_scorer.py` (`compute_player_shares`
+      -- a full-time starter's `minutes_share` and `goal_share` both beat
+      a genuinely lower-rate bench player's, `MIN_PLAYER_MATCHES`
+      excludes low-sample players, `goal_share`'s per-90-rate basis
+      correctly ranks a high-rate/low-minutes player over a same-total-
+      goals/lower-rate one, shares sum to 1 within a team -- and
+      `allocate_team_goals`'s Poisson conversion). 49 tests total, all
+      genuinely run and passing, not just written -- three of them caught
+      real bugs in the *test* fixtures during writing (a perfectly
+      deterministic synthetic dataset that degenerately blew up Dixon-
+      Coles' rho parameter, and two "obviously true" assertions about
+      goal-share ranking that turned out backwards against the model's
+      actual, correct per-90-rate math), which is its own small lesson in
+      why you run tests rather than trust that they'd pass.
 - [ ] One E2E test (Playwright): log in → view dashboard → log a bet → see
       it tracked
 - [x] UI polish pass against a real design system, not defaults -- built
@@ -331,7 +357,8 @@ choice rather than introducing a new ML paradigm.
       has none, same for player photo), migration up/down/up, and real
       Playwright screenshots (light + dark) showing a real crest, a missing
       crest, and a deliberately-broken URL all rendering correctly.
-- [ ] Explain: what's worth testing vs not, test pyramid basics
+- [x] Explain: what's worth testing vs not, test pyramid basics -- see
+      `docs/learning-log.md`'s 2026-08-16 entry
 
 ## Phase 10 — Deployment & scaling plan
 - [ ] Vercel or Cloudflare Pages (frontend) + Render (Node backend) + Neon
