@@ -3,8 +3,9 @@ import { listTeams, getTeamById, getTeamDashboard } from '../services/teams.serv
 import { NotFoundError } from '../lib/errors.js';
 import { parseIdParam } from '../lib/validation.js';
 
-export async function getTeams(_req: Request, res: Response): Promise<void> {
-  res.json(await listTeams());
+export async function getTeams(req: Request, res: Response): Promise<void> {
+  const { competition } = req.query;
+  res.json(await listTeams({ competitionName: typeof competition === 'string' ? competition : undefined }));
 }
 
 export async function getTeam(req: Request, res: Response): Promise<void> {
