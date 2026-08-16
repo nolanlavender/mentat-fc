@@ -3327,3 +3327,15 @@ directly from the real numbers in that diagnostic: the real transfer case
 merged and renamed correctly, and the unrelated Hull City/Brighton player
 was left completely untouched, still holding its own real data, exactly
 as it should.
+
+**Teams nav dropdown: colloquial names for clubs whose full name wraps.**
+"Queens Park Rangers", "West Bromwich Albion", and "Wolverhampton
+Wanderers" wrapped to a second line in the nav dropdown's fixed-width
+columns, breaking the layout -- a real, deliberately different problem
+from `shortCode()`'s 3-letter scoreboard codes ("QPR" happens to already
+match, but "West Brom"/"Wolves" are not "WBA"/"WOL"). New
+`navDisplayName()` in `lib/teamDisplay.ts`, a small hardcoded map (same
+pattern as `team-aliases.ts`/`team-short-codes.ts`) for just the handful
+of clubs whose canonical name is long enough to wrap -- everything else
+passes through unchanged. Verified with a real Playwright script against
+all three clubs plus a control (Watford, untouched).
