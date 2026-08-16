@@ -2854,3 +2854,29 @@ an error. Also caught and fixed a small pre-existing spacing bug while
 verifying ("Arsenal vsCoventry" with no space) -- a missing crest and a
 missing literal space between "vs" and the next team name had been
 silently relying on each other for the visual gap.
+
+**Predictions page: top picks, top goalscorer picks, and a matchweek
+filter.** The one real design decision here: "next 2 matchweeks" is
+capped by *date* (a 14-day window), not by parsing/matching API-Football's
+`round` string ("Regular Season - 3") directly. Rounds aren't guaranteed
+comparable across competitions or reliably numeric to sort on, but "the
+next two weeks" is a robust stand-in for any competition that plays
+weekly, with zero parsing risk. The matchweek dropdown is then just a
+client-side narrowing of whatever rounds actually land inside that
+already-fetched window -- sorted by each round's earliest kickoff, not
+alphabetically (plain string sort would put "Regular Season - 10" before
+"Regular Season - 2"). "Top picks" ranks fixtures by their single highest
+outcome probability (whichever of home/draw/away is largest) across the
+current filter, not always "home win" -- an 85% away win is a stronger
+pick than a 75% home win, and the ranking has to reflect that. "Top
+goalscorer picks" is the same idea applied to the `topScorers` already
+embedded per fixture, just flattened across the filtered fixture set and
+re-sorted globally instead of only within each fixture's own top-3/5.
+
+Verified with a real Playwright screenshot against fixtures seeded across
+three matchweeks with deliberately varied prediction confidence (75-85%
+down to 40%) and a fixture placed 20 days out specifically to prove the
+14-day cap actually excludes it (it does) -- then re-verified the
+matchweek dropdown itself by selecting a specific round and confirming
+both the top-picks lists and the full fixture list narrow to exactly
+those 2 fixtures, not just the visible list.
