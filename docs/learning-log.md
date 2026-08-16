@@ -3257,3 +3257,13 @@ the screenshot's real names (including the reversed Geovany Quenda case,
 where the fix correctly left FPL's shorter name alone instead of
 "upgrading" it to the longer squads-endpoint form), plus a control player
 (Cole Palmer, already unambiguous) confirmed completely untouched.
+
+**Team dashboard's "Next match" line got the same abbreviation treatment
+as the predictions page.** "Model prediction: 1.34 - 1.27" doesn't say
+whose score is whose without reading the fixture line above it first --
+now reads "FUL 1.34 - CHE 1.27", matching the predictions page's format
+exactly. `shortCode()` was duplicated between `PredictionsPage.tsx` and
+this page's needs, so it moved to a small shared `lib/teamDisplay.ts`
+instead of copy-pasting a third time -- both pages now import the same
+function. Verified with a real Playwright screenshot against the exact
+numbers from the screenshot that prompted the request.

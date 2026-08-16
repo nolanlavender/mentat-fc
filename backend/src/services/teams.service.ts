@@ -69,8 +69,8 @@ export interface NextMatch {
   status: string;
   round: string | null;
   competitionName: string;
-  homeTeam: { id: number; name: string; logoUrl: string | null };
-  awayTeam: { id: number; name: string; logoUrl: string | null };
+  homeTeam: { id: number; name: string; shortName: string | null; logoUrl: string | null };
+  awayTeam: { id: number; name: string; shortName: string | null; logoUrl: string | null };
   prediction: {
     modelVersion: string;
     probHomeWin: number;
@@ -89,8 +89,8 @@ async function getNextMatch(teamId: number): Promise<NextMatch | undefined> {
   // See docs/CLAUDE.md's "Data scope vs. app scope."
   const { rows } = await pool.query(
     `SELECT f.id, f.kickoff_at, f.status, f.round, c.name AS competition_name,
-       ht.id AS home_team_id, ht.name AS home_team_name, ht.logo_url AS home_team_logo_url,
-       at.id AS away_team_id, at.name AS away_team_name, at.logo_url AS away_team_logo_url
+       ht.id AS home_team_id, ht.name AS home_team_name, ht.short_name AS home_team_short_name, ht.logo_url AS home_team_logo_url,
+       at.id AS away_team_id, at.name AS away_team_name, at.short_name AS away_team_short_name, at.logo_url AS away_team_logo_url
      FROM fixtures f
      JOIN teams ht ON ht.id = f.home_team_id
      JOIN teams at ON at.id = f.away_team_id
@@ -121,8 +121,8 @@ async function getNextMatch(teamId: number): Promise<NextMatch | undefined> {
     status: fixture.status,
     round: fixture.round,
     competitionName: fixture.competition_name,
-    homeTeam: { id: fixture.home_team_id, name: fixture.home_team_name, logoUrl: fixture.home_team_logo_url },
-    awayTeam: { id: fixture.away_team_id, name: fixture.away_team_name, logoUrl: fixture.away_team_logo_url },
+    homeTeam: { id: fixture.home_team_id, name: fixture.home_team_name, shortName: fixture.home_team_short_name, logoUrl: fixture.home_team_logo_url },
+    awayTeam: { id: fixture.away_team_id, name: fixture.away_team_name, shortName: fixture.away_team_short_name, logoUrl: fixture.away_team_logo_url },
     prediction: p
       ? {
           modelVersion: p.model_version,
