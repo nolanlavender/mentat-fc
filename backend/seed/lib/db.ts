@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { teamShortCode } from './team-short-codes.js';
 
 // Builds "($1, $2, ...), ($3, $4, ...), ..." for a multi-row INSERT --
 // shared by the batch upserts below, which exist because seeding
@@ -113,18 +114,28 @@ const teamIdCache = new Map<string, number>();
 // teams.external_api_football_id has existed since the Phase 1 schema and
 // was never once written to, which silently blocked anything needing a
 // team-scoped API-Football call (e.g. GET /players/squads?team=).
+//
+// short_name is the same shape of gap, found the same way: the column has
+// existed since the Phase 1 schema, nothing ever wrote to it. Unlike the
+// other two fields, there's no source payload to read it from -- API-
+// Football's fixtures/lineups responses don't carry a short code -- so
+// it's derived from `name` itself via teamShortCode() rather than passed
+// in by the caller. `name` is always canonicalTeamName()'s output by the
+// time it reaches here, so this stays consistent regardless of which raw
+// source name a given call started from.
 export async function getOrCreateTeam(pool: Pool, name: string, logoUrl?: string, externalApiFootballId?: number): Promise<number> {
   const cached = teamIdCache.get(name);
   if (cached !== undefined) return cached;
 
   const { rows } = await pool.query<{ id: number }>(
-    `INSERT INTO teams (name, logo_url, external_api_football_id) VALUES ($1, $2, $3)
+    `INSERT INTO teams (name, logo_url, external_api_football_id, short_name) VALUES ($1, $2, $3, $4)
      ON CONFLICT (natural_key) DO UPDATE SET
        name = teams.name,
        logo_url = COALESCE(teams.logo_url, EXCLUDED.logo_url),
-       external_api_football_id = COALESCE(teams.external_api_football_id, EXCLUDED.external_api_football_id)
+       external_api_football_id = COALESCE(teams.external_api_football_id, EXCLUDED.external_api_football_id),
+       short_name = COALESCE(teams.short_name, EXCLUDED.short_name)
      RETURNING id`,
-    [name, logoUrl ?? null, externalApiFootballId ?? null],
+    [name, logoUrl ?? null, externalApiFootballId ?? null, teamShortCode(name)],
   );
   teamIdCache.set(name, rows[0].id);
   return rows[0].id;

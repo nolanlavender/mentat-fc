@@ -48,8 +48,8 @@ export interface FixtureSummary {
   awayScore: number | null;
   competitionName: string;
   seasonLabel: string;
-  homeTeam: { id: number; name: string; logoUrl: string | null };
-  awayTeam: { id: number; name: string; logoUrl: string | null };
+  homeTeam: { id: number; name: string; shortName: string | null; logoUrl: string | null };
+  awayTeam: { id: number; name: string; shortName: string | null; logoUrl: string | null };
   prediction: Prediction | null;
   topScorers: ScorerPrediction[];
 }

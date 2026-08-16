@@ -3129,3 +3129,44 @@ the photo backfill's data source entirely: `seedApiFootballTeamSquadPhotos`
 player-stats list, ~25-35 pages, and was the reason coverage had stalled
 at 57/573 rostered players) -- removed the old function outright rather
 than leaving it as unused dead code.
+
+**Predictions page, round two: calendar matchweeks, team abbreviations,
+ranked scorer picks.** The matchweek filter moved from API-Football's
+`round` string to real calendar weeks (Monday-Sunday) -- "Aug 17 - Aug
+23" reads the same regardless of competition, unlike round numbers, which
+aren't guaranteed to line up across Premier League and Championship.
+Week 1 starts on the Monday of the week containing *tomorrow*, not today
+-- picking today's own Monday would occasionally hand back a "matchweek"
+that's already mostly elapsed (todays' date happened to be a Sunday while
+building this, which made the off-by-one immediately obvious: today's own
+week ends today, so "next matchweek" has to mean the week starting
+tomorrow).
+
+Also surfaced a second real "column exists, nothing populates it" gap,
+the same shape as `teams.external_api_football_id` earlier the same day:
+`teams.short_name` has existed since the Phase 1 schema, but nothing ever
+wrote to it, so displaying "ARS" instead of "Arsenal" needed real data to
+read first. Unlike the other two team-identity fields, there's no source
+payload to read a short code from -- API-Football's fixtures/lineups
+responses don't carry one -- so `backend/seed/lib/team-short-codes.ts`
+hardcodes the well-known broadcast-style 3-letter codes for current
+Premier League/Championship clubs (same reasoning as `team-aliases.ts`:
+a few dozen clubs, seeding runs a handful of times, cheap to maintain by
+hand), with a derived fallback (first 3 letters of the name) for anything
+unmapped so the UI never shows a blank. `getOrCreateTeam` now computes and
+persists this via the same COALESCE-fill-a-gap pattern as `logoUrl`/
+`external_api_football_id`, and the frontend carries an identical fallback
+so existing production teams display something reasonable immediately,
+before the next `npm run db:seed:current-season` backfills the real code.
+
+Other changes in the same pass: Home/Draw/Away labels replaced with each
+team's short code (a real scoreboard reads "ARS 45%", not "Home 45%");
+the predicted-score line now reads "ARS 2.10 - CHE 0.80" instead of a
+bare "expected 2.10 - 0.80"; Top goalscorer picks are numbered 1-10 (up
+from an unranked top 8) and each name links to that player's page.
+Verified with a real Playwright script (not just a static screenshot this
+time) that actually drove the matchweek dropdown -- confirmed the two
+week labels render as "Aug 17 - Aug 23" / "Aug 24 - Aug 30" against a
+known today, and that selecting each one correctly narrows to just the
+fixture seeded inside that week while excluding one deliberately seeded
+20 days out.

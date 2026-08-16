@@ -339,6 +339,27 @@ section + section {
   flex-direction: column;
 }
 
+.top-pick-rank {
+  font-weight: 700;
+  color: var(--text-h);
+  opacity: 0.5;
+  width: 1.5em;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.top-pick-player-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-h);
+  text-decoration: none;
+}
+
+.top-pick-player-link:hover {
+  color: var(--accent);
+}
+
 .prediction-list {
   list-style: none;
   padding: 0;
@@ -351,7 +372,7 @@ section + section {
    with the scorers line spanning the full width on its own row below. */
 .prediction-row {
   display: grid;
-  grid-template-columns: minmax(200px, 1fr) 60px 60px 60px 90px;
+  grid-template-columns: minmax(200px, 1fr) 60px 60px 60px minmax(130px, auto);
   column-gap: 12px;
   row-gap: 4px;
   align-items: center;
