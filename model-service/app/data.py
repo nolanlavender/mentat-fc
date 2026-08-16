@@ -73,33 +73,41 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
     competition appearance history regardless of which team-strength model
     (single-competition or joint) is being allocated for that fixture.
 
-    Restricted to each player's current club: real bug found in production
-    2026-08-16 -- Joao Pedro (transferred Brighton -> Chelsea) kept showing
-    up as a "reliable" Brighton goalscorer pick indefinitely, because his
-    old Brighton appearances alone cleared goal_scorer's MIN_PLAYER_MATCHES
-    threshold and nothing here checked whether he still played there.
-    Originally fixed by deriving "current club" from this same appearance
-    data -- whichever team_id a player's most recent finished-match
-    appearance was for -- since players.current_team_id is FPL-only
-    (Premier League) and null for every Championship player.
+    Labeled by each player's CURRENT club, not the club each individual
+    appearance was actually for: real bug chain found in production
+    2026-08-16. First found for Joao Pedro (transferred Brighton ->
+    Chelsea) -- his old Brighton appearances alone cleared goal_scorer's
+    MIN_PLAYER_MATCHES threshold and nothing checked whether he still
+    played there, so he kept showing up as a "reliable" Brighton
+    goalscorer pick indefinitely. Original fix derived "current club" from
+    this same appearance data (whichever team_id a player's most recent
+    finished-match appearance was for), since players.current_team_id is
+    FPL-only (Premier League) and null for Championship. That had its own
+    gap, found the same day: Harry Wilson's current_team_id already
+    pointed at Leeds United (FPL's bootstrap-static is live -- it reflects
+    a transfer instantly), but he had zero recorded appearances there yet,
+    so the appearance-derived logic still landed on Fulham and confidently
+    predicted him to score there.
 
-    That derived version had its own real gap, found the same day: it can
-    only be as fresh as the match data itself. Harry Wilson's
-    current_team_id already pointed at Leeds United (FPL's bootstrap-static
-    is live -- it reflects a transfer the instant it happens), but he had
-    zero recorded fixture_lineups appearances there yet -- so the
-    appearance-derived logic still landed on Fulham, his last club with any
-    actual match data, and confidently predicted him to score there.
-
-    Now prefers players.current_team_id when it's set (a strictly more
-    current signal than a derived one, for the players FPL covers), falling
-    back to the appearance-derived most-recent club only when
-    current_team_id is null (Championship players). A player transferred
-    per FPL but with no appearances yet for the new club simply has zero
-    rows survive the join below -- correctly no data, not stale data, so
-    they drop out of goal_scorer's shares table and get no prediction until
-    real matches exist for that club, same "no confident answer yet" outcome
-    the original fix was already built around.
+    Deliberate design, not just a bug fix, after both of those: a
+    transferred player's OLD appearances still count toward his personal
+    scoring rate -- excluding them entirely meant he vanished from
+    predictions for weeks after a transfer, which is worse than an
+    estimate built partly on old-club data. What changes is which team
+    that rate gets compared against. Every appearance a player has ever
+    made (any team, any competition) is labeled here with their CURRENT
+    effective club (current_team_id, falling back to their own most-recent
+    appearance's team for Championship players FPL doesn't cover) rather
+    than filtered down to only appearances for that club. app.goal_scorer's
+    existing recency half-life (see compute_player_shares) does the actual
+    blending with no extra code needed: an old club's appearances count
+    less as time passes and don't get replaced by anything, so a player's
+    rate is old-club-dominated the day after a transfer and shifts toward
+    new-club data automatically as he actually plays there -- the exact
+    "average with his old team, weighted toward what's real" behavior a
+    hard cutoff couldn't give. goal_share still normalizes against
+    whichever teammates share that same effective club, so the comparison
+    set is always his real current squad, not a mix of two rosters.
     """
     query = """
         WITH appearances AS (
@@ -124,9 +132,9 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
             FROM most_recent_club mrc
             JOIN players p ON p.id = mrc.player_id
         )
-        SELECT a.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals
+        SELECT ec.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals
         FROM appearances a
-        JOIN effective_club ec ON ec.player_id = a.player_id AND ec.team_id = a.team_id
+        JOIN effective_club ec ON ec.player_id = a.player_id
         ORDER BY a.kickoff_date
     """
     return _query_df(conn, query, {"competition_names": competition_names})

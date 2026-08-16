@@ -3375,3 +3375,43 @@ only his new-club appearances (proving the original fix's intent survived
 the change), and a Championship player with no `current_team_id` at all
 still correctly falls back to the appearance-derived club, untouched by
 this change.
+
+**Then a real product question, not a bug report: should a transferred
+player be invisible until he clears the reliability threshold at his new
+club, or is a rate built partly on old-club history better than no
+prediction at all?** Worth a deliberate decision, not a default -- talked
+through the tradeoff (skill is somewhat portable, but a different club's
+service/system/role is a real confound) before touching anything. Landed
+on: yes, keep him in the model, but make sure the *comparison set* is
+still his real current squad.
+
+The mechanism already existed and didn't need inventing: `compute_player_shares`
+already recency-weights every appearance with a 180-day half-life
+(`time_weight`) -- an old club's appearances were always going to fade,
+they just never got the chance to blend with anything, because
+`load_player_squad_appearances` was filtering every appearance down to
+only ones matching the player's *current* team_id (that's the fix from
+the previous entry). The redesign was two lines of SQL: instead of
+joining appearances to `effective_club` on both `player_id` AND
+`team_id`, join on `player_id` alone and select `effective_club`'s
+`team_id` as the label instead of the appearance's own. Every historical
+appearance a player has ever made now counts toward his personal rate
+(weighted by recency, so a transfer's-worth-old data already carries
+less weight and keeps fading), but is always *grouped and normalized*
+against whichever teammates share his current effective club --
+`compute_player_shares`'s and `allocate_team_goals`'s own code needed
+zero changes, since "team_id" already meant the right thing once the
+query handed it the right value. The elegance here is a real lesson: the
+recency-decay and team-normalization logic were both already correct in
+isolation, the bug was purely in which rows reached them.
+
+Verified end-to-end, not just the query in isolation: ran the real
+`compute_player_shares`/`allocate_team_goals` pipeline against the same
+Harry Wilson/Joao Pedro/Championship-player reproduction used for the
+previous fix. Harry Wilson -- previously entirely absent from the shares
+table -- now clears `MIN_PLAYER_MATCHES` on his 8 Fulham appearances
+(all correctly labeled as Leeds, his effective club) and gets a real
+`allocate_team_goals` prediction for a Leeds fixture. Joao Pedro's full
+9-appearance history (3 old Brighton + 6 new Chelsea) now all count
+toward his rate, all labeled Chelsea, instead of only the 6 Chelsea rows
+counting as under the previous, stricter fix.
