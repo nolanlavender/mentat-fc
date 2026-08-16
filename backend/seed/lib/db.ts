@@ -182,24 +182,34 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
   // the same real player. A numeric id from the source is more trustworthy
   // than a name string from the same source, so it's checked first.
   if (p.externalApiFootballId !== undefined) {
-    const existingById = await pool.query<{ id: number }>(`SELECT id FROM players WHERE external_api_football_id = $1`, [
-      p.externalApiFootballId,
-    ]);
+    const existingById = await pool.query<{ id: number; full_name: string }>(
+      `SELECT id, full_name FROM players WHERE external_api_football_id = $1`,
+      [p.externalApiFootballId],
+    );
     if (existingById.rows[0]) {
-      const id = existingById.rows[0].id;
+      const { id, full_name: existingFullName } = existingById.rows[0];
+      // Real bug found in production 2026-08-16: leaving full_name
+      // permanently untouched here meant whichever API-Football endpoint
+      // happened to see a player FIRST decided their name forever --
+      // lineups calls in particular sometimes spell a player abbreviated
+      // ("I. Thiago", "E. Riis"), and a later call to a different endpoint
+      // for the same external_api_football_id that carries their real full
+      // name never got to fix it. Matched by the source's own stable
+      // numeric id (not a name guess), so upgrading is safe: only replaces
+      // an abbreviated stored name with a non-abbreviated incoming one,
+      // never the other direction, so a good name can't get clobbered by a
+      // later abbreviated sighting.
+      const shouldUpgradeName = parseAbbreviatedName(existingFullName) !== null && parseAbbreviatedName(p.fullName) === null;
       await pool.query(
-        // full_name intentionally left untouched -- whichever call created
-        // this row first set the canonical spelling (and natural_key is
-        // generated from it); a differently-formatted name from a later
-        // call enriches other fields but never overwrites the name.
         `UPDATE players SET
+           full_name = CASE WHEN $7 THEN $8 ELSE full_name END,
            date_of_birth = COALESCE(date_of_birth, $2),
            nationality = COALESCE($3, nationality),
            position = COALESCE($4, position),
            external_fpl_id = COALESCE($5, external_fpl_id),
            photo_url = COALESCE(photo_url, $6)
          WHERE id = $1`,
-        [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.photoUrl ?? null],
+        [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.photoUrl ?? null, shouldUpgradeName, p.fullName],
       );
       return id;
     }

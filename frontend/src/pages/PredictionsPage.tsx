@@ -197,7 +197,10 @@ export function PredictionsPage() {
             {topPicks.map((pick) => (
               <li key={pick.fixture.id} className="fixture-teams">
                 <Crest src={pick.fixture.homeTeam.logoUrl} alt="" />
-                {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name}
+                <span className="top-pick-fixture">
+                  {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name}
+                  <span className="prediction-meta">{new Date(pick.fixture.kickoffAt).toLocaleString()}</span>
+                </span>
                 <Crest src={pick.fixture.awayTeam.logoUrl} alt="" />
                 <span className="top-pick-call">
                   {pick.outcome} {formatPercent(pick.probability)}
@@ -217,7 +220,8 @@ export function PredictionsPage() {
                 <PlayerPhoto src={pick.playerPhotoUrl} alt="" />
                 {pick.playerName}
                 <span className="prediction-meta">
-                  {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name}
+                  {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name} ·{' '}
+                  {new Date(pick.fixture.kickoffAt).toLocaleString()}
                 </span>
                 <span className="top-pick-call">{formatPercent(pick.probScores)}</span>
               </li>

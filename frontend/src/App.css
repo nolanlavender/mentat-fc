@@ -334,6 +334,11 @@ section + section {
   color: var(--accent);
 }
 
+.top-pick-fixture {
+  display: flex;
+  flex-direction: column;
+}
+
 .prediction-list {
   list-style: none;
   padding: 0;
