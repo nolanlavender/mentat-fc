@@ -207,6 +207,12 @@ export interface PlayerInput {
   nationality?: string;
   position?: string;
   photoUrl?: string;
+  // Our internal team id this sighting was FOR (e.g. the team a lineup
+  // entry lists the player under), when the caller has it. Purely an
+  // optional safety net -- see the fuzzy-match tier below -- callers that
+  // don't have team context (or don't need one, e.g. FPL, which already
+  // matches reliably by exact name/DOB) simply omit it.
+  teamId?: number;
 }
 
 // Records that (source, externalId) genuinely is this player, going
@@ -320,6 +326,13 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
     // zero-match case falls through to the exact-name/insert path
     // unchanged below, so this can never misattribute one player's stats
     // to another.
+    //
+    // Matches the surname against ANY word after the first, not just the
+    // last -- real bug found in production 2026-08-16: Moisés Caicedo
+    // Corozo (Hispanic two-surname convention, paternal then maternal)
+    // never matched API-Football's "M. Caicedo", because "Caicedo" is the
+    // *first* surname, not the last word ("Corozo") -- 119 real appearances
+    // sat on an orphan row while the real player showed zero.
     const abbreviated = parseAbbreviatedName(p.fullName);
     if (abbreviated) {
       const { rows: candidates } = await pool.query<{ id: number }>(
@@ -327,7 +340,7 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
          WHERE external_fpl_id IS NOT NULL
            AND external_api_football_id IS NULL
            AND lower(left(full_name, 1)) = $1
-           AND lower(split_part(full_name, ' ', -1)) = $2`,
+           AND $2 = ANY((string_to_array(lower(full_name), ' '))[2:])`,
         [abbreviated.initial, abbreviated.surname],
       );
       if (candidates.length === 1) {
@@ -342,6 +355,43 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
         );
         await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
         return id;
+      }
+    }
+
+    // Real bug found in production 2026-08-16: goal-scorer prediction data
+    // for several current Chelsea attackers (Estêvão, Pedro Neto, João
+    // Pedro) was landing on orphan rows instead of their real FPL-linked
+    // player -- same root cause as the squads-endpoint case fixed earlier
+    // the same day (FPL's full_name is sometimes a player's full legal
+    // name, API-Football's lineups/player-stats sometimes use their common
+    // football name), but this time on the path that actually feeds
+    // model-service's goal-scorer training data, not just photos. Reusing
+    // upsertPlayerPhotoForTeam's same word-subsequence match and the same
+    // safety rule: only attempted when the caller knows which team this
+    // sighting is FOR (most lineup/player-stats calls do), scoped to that
+    // team's roster, and only acted on with exactly one candidate -- the
+    // false-positive risk that keeps this out of the fully global path
+    // doesn't apply once it's scoped this tightly.
+    if (p.teamId !== undefined) {
+      const { rows: roster } = await pool.query<{ id: number; full_name: string }>(
+        `SELECT id, full_name FROM players WHERE current_team_id = $1`,
+        [p.teamId],
+      );
+      const fuzzyMatches = roster.filter((r) => namesLikelyMatch(r.full_name, p.fullName));
+      if (fuzzyMatches.length === 1) {
+        const match = fuzzyMatches[0];
+        const preferIncomingName = nameWordCount(p.fullName) < nameWordCount(match.full_name);
+        await pool.query(
+          `UPDATE players SET
+             external_api_football_id = $2,
+             full_name = CASE WHEN $3 THEN $4 ELSE full_name END,
+             position = COALESCE(position, $5),
+             photo_url = COALESCE(photo_url, $6)
+           WHERE id = $1`,
+          [match.id, p.externalApiFootballId, preferIncomingName, p.fullName, p.position ?? null, p.photoUrl ?? null],
+        );
+        await linkPlayerExternalId(pool, match.id, 'api_football', p.externalApiFootballId);
+        return match.id;
       }
     }
   }
@@ -435,13 +485,17 @@ export async function upsertPlayerPhotoForTeam(
     return existing.id;
   }
 
+  // Matches the surname against ANY word after the first, not just the
+  // last -- see the identical fix in upsertPlayerGoldenRecord's abbreviated
+  // branch for why (Hispanic two-surname names like "Moisés Caicedo
+  // Corozo").
   const abbreviated = parseAbbreviatedName(p.fullName);
   const { rows: candidates } = await pool.query<{ id: number }>(
     `SELECT id FROM players
      WHERE current_team_id = $1
        AND (
          lower(full_name) = lower($2)
-         OR ($3::text IS NOT NULL AND lower(left(full_name, 1)) = $3 AND lower(split_part(full_name, ' ', -1)) = $4)
+         OR ($3::text IS NOT NULL AND lower(left(full_name, 1)) = $3 AND $4 = ANY((string_to_array(lower(full_name), ' '))[2:]))
        )`,
     [teamId, p.fullName, abbreviated?.initial ?? null, abbreviated?.surname ?? null],
   );

@@ -247,6 +247,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
         externalApiFootballId: player.id,
         fullName: player.name,
         position: player.pos ?? undefined,
+        teamId,
       });
       await upsertFixtureLineup(pool, {
         fixtureId,
@@ -263,6 +264,7 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
         externalApiFootballId: player.id,
         fullName: player.name,
         position: player.pos ?? undefined,
+        teamId,
       });
       await upsertFixtureLineup(pool, {
         fixtureId,
@@ -305,6 +307,7 @@ export async function seedApiFootballPlayerStats(pool: Pool, fixtureExternalId: 
         fullName: player.name,
         position: stats.games.position ?? undefined,
         photoUrl: player.photo ?? undefined,
+        teamId,
       });
 
       await upsertFixturePlayerStats(pool, {
@@ -409,6 +412,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
           externalApiFootballId: player.id,
           fullName: player.name,
           position: player.pos ?? undefined,
+          teamId,
         });
         lineupRows.push({ fixtureId, teamId, playerId, isStarting: true, shirtNumber: player.number ?? undefined, position: player.pos ?? undefined });
       }
@@ -417,6 +421,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
           externalApiFootballId: player.id,
           fullName: player.name,
           position: player.pos ?? undefined,
+          teamId,
         });
         lineupRows.push({ fixtureId, teamId, playerId, isStarting: false, shirtNumber: player.number ?? undefined, position: player.pos ?? undefined });
       }
@@ -434,6 +439,7 @@ export async function seedApiFootballLineupsAndStatsBulk(
           fullName: player.name,
           position: stats.games.position ?? undefined,
           photoUrl: player.photo ?? undefined,
+          teamId,
         });
 
         playerStatsRows.push({
