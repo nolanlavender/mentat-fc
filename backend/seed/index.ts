@@ -200,21 +200,25 @@ export async function backfillTeamLogos(): Promise<void> {
 /**
  * Standalone, bounded-cost path to capture player headshots -- for
  * `npm run db:seed:photos`, exported so seed/backfill-photos.ts can run
- * just this on its own. Uses /players?league=&season= (a whole-league-
- * season player list, ~20 players/page, each already carrying a photo
- * URL) instead of the per-fixture /fixtures/players endpoint the full
- * lineup backfill uses -- looping every fixture's players to reach the
- * same coverage would mean thousands of calls; this is ~25-30 pages per
- * league for one season.
+ * just this on its own. Uses GET /players/squads?team={id} (confirmed for
+ * real 2026-08-16, see seedApiFootballTeamSquadPhotos's own comment): one
+ * call per team, full current roster, photo on every player. Replaces the
+ * old /players?league=&season= pagination approach, which had to page
+ * through an entire league's player-STATS list (~25-35 pages) to find the
+ * same players -- real production coverage after that approach was only
+ * 57/573 rostered players, consistent with the pull dying partway through
+ * those pages rather than the data not existing.
+ *
+ * Teams without a linked external_api_football_id yet (see
+ * getOrCreateTeam's comment on that column) simply can't be queried by
+ * this endpoint and are skipped with a warning -- run `npm run
+ * db:seed:current-season` first if that count is ever non-zero.
  *
  * Current season only, same reasoning as backfillTeamLogos above: this is
  * about getting headshots for the squads actually playing right now, not
- * an exhaustive historical sweep, and it keeps a rerun's cost small and
- * predictable rather than growing with 4 seasons' worth of squads. A
- * player who's already in the DB (from lineups or FPL) gets matched by
- * external_api_football_id and enriched with a photo; nothing here
- * touches which team a player is "on" (players.current_team_id stays
- * FPL's alone to set, see lib/db.ts's setPlayerCurrentTeam).
+ * an exhaustive historical sweep. Nothing here touches which team a player
+ * is "on" (players.current_team_id stays FPL's alone to set, see
+ * lib/db.ts's setPlayerCurrentTeam) -- this only ever enriches photo_url.
  */
 export async function backfillPlayerPhotos(): Promise<void> {
   if (!process.env.API_FOOTBALL_KEY) {
@@ -222,23 +226,44 @@ export async function backfillPlayerPhotos(): Promise<void> {
   }
 
   const currentSeasonCode = SEASON_CODES[SEASON_CODES.length - 1];
-  const externalSeasonYear = Number(`20${currentSeasonCode.slice(0, 2)}`);
+  const seasonLabel = `20${currentSeasonCode.slice(0, 2)}/${currentSeasonCode.slice(2, 4)}`;
 
-  const leagues: Array<{ name: string; externalLeagueId: number }> = [
-    { name: 'Premier League', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.premierLeague },
-    { name: 'Championship', externalLeagueId: API_FOOTBALL_LEAGUE_IDS.championship },
-  ];
+  const leagues: Array<{ name: string }> = [{ name: 'Premier League' }, { name: 'Championship' }];
 
+  let totalPlayersSeen = 0;
   for (const league of leagues) {
-    console.log(`Pulling ${league.name} ${externalSeasonYear}/${String(externalSeasonYear + 1).slice(2)} player photos from API-Football...`);
-    const result = await seedApiFootballPlayerPhotosForSeason(pool, league.externalLeagueId, externalSeasonYear);
-    console.log(`  ${result.playersSeen} player(s) seen.`);
+    const { rows: teams } = await pool.query<{ id: number; name: string; external_api_football_id: number | null }>(
+      `SELECT DISTINCT t.id, t.name, t.external_api_football_id
+       FROM teams t
+       JOIN fixtures f ON f.home_team_id = t.id OR f.away_team_id = t.id
+       JOIN competition_seasons cs ON cs.id = f.competition_season_id
+       JOIN competitions c ON c.id = cs.competition_id
+       JOIN seasons s ON s.id = cs.season_id
+       WHERE c.name = $1 AND s.label = $2
+       ORDER BY t.name`,
+      [league.name, seasonLabel],
+    );
+
+    const linked = teams.filter((t) => t.external_api_football_id !== null);
+    const unlinked = teams.length - linked.length;
+    console.log(`Pulling ${league.name} ${seasonLabel} squad photos from API-Football (${linked.length}/${teams.length} team(s) linked)...`);
+    if (unlinked > 0) {
+      console.log(`  ${unlinked} team(s) have no external_api_football_id yet -- run npm run db:seed:current-season first to link them.`);
+    }
+
+    for (const team of linked) {
+      const result = await seedApiFootballTeamSquadPhotos(pool, team.id, team.external_api_football_id!);
+      console.log(`  ${team.name}: ${result.playersSeen} player(s) seen.`);
+      totalPlayersSeen += result.playersSeen;
+    }
   }
 
   const { rows } = await pool.query<{ total: string; with_photo: string }>(
-    `SELECT count(*) AS total, count(photo_url) AS with_photo FROM players`,
+    `SELECT count(*) AS total, count(photo_url) AS with_photo FROM players WHERE current_team_id IS NOT NULL`,
   );
-  console.log(`Done: ${rows[0].with_photo}/${rows[0].total} players now have a photo_url.`);
+  console.log(
+    `Done: ${rows[0].with_photo}/${rows[0].total} rostered players now have a photo_url (${totalPlayersSeen} squad entries processed).`,
+  );
 }
 
 /**
