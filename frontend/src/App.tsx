@@ -55,7 +55,14 @@ function App() {
       <Routes>
         <Route path="/" element={<TeamListPage />} />
         <Route path="/teams/:id" element={<TeamDashboardPage />} />
-        <Route path="/my-team" element={<MyTeamPage />} />
+        <Route
+          path="/my-team"
+          element={
+            <RequireAuth>
+              <MyTeamPage />
+            </RequireAuth>
+          }
+        />
         <Route path="/predictions" element={<PredictionsPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route
