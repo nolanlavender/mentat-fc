@@ -8,6 +8,7 @@ import { BetsPage } from './pages/BetsPage';
 import { PredictionsPage } from './pages/PredictionsPage';
 import { LoginPage } from './pages/LoginPage';
 import { AuthProvider, useAuth } from './auth/AuthContext';
+import { TeamsNavDropdown } from './components/TeamsNavDropdown';
 import './App.css';
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -30,7 +31,7 @@ function Nav() {
       <Link to="/" className="nav-brand">
         Mentat FC
       </Link>
-      <Link to="/">Teams</Link>
+      <TeamsNavDropdown />
       <Link to="/my-team">My Team</Link>
       <Link to="/predictions">Predictions</Link>
       <Link to="/bets">Bets</Link>

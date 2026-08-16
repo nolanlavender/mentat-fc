@@ -3205,3 +3205,19 @@ Playwright screenshot -- confirmed every player landed in the right
 group, sorted alphabetically within it, and that the rounding and
 top-performers numbers matched hand-computed values from the seeded
 fixture stats.
+
+**Teams nav dropdown.** The "Teams" nav link became a click-to-toggle
+dropdown (`components/TeamsNavDropdown.tsx`) listing every current
+Premier League/Championship team in two columns, linking straight to each
+team's dashboard -- click-to-toggle, not hover-only, since a hover-only
+mega-menu simply doesn't work on a touch device at all. Closes on
+selecting a team, on Escape, or on an outside click (a `mousedown`
+listener attached only while open, checking `contains()` against a ref --
+removed again on close so it's not doing anything while the panel isn't
+even rendered). Fetches both competitions' team lists lazily, only on
+first open, and caches the result in state rather than refetching on
+every toggle. Verified with a real Playwright script (not just a
+screenshot) driving actual clicks: opened the panel, confirmed both
+competition columns had the right teams, clicked a team and confirmed
+both the URL navigated and the panel closed, then reopened it and
+confirmed a click outside the panel closes it too.
