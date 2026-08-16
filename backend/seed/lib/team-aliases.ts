@@ -30,6 +30,15 @@ export const TEAM_NAME_ALIASES: Record<string, string> = {
   Swansea: 'Swansea City',
   QPR: 'Queens Park Rangers',
 
+  // Confirmed for real 2026-08-16, from the same production diagnostic
+  // that caught Spurs/Man Utd above: FPL's real bootstrap-static names for
+  // these two ("Ipswich Town", "Coventry City") don't match the real
+  // canonical rows (confirmed from production data as "Ipswich" and
+  // "Coventry" respectively) and had no alias entry at all -- every
+  // Ipswich/Coventry FPL player's current_team_id pointed at a phantom row.
+  'Ipswich Town': 'Ipswich',
+  'Coventry City': 'Coventry',
+
   // Discovered for real 2026-08-15: these 3 Championship clubs were missing
   // from this map, so football-data.co.uk's name and API-Football's name for
   // the same real club each created their own teams row -- every match that
