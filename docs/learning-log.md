@@ -3221,3 +3221,39 @@ screenshot) driving actual clicks: opened the panel, confirmed both
 competition columns had the right teams, clicked a team and confirmed
 both the URL navigated and the panel closed, then reopened it and
 confirmed a click outside the panel closes it too.
+
+**A fourth confirmed instance of the "same source, disagreeing name"
+problem -- this time solved for real instead of deferred.** A real
+squad-page screenshot showed several Brazilian/South American players
+(João Pedro, Estêvão, Moisés Caicedo, Geovany Quenda, Pedro Neto) with no
+photo and displayed under an awkward full legal name. Same root shape as
+the Bruno Fernandes case flagged earlier as a deliberately-deferred hard
+problem: FPL's `full_name` (`first_name + second_name`) is sometimes a
+player's full legal name ("João Pedro Junqueira de Jesus") rather than
+their common football name ("João Pedro"), which neither exact nor
+abbreviated-initial+surname matching bridges. This time it was worth
+solving rather than deferring, because the earlier deferral was about a
+*global*, all-players match (real false-positive risk at that scale) --
+this one only ever runs inside `upsertPlayerPhotoForTeam`, already scoped
+to one team's ~25-30 player roster, where the risk profile is completely
+different.
+
+The fix, `namesLikelyMatch`: treat one name as a match for another if its
+words appear, in order, as a subsequence of the other's words (accent-
+stripped via NFD normalization first, so "João"/"Joao" compare equal).
+Deliberately bidirectional -- confirmed for real that either source can be
+the longer name: FPL had the fuller legal name for João Pedro, but
+API-Football's squads endpoint had the fuller name ("Geovany Tcherno
+Quenda") for a player FPL stores under the shorter "Geovany Quenda". Only
+applied as a last-resort tier, after exact and abbreviated matching have
+already failed, and only acted on when it resolves to exactly one
+candidate on that team -- same non-negotiable safety rule as every other
+fuzzy match added this session. When it fires, the stored name is
+upgraded to whichever of the two is shorter, since the common football
+name has consistently been the shorter one in every real case seen so
+far, regardless of which source supplied it -- verified this holds in
+both directions with a scratch-Postgres reproduction built directly from
+the screenshot's real names (including the reversed Geovany Quenda case,
+where the fix correctly left FPL's shorter name alone instead of
+"upgrading" it to the longer squads-endpoint form), plus a control player
+(Cole Palmer, already unambiguous) confirmed completely untouched.
