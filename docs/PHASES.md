@@ -316,8 +316,29 @@ choice rather than introducing a new ML paradigm.
       goal-share ranking that turned out backwards against the model's
       actual, correct per-90-rate math), which is its own small lesson in
       why you run tests rather than trust that they'd pass.
-- [ ] One E2E test (Playwright): log in → view dashboard → log a bet → see
-      it tracked
+- [x] One E2E test (Playwright): log in → view dashboard → log a bet → see
+      it tracked -- built 2026-08-16, `frontend/e2e/bets-flow.spec.ts`.
+      Registers a fresh account (unique email per run), confirms the
+      unauthenticated `/bets` route redirects to `/login` (the
+      `RequireAuth` guard), views a team dashboard, adds a bet leg and
+      submits it, and confirms it shows up in "All bets" as pending for
+      the right stake. Deliberately the *only* E2E test -- everything
+      else is either pure logic (covered by the new unit tests above) or
+      already covered by this project's established real-browser-
+      screenshot verification habit; this one flow (register → navigate →
+      submit a form → see server-persisted state reflected back) is the
+      one thing no unit test can answer, which is the actual argument for
+      paying an E2E test's slowness/fragility cost at all, not "more
+      coverage is always better." Runs against a real backend + Postgres
+      (not spun up by the test itself -- see `frontend/e2e/README.md`),
+      using whatever upcoming Premier League fixture is already seeded,
+      not a special test fixture. Verified for real against a scratch
+      Postgres + real backend + real Chromium (not just "should pass"):
+      failed on the first run with a genuine locator ambiguity (the
+      overall bet's "pending" badge and its one leg's own "pending" badge
+      share a CSS class), fixed by scoping the assertion to the card
+      header specifically, then reran twice more to confirm it passes
+      reliably, not just once by luck.
 - [x] UI polish pass against a real design system, not defaults -- built
       2026-08-15: Chelsea blue (`#034694`) + a muted gold trim as the
       palette, Cinzel (heraldic, inscriptional serif) for headings and
