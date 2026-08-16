@@ -2711,3 +2711,70 @@ and pretending otherwise (e.g. load-testing `localhost`) would prove
 nothing about the actual deployed stack's behavior. Left it unchecked
 rather than substitute a fake version of the check just to close out the
 box.
+
+## 2026-08-16 -- First real production bug reports, and what they caught
+
+First hotfix round found entirely by actually using the deployed app, not
+by re-reading code -- the whole point of shipping something real. Two
+things worth remembering from it.
+
+**Tottenham's empty squad turned out to be the exact same bug class as
+the Oxford/Sheffield duplicate-team fixture bug from Phase 5**, just in a
+third importer. `seed/sources/fpl.ts` called `getOrCreateTeam` with FPL's
+raw team name, never through `canonicalTeamName` the way
+`football-data-co-uk.ts` and `api-football.ts` both already did -- the
+file's own header comment even said FPL's names "match closely enough in
+practice," a claim that was never actually checked against a live
+response (this environment can't reach `fantasy.premierleague.com`, see
+the same file's UNVERIFIED note). Once it ran against the real production
+API, FPL's real value for Tottenham didn't match the canonical "Tottenham"
+row already seeded from the other two sources, so it created a phantom
+"Spurs" row and every real Spurs player's `current_team_id` pointed at
+that instead -- the real Tottenham dashboard queries `players WHERE
+current_team_id = <real Tottenham's id>` and correctly found nobody.
+Fixed by applying `canonicalTeamName` in `fpl.ts` (matching the other two
+importers) and correcting the alias map itself -- the *existing* `Spurs`
+entry mapped to `'Tottenham Hotspur'`, which was also never verified and
+turned out to not match the real canonical spelling either. Verified with
+the same kind of direct reproduction used for the original bug: called
+`getOrCreateTeam` with the raw buggy path first (confirmed it really does
+create a second row), then with the fixed path (confirmed it resolves to
+the same real row) -- not just read the diff and assumed it was right.
+
+Added `npm run db:seed:fpl` (standalone FPL bootstrap rerun, same
+reasoning as the earlier logos/photos scripts) so applying this fix in
+production doesn't need a full reseed -- just rerun that one command
+against the real database once the fix is deployed.
+
+**The harder lesson: fixing the code doesn't retroactively fix data
+already corrupted by the bug**, and worse, a naive rerun can outright
+crash on it. `teams.external_fpl_id` is a real `UNIQUE` column -- the
+phantom "Spurs" row already holds Tottenham's real FPL id from the buggy
+run, so rerunning the fixed importer tries to write that same id onto the
+*real* Tottenham row and hits a unique-constraint violation before it can
+self-heal anything. The actual fix procedure (documented for the user,
+since this session has no access to run it against the real production
+database) is: null out the phantom row's `external_fpl_id` first (frees
+the constraint, touches nothing else), rerun `npm run db:seed:fpl` (a
+direct `UPDATE`, not a conditional one, so every affected player's
+`current_team_id` gets correctly overwritten to the real team on this
+pass), *then* delete the now fully-orphaned phantom row. Skipping straight
+to "just delete the phantom row" first would instead fail on
+`players.current_team_id`'s foreign key while players still pointed at
+it. Order matters here in a way that isn't obvious from either bug in
+isolation.
+
+**Boston United appearing in the real Premier League standings** is still
+an open investigation, not yet root-caused -- a real non-league club
+paired against another real non-league club (Aldershot), tagged under the
+*current* Premier League competition-season in the database. Ruled out
+the two most likely explanations by reading the actual upsert code before
+guessing further: `getOrCreateCompetition`/`getOrCreateSeason`/
+`getOrCreateCompetitionSeason` all match on real unique keys (name,
+label, and the (competition_id, season_id) pair respectively), so there's
+no cross-contamination path through those functions themselves. Waiting
+on one more real diagnostic query (whether the fixture's
+`external_api_football_id` is set) before touching any code -- if it's
+set, the bug is upstream, in what API-Football's own `league=39` query
+actually returned; if it's null, it came from the football-data.co.uk CSV
+importer instead, a completely different code path to investigate.

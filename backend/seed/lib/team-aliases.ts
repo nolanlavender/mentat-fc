@@ -5,8 +5,18 @@
 // team_aliases table only if this genuinely becomes painful to maintain.
 export const TEAM_NAME_ALIASES: Record<string, string> = {
   'Man United': 'Manchester United',
+  'Man Utd': 'Manchester United',
   'Man City': 'Manchester City',
-  Spurs: 'Tottenham Hotspur',
+  // Confirmed for real 2026-08-16: this used to map to 'Tottenham Hotspur',
+  // which was itself never verified -- the real canonical row (seeded from
+  // football-data.co.uk, the source of truth for team spelling) is just
+  // "Tottenham". The old wrong target meant seed/sources/fpl.ts (once it
+  // started calling canonicalTeamName at all, see that file's history)
+  // would still have created a second "Tottenham Hotspur" row instead of
+  // matching the real one. Both keys covered defensively since FPL's exact
+  // real bootstrap-static value for this team wasn't confirmed.
+  Spurs: 'Tottenham',
+  'Tottenham Hotspur': 'Tottenham',
   "Nott'm Forest": 'Nottingham Forest',
   Newcastle: 'Newcastle United',
   Wolves: 'Wolverhampton Wanderers',

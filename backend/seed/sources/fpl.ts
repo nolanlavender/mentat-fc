@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import { fetchCached } from '../lib/cache.js';
+import { canonicalTeamName } from '../lib/team-aliases.js';
 import {
   getOrCreateTeam,
   setTeamExternalFplId,
@@ -60,13 +61,21 @@ export async function seedFplBootstrap(pool: Pool): Promise<void> {
 
   const positionByTypeId = new Map(data.element_types.map((t) => [t.id, t.singular_name_short]));
 
-  // FPL team names match football-data.co.uk's canonical names closely enough
-  // in practice (both use full names like "Arsenal", "Nottingham Forest") --
-  // getOrCreateTeam matches on name, so this links to teams already seeded
-  // from historical results rather than creating duplicates.
+  // BUG, confirmed for real 2026-08-16: this used to call getOrCreateTeam
+  // directly with FPL's raw team.name, on the assumption (never actually
+  // verified against a live response -- see this file's header) that FPL's
+  // names matched football-data.co.uk's/API-Football's canonical ones
+  // closely enough. They don't -- FPL's real bootstrap-static returned a
+  // name for Tottenham that didn't match the "Tottenham" row already
+  // seeded from the other two sources, so this created a second, phantom
+  // team row and attached every Spurs player's current_team_id to that
+  // instead of the real team -- the real Tottenham's dashboard showed an
+  // empty squad. canonicalTeamName is exactly what the other two importers
+  // already run every team name through for this reason; it just never got
+  // added here.
   const teamIdByFplId = new Map<number, number>();
   for (const team of data.teams) {
-    const teamId = await getOrCreateTeam(pool, team.name);
+    const teamId = await getOrCreateTeam(pool, canonicalTeamName(team.name));
     await setTeamExternalFplId(pool, teamId, team.id);
     teamIdByFplId.set(team.id, teamId);
   }
