@@ -20,6 +20,17 @@ function buildValuesPlaceholders(rowCount: number, colCount: number): string {
   return rows.join(', ');
 }
 
+// API-Football's "R. James" shorthand form, as opposed to a genuinely
+// one-word or already-full name -- deliberately narrow (a single letter,
+// a literal period, then the rest) so this never misfires on a real
+// mononym or a name that just happens to start with an initial-looking
+// token.
+export function parseAbbreviatedName(fullName: string): { initial: string; surname: string } | null {
+  const match = fullName.trim().match(/^([A-Za-z])\.\s*(.+)$/);
+  if (!match) return null;
+  return { initial: match[1].toLowerCase(), surname: match[2].trim().toLowerCase() };
+}
+
 export async function getOrCreateCompetition(
   pool: Pool,
   name: string,
@@ -191,6 +202,44 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
         [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.photoUrl ?? null],
       );
       return id;
+    }
+
+    // Real bug found in production 2026-08-16: API-Football frequently
+    // serves a player under an abbreviated "R. James" form -- confirmed for
+    // Reece James himself, a current Chelsea/Premier League player, not
+    // just an obscure lower-league one -- which never satisfies the exact
+    // full_name match below. That silently created a duplicate row per
+    // abbreviated sighting (5,845 of them in production against only 12
+    // players correctly linked) holding the real lineup/stats data,
+    // disconnected from the FPL-seeded row with the real name and
+    // current_team_id. Resolving this by initial+surname, but ONLY against
+    // this season's rostered players (external_fpl_id IS NOT NULL) and
+    // ONLY when exactly one such player matches -- an ambiguous or
+    // zero-match case falls through to the exact-name/insert path
+    // unchanged below, so this can never misattribute one player's stats
+    // to another.
+    const abbreviated = parseAbbreviatedName(p.fullName);
+    if (abbreviated) {
+      const { rows: candidates } = await pool.query<{ id: number }>(
+        `SELECT id FROM players
+         WHERE external_fpl_id IS NOT NULL
+           AND external_api_football_id IS NULL
+           AND lower(left(full_name, 1)) = $1
+           AND lower(split_part(full_name, ' ', -1)) = $2`,
+        [abbreviated.initial, abbreviated.surname],
+      );
+      if (candidates.length === 1) {
+        const id = candidates[0].id;
+        await pool.query(
+          `UPDATE players SET
+             external_api_football_id = $2,
+             position = COALESCE(position, $3),
+             photo_url = COALESCE(photo_url, $4)
+           WHERE id = $1`,
+          [id, p.externalApiFootballId, p.position ?? null, p.photoUrl ?? null],
+        );
+        return id;
+      }
     }
   }
 

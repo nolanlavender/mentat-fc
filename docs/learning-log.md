@@ -2880,3 +2880,97 @@ down to 40%) and a fixture placed 20 days out specifically to prove the
 matchweek dropdown itself by selecting a specific round and confirming
 both the top-picks lists and the full fixture list narrow to exactly
 those 2 fixtures, not just the visible list.
+
+**A fourth real production bug, and the biggest one yet: two different
+symptoms, one root cause.** Started from Reece James's player page
+showing zero appearances despite Chelsea having plenty of finished,
+lineup-backfilled fixtures. First ruled out a duplicate-row theory by
+searching for other players named "Reece James" -- found only one. That
+was the wrong search. The real diagnostic, run at the user's request:
+`SELECT count(*) FILTER (WHERE current_team_id IS NOT NULL AND
+external_api_football_id IS NOT NULL) ... FILTER (WHERE current_team_id
+IS NOT NULL AND external_api_football_id IS NULL) FROM players` came back
+**12 vs. 561** -- almost every rostered player was missing its
+API-Football link entirely. Reading `upsertPlayerGoldenRecord`
+(`seed/lib/db.ts`) explained why: it matches an incoming API-Football
+sighting by exact `lower(full_name) = lower($1)` against existing rows,
+falling back to INSERT if nothing matches. API-Football regularly serves
+a player under an abbreviated `"R. James"` form -- confirmed for a
+current Premier League starter, not just an obscure squad player -- which
+never equals `"Reece James"` under an exact compare. Every such sighting
+fell through to INSERT, creating a brand-new orphan row that held the
+real lineup/stats data but never got `current_team_id` (only the FPL
+bootstrap ever sets that column). A follow-up query confirmed the scale:
+**5,845 orphan rows** in production against 12 correctly-linked players,
+and a targeted `full_name ilike '%james%'` search turned up the smoking
+gun directly -- `"R. James"`, id 1333, external_api_football_id 19890,
+current_team_id null, sitting right next to the real `"Reece James"` row.
+
+This also resolved the open "backfill reports 0 remaining despite 49
+unchecked Chelsea fixtures" mystery from earlier the same day: those
+fixtures already had real `fixture_lineups`/`fixture_player_stats` rows
+(correctly excluding them from `backfillLineupsForCompetitionSeason`'s
+candidate query), just attached to orphan player ids -- and an older code
+path (`seedApiFootballLineup`/`seedApiFootballPlayerStats`, since
+superseded by the bulk `/fixtures?ids=` endpoint) never called
+`markFixturesLineupsChecked`, leaving the flag stale on top of the
+misattributed data. Two loose threads, one bug.
+
+**The fix, in two parts, matching the two ways this data gets wrong:**
+1. *Stop making new orphans.* `upsertPlayerGoldenRecord` gained a step
+   between "exact `external_api_football_id` match" and "exact name
+   match/insert": parse the incoming name as `"X. Surname"`, and if it
+   parses, look for a *unique* current-roster player
+   (`external_fpl_id IS NOT NULL`) sharing that first initial and surname.
+   Deliberately conservative -- zero or multiple candidates falls through
+   to the unchanged exact-match/insert path rather than guessing, so this
+   can never misattribute one player's stats to another.
+2. *Clean up the orphans already in production.* A new one-time script,
+   `seed/repair-duplicate-players.ts` (`npm run
+   db:seed:repair-duplicate-players`), finds existing orphans, applies the
+   same unique initial+surname match against the current roster, and --
+   inside a transaction per merge -- reassigns their `fixture_lineups`,
+   `fixture_player_stats`, and `player_goal_predictions` rows onto the
+   real player, merges in whatever the orphan had that the real row
+   didn't (`external_api_football_id`, `photo_url`), and deletes the
+   orphan. Also backfills `lineups_checked_at` on any fixture that already
+   has full lineup/stats data but was never flagged, closing out the
+   stale-flag half of the bug. Ambiguous matches (two current players
+   sharing an initial+surname) are logged and left alone on purpose --
+   verified with a synthetic scratch-Postgres case built specifically to
+   prove that path doesn't merge them.
+
+Building the scratch-Postgres reproduction caught a real bug in the fix
+itself before it ever reached production: the merge script originally
+copied the orphan's `external_api_football_id` onto the real player
+*before* deleting the orphan row, which collided with that column's own
+UNIQUE constraint (the orphan was still holding the value at that point).
+Reordering to delete-then-copy fixed it -- exactly the kind of mistake
+the "verify against a real reproduction before handing off a production
+fix" discipline exists to catch.
+
+**A related bug in the model service, found from a live screenshot the
+same day:** a Brighton vs. Aston Villa prediction listed Joao Pedro (who
+transferred Brighton -> Chelsea) as a likely Brighton scorer. Root cause,
+in `model-service/app/data.py`'s `load_player_squad_appearances`: goal
+and minutes shares are computed per `(team_id, player_id)` from historical
+lineup data with no concept of "does this player still play for this
+team" -- a transferred player's old-club appearances alone were enough to
+clear `MIN_PLAYER_MATCHES` and keep them eligible as a scorer pick for
+their former team indefinitely. The obvious fix, joining on
+`players.current_team_id`, doesn't generalize: that column is
+Premier-League-only (FPL-sourced), so it's NULL for every Championship
+player and would have zeroed out Championship goal-scorer predictions
+entirely -- a bigger regression than the bug it was fixing. Instead, a
+player's "current club" is derived from the same appearance data already
+being queried: a `most_recent_club` CTE picks whichever `team_id` a
+player's most recent finished-match appearance was for (via `DISTINCT ON
+(player_id) ... ORDER BY kickoff_date DESC`), and the outer query only
+keeps appearance rows matching that club. Works uniformly across every
+competition with no extra data source, and degrades safely for a fresh
+transfer: too few appearances yet for the new club just means no
+confident prediction for a while, not a confident wrong one. All 27
+existing model-service tests still passed unchanged, since they exercise
+`goal_scorer.py`'s allocation math directly against synthetic frames, not
+this query -- a reminder that a passing test suite only proves what it
+actually covers.

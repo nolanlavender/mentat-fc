@@ -72,19 +72,47 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
     game or an FA Cup tie, so goal_scorer always uses the full cross-
     competition appearance history regardless of which team-strength model
     (single-competition or joint) is being allocated for that fixture.
+
+    Restricted to each player's most-recent club: real bug found in
+    production 2026-08-16 -- Joao Pedro (transferred Brighton -> Chelsea)
+    kept showing up as a "reliable" Brighton goalscorer pick indefinitely,
+    because his old Brighton appearances alone cleared goal_scorer's
+    MIN_PLAYER_MATCHES threshold and nothing here checked whether he still
+    played there. players.current_team_id can't fix this generally -- it's
+    only ever populated from the FPL bootstrap, i.e. Premier League only
+    (see teams.service.ts), so it goes NULL for every Championship player
+    and would silently zero out Championship (and the FA Cup joint fit's
+    Championship side) goal-scorer predictions entirely. Deriving "current
+    club" from this same appearance data instead -- whichever team_id a
+    player's most recent finished-match appearance was for -- needs no
+    extra data source and works uniformly across every competition. A
+    just-transferred player may have too few appearances for their new
+    club yet to clear MIN_PLAYER_MATCHES and simply won't get a scorer
+    prediction for a while; that's the correct outcome (no confident data
+    yet), not a confident wrong-team one.
     """
     query = """
-        SELECT fl.team_id, fl.player_id, f.kickoff_date,
-               COALESCE(fps.minutes_played, 0) AS minutes_played,
-               COALESCE(fps.goals, 0) AS goals
-        FROM fixture_lineups fl
-        JOIN fixtures f ON f.id = fl.fixture_id
-        LEFT JOIN fixture_player_stats fps ON fps.fixture_id = fl.fixture_id AND fps.player_id = fl.player_id
-        JOIN competition_seasons cs ON cs.id = f.competition_season_id
-        JOIN competitions c ON c.id = cs.competition_id
-        WHERE c.name = ANY(%(competition_names)s)
-          AND f.status = 'finished'
-        ORDER BY f.kickoff_date
+        WITH appearances AS (
+            SELECT fl.team_id, fl.player_id, f.kickoff_date,
+                   COALESCE(fps.minutes_played, 0) AS minutes_played,
+                   COALESCE(fps.goals, 0) AS goals
+            FROM fixture_lineups fl
+            JOIN fixtures f ON f.id = fl.fixture_id
+            LEFT JOIN fixture_player_stats fps ON fps.fixture_id = fl.fixture_id AND fps.player_id = fl.player_id
+            JOIN competition_seasons cs ON cs.id = f.competition_season_id
+            JOIN competitions c ON c.id = cs.competition_id
+            WHERE c.name = ANY(%(competition_names)s)
+              AND f.status = 'finished'
+        ),
+        most_recent_club AS (
+            SELECT DISTINCT ON (player_id) player_id, team_id
+            FROM appearances
+            ORDER BY player_id, kickoff_date DESC
+        )
+        SELECT a.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals
+        FROM appearances a
+        JOIN most_recent_club mrc ON mrc.player_id = a.player_id AND mrc.team_id = a.team_id
+        ORDER BY a.kickoff_date
     """
     return _query_df(conn, query, {"competition_names": competition_names})
 
