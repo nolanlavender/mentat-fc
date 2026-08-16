@@ -295,7 +295,7 @@ section + section {
   opacity: 0.6;
 }
 
-.prediction-filter {
+.competition-filter {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -303,7 +303,7 @@ section + section {
   margin-bottom: 16px;
 }
 
-.prediction-filter select {
+.competition-filter select {
   font: inherit;
   padding: 6px 10px;
   border-radius: 6px;
@@ -317,12 +317,17 @@ section + section {
   padding: 0;
 }
 
+/* A grid, not flex-wrap -- flex-wrap let each row's columns land in a
+   different place depending on how long that row's team names or scorer
+   list happened to be, so Home/Draw/Away/expected never lined up between
+   rows. Fixed columns mean every row's numbers land in the same place,
+   with the scorers line spanning the full width on its own row below. */
 .prediction-row {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) 60px 60px 60px 90px;
+  column-gap: 12px;
+  row-gap: 4px;
   align-items: center;
-  gap: 12px;
   padding: 10px 0;
   border-bottom: 1px solid var(--border);
 }
@@ -330,6 +335,7 @@ section + section {
 .prediction-fixture {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .prediction-meta {
@@ -338,18 +344,25 @@ section + section {
   opacity: 0.7;
 }
 
+/* display: contents -- its children (Home/Draw/Away/expected/scorers)
+   become direct grid items of .prediction-row itself, so each one lands in
+   its own fixed column instead of being squeezed into one flex box. */
 .prediction-probs {
-  display: flex;
-  gap: 12px;
+  display: contents;
   font-size: 0.9em;
+}
+
+.prediction-probs > span {
+  text-align: right;
 }
 
 .prediction-expected-goals {
   opacity: 0.7;
+  text-align: right;
 }
 
 .prediction-scorers {
-  flex-basis: 100%;
+  grid-column: 1 / -1;
   font-size: 0.85em;
   opacity: 0.7;
 }

@@ -7,7 +7,7 @@ const COMPETITIONS = ['Premier League', 'Championship'] as const;
 type CompetitionFilter = (typeof COMPETITIONS)[number] | 'all';
 
 function formatPercent(value: number): string {
-  return `${Math.round(value * 100)}%`;
+  return `${(value * 100).toFixed(2)}%`;
 }
 
 // Top 3 only, even though the API can return up to 5 -- this is a compact
@@ -36,7 +36,7 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
           <span>Away {formatPercent(prediction.probAwayWin)}</span>
           {prediction.predictedHomeGoals !== null && prediction.predictedAwayGoals !== null && (
             <span className="prediction-expected-goals">
-              expected {prediction.predictedHomeGoals.toFixed(1)} - {prediction.predictedAwayGoals.toFixed(1)}
+              expected {prediction.predictedHomeGoals.toFixed(2)} - {prediction.predictedAwayGoals.toFixed(2)}
             </span>
           )}
           {topScorers.length > 0 && (
@@ -90,7 +90,7 @@ export function PredictionsPage() {
     <div className="page">
       <h1>Predictions</h1>
 
-      <label className="prediction-filter">
+      <label className="competition-filter">
         Competition
         <select value={competition} onChange={(e) => setCompetition(e.target.value as CompetitionFilter)}>
           <option value="all">All</option>

@@ -12,7 +12,17 @@ export interface Team {
   logoUrl: string | null;
 }
 
-export async function listTeams(): Promise<Team[]> {
+export async function listTeams(filters: { competitionName?: string } = {}): Promise<Team[]> {
+  // A single bad competitionName (typo, or a competition outside the
+  // dashboard's scope like FA Cup) should mean "no results," not "ignore
+  // the filter" -- narrowed against DASHBOARD_COMPETITIONS rather than
+  // passed through raw, so /api/teams?competition=FA%20Cup can't be used
+  // to pull FA-Cup-only minnows into a page that's only ever meant to show
+  // Premier League/Championship sides.
+  const competitions = filters.competitionName
+    ? DASHBOARD_COMPETITIONS.filter((c) => c === filters.competitionName)
+    : DASHBOARD_COMPETITIONS;
+
   const { rows } = await pool.query<{ id: number; name: string; short_name: string | null; logo_url: string | null }>(
     `SELECT DISTINCT t.id, t.name, t.short_name, t.logo_url
      FROM teams t
@@ -21,7 +31,7 @@ export async function listTeams(): Promise<Team[]> {
      JOIN competitions c ON c.id = cs.competition_id
      WHERE c.name = ANY($1)
      ORDER BY t.name`,
-    [DASHBOARD_COMPETITIONS],
+    [competitions],
   );
   return rows.map((r) => ({ id: r.id, name: r.name, shortName: r.short_name, logoUrl: r.logo_url }));
 }
