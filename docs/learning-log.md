@@ -3170,3 +3170,38 @@ week labels render as "Aug 17 - Aug 23" / "Aug 24 - Aug 30" against a
 known today, and that selecting each one correctly narrows to just the
 fixture seeded inside that week while excluding one deliberately seeded
 20 days out.
+
+**Team dashboard: rounding, top performers, squad grouped by position.**
+Model predictions (goals, home-win probability) are now consistently
+`.toFixed(2)`, matching the same rounding rule applied to the predictions
+page earlier -- previously this page showed raw, unrounded floats and a
+whole-number `Math.round()` percentage, two different precisions on the
+same page.
+
+New "Top performers" section (goals, assists) reuses the same "most
+recent season this team actually has fixtures in" pattern already used by
+`getTablePosition`, but aggregates `fixture_player_stats` by `team_id`
+(who a player actually turned out for in each specific match) rather than
+`players.current_team_id` (who they're on today) -- same reasoning as the
+"most recent club" fix in the goal-scorer model earlier the same week: a
+mid-season transfer's stats split correctly between old and new club
+instead of the current club claiming credit for goals scored elsewhere.
+
+Squad grouping surfaced a real, previously-invisible data-quality wrinkle:
+`players.position` isn't stored in one consistent format. FPL writes its
+own short codes (`"GKP"/"DEF"/"MID"/"FWD"`), API-Football's lineup
+responses use single letters (`"G"/"D"/"M"/"F"`), and its player-stats/
+squads endpoints use full words (`"Goalkeeper"/"Defender"/"Midfielder"/
+"Attacker"`) -- and since `upsertPlayerGoldenRecord` never overwrites an
+existing `position` value, whichever source saw a player first is
+whatever's stored, permanently. Rather than trying to normalize the
+stored data itself (a bigger, riskier change touching production values),
+grouping buckets by first letter only (folding API-Football's "Attacker"
+into the same bucket as "Forward"/"FWD"/"F") -- correct regardless of
+which format a given player happens to have, without touching the
+underlying data. Verified with a scratch-Postgres squad deliberately
+seeded with all three formats across all four positions plus a real
+Playwright screenshot -- confirmed every player landed in the right
+group, sorted alphabetically within it, and that the rounding and
+top-performers numbers matched hand-computed values from the seeded
+fixture stats.
