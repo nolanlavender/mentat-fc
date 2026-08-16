@@ -2974,3 +2974,56 @@ existing model-service tests still passed unchanged, since they exercise
 `goal_scorer.py`'s allocation math directly against synthetic frames, not
 this query -- a reminder that a passing test suite only proves what it
 actually covers.
+
+**Running the repair script for real, and what its own output taught.**
+5,845 orphans checked in production, 421 merged, 1 correctly left alone as
+genuinely ambiguous ("J. Dasilva" matched two current players), 5,055 had
+no current-squad match (expected -- mostly lower-league/historical players
+never on this season's roster), 368 weren't in the abbreviated form at
+all. That last number was the interesting one: a random sample of it
+included several unmistakably-current top-flight names -- Bruno
+Fernandes, Bernardo Silva, Bruno Guimarães, André Onana, Andreas Pereira,
+Adam Armstrong, Adama Traoré -- proving a *third*, different name-mismatch
+shape existed alongside the abbreviation bug already fixed. Root cause:
+`seed/sources/fpl.ts` builds a player's `full_name` as `` `${first_name}
+${second_name}` `` straight from FPL's raw fields, and FPL sometimes
+stores a player's full *legal* name there rather than the common
+football name everyone else uses -- confirmed for real via a targeted
+query showing "Bruno Fernandes" (API-Football, id 1374) sitting right
+next to "Bruno Borges Fernandes" (FPL, id 444) as two disconnected rows.
+Interesting complication found in the same query: those two rows even
+carry *different* `external_api_football_id` values (1485 vs 459407) --
+API-Football itself apparently holds two internal ids for the same real
+person. That's outside anything this app's matching logic can safely
+resolve (no shared numeric key, and a name-similarity guess risks a
+false merge), so it's being left alone and logged here as a known,
+accepted residual data-quality gap rather than something quietly patched
+over.
+
+The screenshot that prompted this (mixed "Alexander Isak" / "I. Thiago"
+names in the same Top goalscorer picks list) pointed at a related but
+safer-to-fix case: a player whose *first* API-Football sighting happened
+to be abbreviated (lineups calls are the usual culprit) kept that name
+forever, because `upsertPlayerGoldenRecord`'s existing-id branch left
+`full_name` deliberately untouched on every subsequent call. Fixed by
+comparing the stored name and the incoming one through
+`parseAbbreviatedName` on every match-by-external-id hit: if the stored
+name is abbreviated and the incoming one isn't, upgrade it; never the
+reverse. This is safe in a way the FPL cross-source matching isn't --
+both names are attached to the exact same `external_api_football_id`
+already, so there's no identity guess involved, just picking the better
+of two spellings already known to belong to the same row. Verified with a
+scratch-Postgres round-trip proving both directions: an abbreviated-then-
+full sequence upgrades the name, and a full-then-abbreviated sequence
+does not regress it. Because it triggers on every future match (not just
+new ones), rerunning the already-cached, idempotent `npm run
+db:seed:photos` pass is expected to retroactively fix most of the
+remaining abbreviated leftovers for free, no new API-Football budget
+spent.
+
+Also added kickoff time to the Predictions page's "Top picks" and "Top
+goalscorer picks" sections (both previously showed only the fixture
+matchup, unlike the "All fixtures" list below them) -- verified with a
+real Playwright screenshot against a seeded fixture with a known kickoff
+time, confirming it renders in both sections without breaking the
+existing flex layout.
