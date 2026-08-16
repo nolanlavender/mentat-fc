@@ -2554,3 +2554,65 @@ had both the higher rate and the higher minutes share. Exactly the
 "discover the fixture was wrong before trusting the code was right" loop
 this project has run against real data all along, just now automated and
 running in under 2 seconds instead of requiring a scratch Postgres.
+
+## 2026-08-16 -- One E2E test, and why only one
+
+Following straight on from the unit-test entry above: unit tests cover the
+pure-logic bottom of the test pyramid, but there's a real, different
+question they structurally can't answer -- does registering a user,
+navigating between pages, submitting a real form, and having the result
+persist and read back actually work, wired together, through the real
+Express app and a real Postgres database. That's what
+`frontend/e2e/bets-flow.spec.ts` (Playwright) is for: register → view a
+team dashboard → log a bet → confirm it's tracked as pending.
+
+**Why exactly one, not a suite**: E2E tests are the most expensive tier of
+the pyramid -- slow (this one takes ~14s; the whole unit-test suite runs
+in ~2s combined across both languages), and prone to failing for reasons
+unrelated to the thing they're nominally checking (a slow network, a
+flaky selector, timing races). The payoff for writing more of them drops
+fast once you've covered the one thing only an E2E test can prove: that
+the seams between frontend, backend, and database actually connect. Every
+other page/flow in this app either has no meaningfully different "seam"
+to test (same auth, same fetch-and-render pattern) or is already covered
+by this project's standing habit of a real Playwright screenshot per UI
+change -- more E2E specs here would mostly be paying the slow/flaky tax
+again for marginal new coverage, not covering something actually new.
+
+**What it doesn't do, on purpose**: spin up Postgres or the backend
+itself. Playwright's `webServer` config only starts the Vite dev server;
+Postgres and the backend are assumed already running, the same
+prerequisite this project's manual verification passes have always had.
+Reimplementing the scratch-Postgres-plus-migrate dance inside a test
+config would either mean depending on Docker Compose being available in
+whatever environment runs this test, or duplicating setup logic that
+already exists as documented manual steps -- not worth it for one spec.
+It also doesn't seed a special test fixture: it uses whatever upcoming
+Premier League fixture is already in the database (true of any normal
+local dev setup, since `npm run db:seed:current-season` pulls the live
+schedule) -- an E2E test exercising real app data end-to-end is more
+honest than one built entirely around fixtures invented to make the test
+pass.
+
+**Version-pinning gotcha, worth remembering**: `@playwright/test` (the
+test runner, a new dependency here) and the `playwright` CLI package used
+earlier in this project for one-off screenshots are two different npm
+packages that can drift to different pinned versions -- installing
+`@playwright/test` here pulled 1.62.1 against a pre-installed Chromium
+built for 1.56.1. Playwright's test runner lets you override the browser
+binary path per-project in `playwright.config.ts`
+(`use.launchOptions.executablePath`) instead of triggering a fresh
+download, which is what let this run at all in a sandboxed environment
+with no browser-download access.
+
+**Verified for real, and it genuinely wasn't a straight pass first try**:
+against a real scratch Postgres, a real backend, and a real Chromium --
+not just "the code looks right." The first run failed with a real
+Playwright strict-mode violation: `.bet-result-pending` matched two
+elements (the overall bet's status badge in the card header, and the
+lone leg's own status badge, both "pending" with the same CSS class,
+since neither had ever needed disambiguating before). Fixed by scoping
+the locator to the card header specifically, then reran the full flow
+twice more end-to-end to confirm it passes reliably, not just once by
+coincidence -- the same discipline as every other "verify, don't assume"
+pass in this project, just aimed at the test itself this time.

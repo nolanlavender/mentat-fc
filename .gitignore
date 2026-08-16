@@ -38,6 +38,11 @@ backend/seed/raw/
 # --- Docker ---
 *.pid
 
+# --- Playwright E2E output ---
+test-results/
+playwright-report/
+blob-report/
+
 # --- Logs ---
 *.log
 logs/
