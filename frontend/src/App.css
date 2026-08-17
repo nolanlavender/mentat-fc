@@ -309,6 +309,12 @@ section + section {
   height: fit-content;
 }
 
+.bet-form-hint {
+  font-size: 0.85em;
+  opacity: 0.75;
+  margin: 4px 0 12px;
+}
+
 .draft-legs {
   list-style: none;
   padding: 0;

@@ -6,6 +6,8 @@ export type BetResult = LegResult; // same closed set -- overall result is deriv
 
 const VALID_RESULTS: LegResult[] = ['pending', 'won', 'lost', 'void'];
 
+export const ANYTIME_SCORER_MARKET = 'anytime_scorer';
+
 export interface CreateLegInput {
   fixtureId: number;
   market: string;
@@ -16,6 +18,10 @@ export interface CreateLegInput {
 export interface CreateBetInput {
   stake: number;
   legs: CreateLegInput[];
+  // The book's own quoted price for the whole parlay, when it differs from
+  // the pure product of each leg's own odds. Only meaningful with 2+ legs
+  // -- see migration 1701000000024's comment.
+  oddsOverrideDecimal?: number;
 }
 
 export interface BetLeg {
@@ -36,10 +42,15 @@ export interface BetLeg {
     homeTeam: { id: number; name: string };
     awayTeam: { id: number; name: string };
   };
-  // The model's probability for this exact leg's selection, only populated
-  // for market='match_winner' with an existing prediction -- see
-  // docs/CLAUDE.md's prediction model scope.
+  // The model's probability for this exact leg's selection: prob_home_win/
+  // draw/away_win for market='match_winner', prob_scores for
+  // market='anytime_scorer' -- see docs/CLAUDE.md's prediction model scope.
   modelProbability: number | null;
+  // Only populated for market='anytime_scorer', where selection is a
+  // player_id stored as text (free-text market/selection design, see
+  // migration 1701000000019) -- resolved here so the frontend never has to
+  // look a player up itself just to show a name.
+  player: { id: number; name: string } | null;
 }
 
 export interface Bet {
@@ -51,9 +62,18 @@ export interface Bet {
   // Derived, never stored -- see migration 1701000000018's comment.
   result: BetResult;
   settledAt: string | null;
-  // Product of every non-void leg's odds -- a void leg is dropped from the
-  // price and the remaining legs still have to win, the standard
-  // real-world accumulator/parlay void-leg rule.
+  // Only set for parlays where you entered the book's own quoted total --
+  // see migration 1701000000024. null means combinedOdds below is the
+  // plain product of the legs' own odds.
+  oddsOverrideDecimal: number | null;
+  // The book's quoted total (oddsOverrideDecimal) when one was entered AND
+  // no leg is void; otherwise the product of every non-void leg's own
+  // odds -- a void leg is dropped from the price and the remaining legs
+  // still have to win, the standard real-world accumulator/parlay
+  // void-leg rule. Falling back to the product once any leg voids is
+  // deliberate: there's no way to know how the book's own total would
+  // have been repriced for that specific leg voiding, but the per-leg
+  // product still gives a real, defensible number.
   combinedOdds: number;
   yourImpliedProbability: number;
   // Product of each non-void leg's own modelProbability, assuming the legs'
@@ -79,6 +99,9 @@ export function assertValidLeg(leg: CreateLegInput): void {
   if (typeof leg.oddsDecimal !== 'number' || !(leg.oddsDecimal > 1)) {
     throw new AppError('Each leg needs oddsDecimal greater than 1', 400);
   }
+  if (leg.market === ANYTIME_SCORER_MARKET && !(Number.isInteger(Number(leg.selection)) && Number(leg.selection) > 0)) {
+    throw new AppError(`An ${ANYTIME_SCORER_MARKET} leg's selection must be a player id`, 400);
+  }
 }
 
 export function assertValidCreateInput(input: CreateBetInput): void {
@@ -89,6 +112,14 @@ export function assertValidCreateInput(input: CreateBetInput): void {
     throw new AppError('At least one leg is required', 400);
   }
   input.legs.forEach(assertValidLeg);
+  if (input.oddsOverrideDecimal !== undefined) {
+    if (typeof input.oddsOverrideDecimal !== 'number' || !(input.oddsOverrideDecimal > 1)) {
+      throw new AppError('oddsOverrideDecimal must be a number greater than 1', 400);
+    }
+    if (input.legs.length < 2) {
+      throw new AppError('oddsOverrideDecimal only applies to a parlay (2+ legs)', 400);
+    }
+  }
 }
 
 export async function createBet(userId: number, input: CreateBetInput): Promise<Bet> {
@@ -104,8 +135,8 @@ export async function createBet(userId: number, input: CreateBetInput): Promise<
   try {
     await client.query('BEGIN');
     const { rows } = await client.query<{ id: number }>(
-      `INSERT INTO bets (user_id, stake) VALUES ($1, $2) RETURNING id`,
-      [userId, input.stake],
+      `INSERT INTO bets (user_id, stake, odds_override_decimal) VALUES ($1, $2, $3) RETURNING id`,
+      [userId, input.stake, input.oddsOverrideDecimal ?? null],
     );
     const betId = rows[0].id;
 
@@ -133,6 +164,7 @@ export interface BetLegRow {
   bet_id: number;
   stake: string;
   placed_at: string;
+  odds_override_decimal: string | null;
   leg_id: number;
   fixture_id: number;
   market: string;
@@ -153,13 +185,22 @@ export interface BetLegRow {
   prob_home_win: string | null;
   prob_draw: string | null;
   prob_away_win: string | null;
+  scorer_prob_scores: string | null;
+  scorer_player_id: number | null;
+  scorer_player_name: string | null;
 }
 
 export function legModelProbability(row: BetLegRow): number | null {
-  if (row.market !== 'match_winner' || row.prob_home_win === null) return null;
-  if (row.selection === 'home') return Number(row.prob_home_win);
-  if (row.selection === 'draw') return Number(row.prob_draw);
-  if (row.selection === 'away') return Number(row.prob_away_win);
+  if (row.market === 'match_winner') {
+    if (row.prob_home_win === null) return null;
+    if (row.selection === 'home') return Number(row.prob_home_win);
+    if (row.selection === 'draw') return Number(row.prob_draw);
+    if (row.selection === 'away') return Number(row.prob_away_win);
+    return null;
+  }
+  if (row.market === ANYTIME_SCORER_MARKET) {
+    return row.scorer_prob_scores === null ? null : Number(row.scorer_prob_scores);
+  }
   return null;
 }
 
@@ -184,6 +225,7 @@ export function rowsToBet(rows: BetLegRow[]): Bet {
       awayTeam: { id: r.away_team_id, name: r.away_team_name },
     },
     modelProbability: legModelProbability(r),
+    player: r.scorer_player_id === null ? null : { id: r.scorer_player_id, name: r.scorer_player_name! },
   }));
 
   const nonVoidLegs = legs.filter((l) => l.result !== 'void');
@@ -194,7 +236,13 @@ export function rowsToBet(rows: BetLegRow[]): Bet {
   else if (nonVoidLegs.length === 0) result = 'void';
   else result = 'won';
 
-  const combinedOdds = nonVoidLegs.reduce((acc, l) => acc * l.oddsDecimal, 1);
+  const productOdds = nonVoidLegs.reduce((acc, l) => acc * l.oddsDecimal, 1);
+  const oddsOverrideDecimal = first.odds_override_decimal === null ? null : Number(first.odds_override_decimal);
+  const hasVoidLeg = legs.some((l) => l.result === 'void');
+  // See the Bet.combinedOdds comment: the override is only trusted while
+  // every leg is still live -- once one voids, fall back to the per-leg
+  // product, which is the only number we can actually justify.
+  const combinedOdds = oddsOverrideDecimal !== null && !hasVoidLeg ? oddsOverrideDecimal : productOdds;
   const yourImpliedProbability = 1 / combinedOdds;
 
   const modelProbabilities = nonVoidLegs.map((l) => l.modelProbability);
@@ -220,6 +268,7 @@ export function rowsToBet(rows: BetLegRow[]): Bet {
     isParlay: legs.length > 1,
     result,
     settledAt,
+    oddsOverrideDecimal,
     combinedOdds,
     yourImpliedProbability,
     modelProbability,
@@ -228,15 +277,23 @@ export function rowsToBet(rows: BetLegRow[]): Bet {
   };
 }
 
+// bl.selection is free text (see migration 1701000000019) -- for
+// market='anytime_scorer' it's a player_id stored as a string, so both
+// lateral joins below only attempt the ::int cast on that branch via CASE.
+// Postgres never evaluates the other branch's expression, so a
+// non-numeric selection from a different market (e.g. 'home') can't blow
+// up the cast.
 const BET_LEG_SELECT = `
-  SELECT b.id AS bet_id, b.stake, b.placed_at,
+  SELECT b.id AS bet_id, b.stake, b.placed_at, b.odds_override_decimal,
     bl.id AS leg_id, bl.fixture_id, bl.market, bl.selection, bl.odds_decimal,
     bl.result AS leg_result, bl.settled_at AS leg_settled_at,
     f.kickoff_at, f.status, f.home_score, f.away_score,
     c.name AS competition_name, s.label AS season_label,
     ht.id AS home_team_id, ht.name AS home_team_name,
     at.id AS away_team_id, at.name AS away_team_name,
-    mp.prob_home_win, mp.prob_draw, mp.prob_away_win
+    mp.prob_home_win, mp.prob_draw, mp.prob_away_win,
+    sp.prob_scores AS scorer_prob_scores,
+    sp_player.id AS scorer_player_id, sp_player.full_name AS scorer_player_name
   FROM bets b
   JOIN bet_legs bl ON bl.bet_id = b.id
   JOIN fixtures f ON f.id = bl.fixture_id
@@ -252,6 +309,16 @@ const BET_LEG_SELECT = `
     ORDER BY predicted_at DESC
     LIMIT 1
   ) mp ON true
+  LEFT JOIN players sp_player ON sp_player.id = (
+    CASE WHEN bl.market = '${ANYTIME_SCORER_MARKET}' THEN NULLIF(bl.selection, '')::int END
+  )
+  LEFT JOIN LATERAL (
+    SELECT prob_scores
+    FROM player_goal_predictions pgp
+    WHERE pgp.fixture_id = f.id AND pgp.player_id = sp_player.id
+    ORDER BY predicted_at DESC
+    LIMIT 1
+  ) sp ON bl.market = '${ANYTIME_SCORER_MARKET}'
 `;
 
 export interface BetFilters {
@@ -284,8 +351,64 @@ async function qualifyingBetIds(userId: number, filters: BetFilters): Promise<nu
   return rows.map((r) => r.id);
 }
 
+// Grades every still-pending leg of this user's bets whose fixture has
+// actually finished, against the real recorded result -- no separate
+// "refresh"/"settle" action needed, since it runs on every read. Only
+// covers the two markets we can grade unambiguously from stored data:
+//   - match_winner: the actual home/draw/away outcome vs. the leg's pick.
+//   - anytime_scorer: whether fixture_player_stats has >=1 goal for that
+//     player in that fixture. A player who never took the pitch at all
+//     grades as a loss, not a void -- a deliberate call (see
+//     docs/learning-log.md's Bets-overhaul entry): the bet is "did he
+//     score", and an unused sub or an unselected squad player didn't.
+// Any other market (or a match_winner leg whose fixture is finished but
+// missing a score, e.g. abandoned) is left pending for a manual Won/Lost/
+// Void call via settleLeg -- there's no stored data to grade it from.
+async function autoSettleFinishedLegs(userId: number): Promise<void> {
+  await pool.query(
+    `UPDATE bet_legs bl
+     SET result = graded.new_result, settled_at = now()
+     FROM (
+       SELECT bl2.id,
+         CASE
+           WHEN bl2.market = 'match_winner' THEN
+             CASE
+               WHEN (
+                 CASE
+                   WHEN f.home_score > f.away_score THEN 'home'
+                   WHEN f.home_score < f.away_score THEN 'away'
+                   ELSE 'draw'
+                 END
+               ) = bl2.selection THEN 'won'
+               ELSE 'lost'
+             END
+           WHEN bl2.market = '${ANYTIME_SCORER_MARKET}' THEN
+             CASE
+               WHEN COALESCE(
+                 (SELECT fps.goals FROM fixture_player_stats fps
+                  WHERE fps.fixture_id = f.id AND fps.player_id = NULLIF(bl2.selection, '')::int),
+                 0
+               ) >= 1 THEN 'won'
+               ELSE 'lost'
+             END
+         END AS new_result
+       FROM bet_legs bl2
+       JOIN bets b2 ON b2.id = bl2.bet_id
+       JOIN fixtures f ON f.id = bl2.fixture_id
+       WHERE b2.user_id = $1
+         AND bl2.result = 'pending'
+         AND f.status = 'finished'
+         AND bl2.market IN ('match_winner', '${ANYTIME_SCORER_MARKET}')
+         AND (bl2.market != 'match_winner' OR (f.home_score IS NOT NULL AND f.away_score IS NOT NULL))
+     ) graded
+     WHERE bl.id = graded.id`,
+    [userId],
+  );
+}
+
 async function hydrateBets(userId: number, betIds: number[]): Promise<Bet[]> {
   if (betIds.length === 0) return [];
+  await autoSettleFinishedLegs(userId);
   const { rows } = await pool.query<BetLegRow>(
     `${BET_LEG_SELECT} WHERE b.user_id = $1 AND b.id = ANY($2) ORDER BY b.placed_at DESC, bl.id ASC`,
     [userId, betIds],

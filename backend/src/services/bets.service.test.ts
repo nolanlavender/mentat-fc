@@ -16,6 +16,7 @@ function row(overrides: Partial<BetLegRow> = {}): BetLegRow {
     bet_id: 1,
     stake: '10',
     placed_at: '2026-08-01T12:00:00.000Z',
+    odds_override_decimal: null,
     leg_id: 1,
     fixture_id: 100,
     market: 'match_winner',
@@ -36,6 +37,9 @@ function row(overrides: Partial<BetLegRow> = {}): BetLegRow {
     prob_home_win: '0.5',
     prob_draw: '0.25',
     prob_away_win: '0.25',
+    scorer_prob_scores: null,
+    scorer_player_id: null,
+    scorer_player_name: null,
     ...overrides,
   };
 }
@@ -53,6 +57,16 @@ describe('legModelProbability', () => {
 
   it('is null when there is no prediction for the fixture at all', () => {
     expect(legModelProbability(row({ prob_home_win: null, prob_draw: null, prob_away_win: null }))).toBeNull();
+  });
+
+  it('uses scorer_prob_scores for an anytime_scorer leg', () => {
+    expect(
+      legModelProbability(row({ market: 'anytime_scorer', selection: '55', scorer_prob_scores: '0.42' })),
+    ).toBe(0.42);
+  });
+
+  it('is null for an anytime_scorer leg with no goal-scorer prediction yet', () => {
+    expect(legModelProbability(row({ market: 'anytime_scorer', selection: '55', scorer_prob_scores: null }))).toBeNull();
   });
 });
 
@@ -174,6 +188,32 @@ describe('rowsToBet -- parlays', () => {
     ]);
     expect(bet.settledAt).toBe('2026-08-03T09:00:00.000Z');
   });
+
+  it('uses the odds override, not the leg product, when every leg is live', () => {
+    const bet = rowsToBet([
+      row({ leg_id: 1, odds_decimal: '2.0', odds_override_decimal: '5.5' }),
+      row({ leg_id: 2, fixture_id: 101, odds_decimal: '2.0', odds_override_decimal: '5.5' }),
+    ]);
+    // Pure product would be 4.0 -- the book's own quoted 5.5 wins instead.
+    expect(bet.combinedOdds).toBe(5.5);
+    expect(bet.oddsOverrideDecimal).toBe(5.5);
+  });
+
+  it('falls back to the per-leg product once any leg voids, even with an override present', () => {
+    const bet = rowsToBet([
+      row({ leg_id: 1, leg_result: 'won', odds_decimal: '2.0', odds_override_decimal: '5.5', leg_settled_at: '2026-08-02T17:00:00.000Z' }),
+      row({
+        leg_id: 2,
+        fixture_id: 101,
+        leg_result: 'void',
+        odds_decimal: '3.0',
+        odds_override_decimal: '5.5',
+        leg_settled_at: '2026-08-02T17:00:00.000Z',
+      }),
+    ]);
+    // The void leg drops out -- only the won leg's own 2.0 counts, not the 5.5 override.
+    expect(bet.combinedOdds).toBe(2.0);
+  });
 });
 
 describe('assertValidCreateInput (via createBet)', () => {
@@ -198,6 +238,60 @@ describe('assertValidCreateInput (via createBet)', () => {
   it('accepts a well-formed single-leg bet without throwing synchronously', () => {
     expect(() =>
       assertValidCreateInput({ stake: 10, legs: [{ fixtureId: 1, market: 'match_winner', selection: 'home', oddsDecimal: 2 }] }),
+    ).not.toThrow();
+  });
+
+  it('rejects an anytime_scorer leg whose selection is not a player id', () => {
+    expect(() =>
+      assertValidCreateInput({
+        stake: 10,
+        legs: [{ fixtureId: 1, market: 'anytime_scorer', selection: 'home', oddsDecimal: 2 }],
+      }),
+    ).toThrow(AppError);
+  });
+
+  it('accepts an anytime_scorer leg whose selection is a player id', () => {
+    expect(() =>
+      assertValidCreateInput({
+        stake: 10,
+        legs: [{ fixtureId: 1, market: 'anytime_scorer', selection: '4207', oddsDecimal: 3.5 }],
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects an odds override on a single-leg bet', () => {
+    expect(() =>
+      assertValidCreateInput({
+        stake: 10,
+        legs: [{ fixtureId: 1, market: 'match_winner', selection: 'home', oddsDecimal: 2 }],
+        oddsOverrideDecimal: 2,
+      }),
+    ).toThrow(AppError);
+  });
+
+  it('rejects an odds override that is not greater than 1', () => {
+    expect(() =>
+      assertValidCreateInput({
+        stake: 10,
+        legs: [
+          { fixtureId: 1, market: 'match_winner', selection: 'home', oddsDecimal: 2 },
+          { fixtureId: 2, market: 'match_winner', selection: 'away', oddsDecimal: 2 },
+        ],
+        oddsOverrideDecimal: 1,
+      }),
+    ).toThrow(AppError);
+  });
+
+  it('accepts a well-formed odds override on a parlay', () => {
+    expect(() =>
+      assertValidCreateInput({
+        stake: 10,
+        legs: [
+          { fixtureId: 1, market: 'match_winner', selection: 'home', oddsDecimal: 2 },
+          { fixtureId: 2, market: 'match_winner', selection: 'away', oddsDecimal: 2 },
+        ],
+        oddsOverrideDecimal: 3.75,
+      }),
     ).not.toThrow();
   });
 });

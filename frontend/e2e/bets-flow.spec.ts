@@ -33,9 +33,10 @@ test('register, view a team dashboard, log a bet, see it tracked', async ({ page
   await expect(page).toHaveURL(/\/bets/);
   await expect(page.getByText(email)).toBeVisible();
 
-  // View a team dashboard.
-  await page.getByRole('link', { name: 'Teams' }).click();
-  await page.locator('.team-list a').first().click();
+  // View a team dashboard, via the Teams nav dropdown (a click-to-toggle
+  // button + panel, not a plain link -- see TeamsNavDropdown.tsx).
+  await page.getByRole('button', { name: 'Teams' }).click();
+  await page.locator('.teams-nav-panel a').first().click();
   await expect(page.getByRole('heading', { name: 'Squad' })).toBeVisible();
 
   // Log a bet: wait for the upcoming-fixtures fetch to actually resolve
@@ -50,14 +51,14 @@ test('register, view a team dashboard, log a bet, see it tracked', async ({ page
   await page.getByRole('button', { name: 'Add leg' }).click();
   await expect(page.locator('.draft-legs')).toContainText('2.50');
 
-  await page.getByLabel('Stake (£)').fill('10');
+  await page.getByLabel('Stake ($)').fill('10');
   await page.getByRole('button', { name: 'Log bet', exact: true }).click();
 
   // See it tracked: the new bet appears in "All bets", pending (nothing's
   // been settled), for the stake just entered.
   const firstBetCard = page.locator('.bet-card').first();
   await expect(firstBetCard).toBeVisible();
-  await expect(firstBetCard).toContainText('£10.00');
+  await expect(firstBetCard).toContainText('$10.00');
   // Scoped to the card header's overall-result badge specifically -- each
   // leg row has its own (also initially "pending") result badge with the
   // same class, so an unscoped locator here matches two elements.

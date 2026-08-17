@@ -3415,3 +3415,114 @@ table -- now clears `MIN_PLAYER_MATCHES` on his 8 Fulham appearances
 9-appearance history (3 old Brighton + 6 new Chelsea) now all count
 toward his rate, all labeled Chelsea, instead of only the 6 Chelsea rows
 counting as under the previous, stricter fix.
+
+## 2026-08-17 -- Bets overhaul: USD, American odds, goalscorer legs, a real odds-override design fork, and auto-grading
+
+Four asks bundled into one unit of work, but two of them turned into real
+design decisions worth slowing down for rather than just building.
+
+**USD display and American-odds input were the easy part.** The `£`
+symbols throughout `BetsPage.tsx` became `$` -- purely cosmetic, since
+`bets.stake`/`bet_legs.odds_decimal` never stored a currency, just a raw
+number the user typed. American odds (`+150`, `-110`) needed a real
+conversion, though, since decimal odds stay the backend's source of
+truth (unchanged design from Phase 6): `americanToDecimal` in a new
+`frontend/src/lib/odds.ts` (`1 + american/100` for positive, `1 +
+100/abs(american)` for negative) runs client-side before a leg or the
+parlay override ever reaches the API -- the backend never even knows
+which format the user typed in.
+
+**The real fork: what does a parlay's "combined odds" field actually
+ask for?** The very first UI-overhaul request ("go back to only asking
+for overall bet odds if it is a parlay") sounded like it meant dropping
+per-leg odds entry for parlays entirely -- just one combined-price field.
+But that would have broken something the schema was deliberately built
+to support: a void leg dropping out of the combined price while the rest
+still have to win (`docs/erd.md`'s original `bets`/`bet_legs` design
+note). Without each leg's own price, there's no way to recompute a
+correct reduced price if one voids after the fact. Talked through both
+shapes directly rather than guessing which one "asking for full odds"
+meant: keep asking for each leg's own odds (unchanged), and add one
+*additional*, optional field -- the book's own quoted total for the whole
+parlay, for when it differs from the pure product (rounding, a
+parlay-level margin). Landed in the schema as `bets.odds_override_decimal`
+(migration `1701000000024`), nullable, parlay-only. `rowsToBet` uses it
+as `combinedOdds` only while every leg is still live; the instant any leg
+voids, it falls back to the per-leg product (excluding the void leg),
+since there's no way to know how the book's own total would have
+repriced for that specific leg -- but the per-leg product is still a
+real, defensible number. This is the same "derive, don't duplicate"
+principle the original design already used for `bets.result`/`settled_at`,
+just applied to one column that gets a deliberate, narrow exception
+instead.
+
+**Anytime-goalscorer bets proved out the free-text `market`/`selection`
+design for real.** No migration needed for the bet shape itself --
+`bet_legs.selection` is free text (mirrors `fixture_odds.market`/
+`outcome`), so `market='anytime_scorer'` just stores a `player_id` as
+text in the same column that stores `'home'`/`'draw'`/`'away'` for
+`match_winner`. The only backend work was teaching `bets.service.ts` to
+interpret it: `BET_LEG_SELECT` gained a `CASE WHEN bl.market =
+'anytime_scorer' THEN NULLIF(bl.selection, '')::int END` guard so the
+cast only ever runs on rows where `selection` is actually numeric (a
+`match_winner` row's `'home'` never reaches the cast, since Postgres
+doesn't evaluate the untaken branch of a `CASE`), joined to
+`player_goal_predictions` for `modelProbability` and to `players` for a
+real name to display -- a bet card was never going to show a bare
+`player_id`. Frontend-side, the leg builder for this market picks team ->
+that team's upcoming fixture -> a player from the team's actual squad,
+reusing `/api/teams/:id/dashboard`'s existing `squad` field rather than
+adding an endpoint. Filtered to outfield players only (excluding
+`positionGroup(player.position) === 'Goalkeeper'`, per your steer --
+vanishingly rare for a keeper to score, and it just clutters a picker
+meant for realistic bets); that filter function got extracted from
+`TeamDashboardPage.tsx` into a shared `frontend/src/lib/positions.ts`
+since this is now its second real caller.
+
+**Auto-grading: "did it hit" shouldn't need a manual click once the game
+is over.** You asked directly whether the app could grade bets from real
+post-game stats instead of only the existing manual Won/Lost/Void
+buttons. It already had exactly the data needed: `fixtures.home_score`/
+`away_score` for `match_winner`, `fixture_player_stats.goals` for
+`anytime_scorer`. New `autoSettleFinishedLegs(userId)` runs one `UPDATE`
+against every still-`pending` leg whose fixture has `status = 'finished'`,
+computing the real result via `CASE` (home/draw/away vs. the actual
+score; `goals >= 1` for a scorer leg) and writing it straight to
+`bet_legs.result`/`settled_at` -- called at the top of `hydrateBets`, so
+every read (`listBets`, `getBetById`, `getRoiSummary`, all three route
+through it) grades first. No new table, no cron job, no "refresh"
+button: the existing read path just does slightly more work now. One
+real edge case needed a decision, not a default -- a player who's part of
+an anytime-scorer bet but never actually took the pitch (an unused sub,
+or not even in the matchday squad). Discussed it directly: **loss**, not
+void/refund. The bet is "did he score," and he didn't get the chance to
+-- closer to how most books' actual small print treats it, and it avoids
+a harder question the void answer would have required (distinguishing
+"unused sub" from "not selected at all," which needs a lineup-presence
+check on top of the stats check). The manual Won/Lost/Void buttons stay
+in the UI, now genuinely a fallback rather than the only path: any market
+this function doesn't know how to grade, or a `match_winner` leg whose
+fixture finished without a recorded score (an abandoned match), is left
+`pending` for a human call.
+
+Verified against a real Postgres reproduction covering every branch at
+once, not just the happy path: a correct `match_winner` pick auto-graded
+`won`, an incorrect one `lost`; a scorer who actually scored graded
+`won` with `modelProbability` correctly pulled from
+`player_goal_predictions`; a scorer who played but didn't score graded
+`lost`; a scorer who never played the fixture at all also graded `lost`,
+confirming the chosen edge-case behavior rather than assuming it; a
+parlay spanning one finished and one still-upcoming fixture correctly
+stayed `pending` overall while its finished leg settled on its own; a
+parlay with an odds override and both legs winning used the override
+(5.0) over the pure product (4.5) for `combinedOdds` and payout; the
+same parlay shape with one leg manually voided afterward correctly fell
+back to the live leg's own product (1.8), ignoring the stale 5.0
+override. Also caught and fixed a real, unrelated regression while
+driving the flow through an actual browser: the Bets E2E spec
+(`e2e/bets-flow.spec.ts`) still targeted `getByRole('link', { name:
+'Teams' })` from before the Teams nav dropdown shipped (Teams became a
+`<button>` that opens a panel, not a link) -- it had silently never been
+re-run since that change landed. Fixed the locator and confirmed the
+whole register -> view a team -> log a bet -> see it tracked flow still
+works end-to-end against the real backend.

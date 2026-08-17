@@ -31,7 +31,7 @@ function parseFilters(query: Request['query']): { season?: string; competitionNa
 }
 
 export async function postBet(req: Request, res: Response): Promise<void> {
-  const { stake, legs } = req.body ?? {};
+  const { stake, legs, oddsOverrideDecimal } = req.body ?? {};
   const bet = await createBet(requireUserId(req), {
     stake: Number(stake),
     legs: Array.isArray(legs)
@@ -42,6 +42,9 @@ export async function postBet(req: Request, res: Response): Promise<void> {
           oddsDecimal: Number(l?.oddsDecimal),
         }))
       : [],
+    ...(oddsOverrideDecimal !== undefined && oddsOverrideDecimal !== null && oddsOverrideDecimal !== ''
+      ? { oddsOverrideDecimal: Number(oddsOverrideDecimal) }
+      : {}),
   });
   res.status(201).json(bet);
 }

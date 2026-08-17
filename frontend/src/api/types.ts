@@ -193,6 +193,7 @@ export interface BetLeg {
     awayTeam: { id: number; name: string };
   };
   modelProbability: number | null;
+  player: { id: number; name: string } | null;
 }
 
 export interface Bet {
@@ -203,6 +204,7 @@ export interface Bet {
   isParlay: boolean;
   result: BetResult;
   settledAt: string | null;
+  oddsOverrideDecimal: number | null;
   combinedOdds: number;
   yourImpliedProbability: number;
   modelProbability: number | null;
