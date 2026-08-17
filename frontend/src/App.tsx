@@ -1,6 +1,6 @@
 import { Routes, Route, Navigate, Link, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import { TeamListPage } from './pages/TeamListPage';
+import { HomePage } from './pages/HomePage';
 import { TeamDashboardPage } from './pages/TeamDashboardPage';
 import { PlayerPage } from './pages/PlayerPage';
 import { MyTeamPage } from './pages/MyTeamPage';
@@ -55,7 +55,7 @@ function App() {
     <AuthProvider>
       <Nav />
       <Routes>
-        <Route path="/" element={<TeamListPage />} />
+        <Route path="/" element={<HomePage />} />
         <Route path="/teams/:id" element={<TeamDashboardPage />} />
         <Route path="/players/:id" element={<PlayerPage />} />
         <Route
