@@ -199,6 +199,39 @@ export const TEAM_CITY_COORDINATES: Record<string, GeoPoint> = {
   Wrexham: { lat: 53.065, lon: -3.0 },
 };
 
+// Reference city names for orientation -- the crest clusters alone don't
+// say "this is London" at a glance, especially before a viewer has learned
+// to read the crests themselves. `triggerTeams` gates each label to only
+// show when one of those specific canonical names (see
+// TEAM_CITY_COORDINATES above) is actually in the current team list --
+// deliberately NOT a "is anything within N px of this point" distance
+// check, which was the first approach here and got it wrong for real:
+// English cities sit close enough together that a nearby-but-different
+// city's club (Blackburn, ~30km from Manchester; Derby, ~25km from
+// Nottingham) fell inside any distance threshold generous enough to still
+// catch a real cluster, mislabeling a Championship map with "Manchester"
+// and "Nottingham" when neither club was anywhere on it.
+export const MAJOR_CITY_LABELS: { name: string; point: GeoPoint; triggerTeams: string[] }[] = [
+  {
+    name: 'London',
+    point: { lat: 51.507, lon: -0.128 },
+    triggerTeams: [
+      'Arsenal', 'Chelsea', 'Tottenham', 'West Ham', 'Fulham', 'Brentford',
+      'Crystal Palace', 'Queens Park Rangers', 'Millwall', 'Charlton Athletic',
+    ],
+  },
+  { name: 'Manchester', point: { lat: 53.48, lon: -2.24 }, triggerTeams: ['Manchester City', 'Manchester United'] },
+  { name: 'Liverpool', point: { lat: 53.4, lon: -2.98 }, triggerTeams: ['Liverpool', 'Everton'] },
+  { name: 'Birmingham', point: { lat: 52.48, lon: -1.9 }, triggerTeams: ['Birmingham City', 'Aston Villa'] },
+  { name: 'Leeds', point: { lat: 53.8, lon: -1.55 }, triggerTeams: ['Leeds United'] },
+  { name: 'Newcastle', point: { lat: 54.97, lon: -1.6 }, triggerTeams: ['Newcastle United'] },
+  { name: 'Sheffield', point: { lat: 53.38, lon: -1.47 }, triggerTeams: ['Sheffield United', 'Sheffield Weds'] },
+  { name: 'Bristol', point: { lat: 51.45, lon: -2.59 }, triggerTeams: ['Bristol City'] },
+  { name: 'Cardiff', point: { lat: 51.48, lon: -3.18 }, triggerTeams: ['Cardiff City'] },
+  { name: 'Nottingham', point: { lat: 52.95, lon: -1.15 }, triggerTeams: ['Nottingham Forest'] },
+  { name: 'Norwich', point: { lat: 52.63, lon: 1.3 }, triggerTeams: ['Norwich City'] },
+];
+
 export interface MarkerInput<T> {
   id: T;
   point: GeoPoint;
