@@ -3526,3 +3526,44 @@ driving the flow through an actual browser: the Bets E2E spec
 re-run since that change landed. Fixed the locator and confirmed the
 whole register -> view a team -> log a bet -> see it tracked flow still
 works end-to-end against the real backend.
+
+## 2026-08-17 -- A dated exception to a documented decision, not a silent override
+
+Small change, but worth logging on its own since it directly contradicts
+something `docs/architecture.md` states as settled: "football-data.co.uk
+and FPL bootstrap are *not* part of the daily refresh ... FPL's
+bootstrap-static changes slowly enough that a manual rerun covers it."
+That was true when written. It stops being true the moment a transfer
+window opens -- FPL's bootstrap-static (and therefore
+`players.current_team_id`) updates the instant a real transfer completes,
+and the last two entries in this log are a full bug chain (Harry Wilson,
+then the deliberate blend-history redesign) about exactly how much the
+goal-scorer model's predictions depend on that column being current. Left
+unaddressed, the daily refresh would keep training on a stale roster for
+the entire window, right as transfers are actually happening.
+
+The fix is one added step: `npm run db:seed:fpl` (already existed,
+already idempotent -- no new code, just an existing command not
+previously wired into the schedule) runs in both `daily-refresh.sh` and
+`.github/workflows/daily-refresh.yml`, positioned right before `python -m
+app.train` so a fresh roster always feeds the retrain that follows it.
+Guarded by a hardcoded cutoff (`2026-09-02`, this window's close) checked
+via a plain bash string comparison against `date -u +%Y-%m-%d` -- ISO
+date strings compare correctly lexicographically, so no date-parsing
+library or GitHub Actions expression trickery was needed. Deliberately
+self-expiring rather than something to remember to revert: once today's
+date passes the cutoff, the step just echoes and no-ops, so the original
+"manual rerun is enough" reasoning in `architecture.md` becomes true
+again on its own, with the note updated in place (not deleted) to explain
+why the exception existed rather than leaving a silent contradiction for
+future-me to puzzle over.
+
+Scoped narrowly on purpose: only FPL, not football-data.co.uk (still
+genuinely true that a CSV of already-played matches has nothing "current"
+to re-pull) and not a Championship equivalent (`current_team_id` is
+FPL/Premier-League-only by design -- see the golden-record note in
+`erd.md` -- so Championship rosters have no matching staleness gap; the
+existing daily lineup backfill already keeps their appearance-derived
+club assignment current). Widening this to "refresh everything more
+often" would have been solving a problem that doesn't exist for those
+other cases.
