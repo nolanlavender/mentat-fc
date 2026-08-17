@@ -212,6 +212,7 @@ erDiagram
         int user_id FK
         numeric stake
         timestamptz placed_at
+        numeric odds_override_decimal "optional -- the book's own parlay price"
     }
     bet_legs {
         int id PK
@@ -329,19 +330,50 @@ erDiagram
   `bet_legs(id, bet_id FK, fixture_id FK, market, selection, odds_decimal,
   result, settled_at)`, one row per leg: a straight bet is a bet with
   exactly one leg, a parlay has several. `bets` deliberately has **no**
-  `result`, `odds_decimal`, or `settled_at` column — the overall result,
-  combined odds, and payout are *derived* from the legs at query time
-  (any lost leg loses the whole bet; a void leg is dropped from the
-  combined price, same rule a real sportsbook uses), not stored
-  redundantly, the same "derive, don't duplicate" reasoning already behind
-  `team_fixture_results` being a view rather than a table. `market`/
-  `selection` stay free text (mirroring `fixture_odds`'s `market`/`outcome`
-  shape) so a new bet type never needs a migration. `result` is a Postgres
-  `CHECK` constraint, not a foreign-keyed lookup table — four fixed values
-  (`pending`/`won`/`lost`/`void`) that never grow, unlike `market`/
-  `selection`. `users.password_hash` is a bcrypt hash, never a plaintext
-  password — one-way by design, verified at login via `bcrypt.compare`,
-  never decrypted.
+  `result` or `settled_at` column — the overall result, combined odds, and
+  payout are *derived* from the legs at query time (any lost leg loses the
+  whole bet; a void leg is dropped from the combined price, same rule a
+  real sportsbook uses), not stored redundantly, the same "derive, don't
+  duplicate" reasoning already behind `team_fixture_results` being a view
+  rather than a table. `market`/`selection` stay free text (mirroring
+  `fixture_odds`'s `market`/`outcome` shape) so a new bet type never needs
+  a migration — the `anytime_scorer` market (added 2026-08-17) proved this
+  out for real: `selection` is a `player_id` stored as text for that
+  market, no schema change needed, just a `bets.service.ts` code path that
+  interprets it. `result` is a Postgres `CHECK` constraint, not a
+  foreign-keyed lookup table — four fixed values (`pending`/`won`/`lost`/
+  `void`) that never grow, unlike `market`/`selection`. `users.password_hash`
+  is a bcrypt hash, never a plaintext password — one-way by design,
+  verified at login via `bcrypt.compare`, never decrypted.
+- **`bets.odds_override_decimal`** (added 2026-08-17, migration
+  1701000000024) is the one deliberate exception to "derive, don't
+  duplicate" above: combined odds still *default* to the product of each
+  leg's own `odds_decimal`, but a real sportsbook's quoted total for a
+  parlay is a real number the book chose (rounding, a house margin applied
+  at the parlay level) and can differ slightly from that pure product.
+  Nullable, parlay-only (`assertValidCreateInput` rejects it on a
+  single-leg bet, where the one leg's own odds already *is* the bet's
+  price), and only *trusted* while every leg in the bet is still live —
+  `rowsToBet` falls back to the per-leg product the moment any leg voids,
+  since there's no way to know how the book's own total would have
+  repriced for that specific leg voiding, but the per-leg product is still
+  a real, defensible number. This is why `odds_decimal` stayed on
+  `bet_legs` instead of moving up to `bets` outright: losing per-leg
+  prices would have meant losing the void-leg repricing rule too.
+- **Auto-grading** (`autoSettleFinishedLegs` in `bets.service.ts`, added
+  2026-08-17): every read (`listBets`/`getBetById`/`getRoiSummary`, all
+  routed through `hydrateBets`) first grades any still-`pending` leg whose
+  fixture has actually finished, straight from already-stored results —
+  no separate "refresh" action, cron job, or extra table. `match_winner`
+  compares the fixture's real `home_score`/`away_score` to the leg's pick;
+  `anytime_scorer` checks `fixture_player_stats.goals >= 1` for that
+  player in that fixture. A player who never took the pitch at all grades
+  as a **loss**, not a void — a deliberate call: the bet is "did he
+  score," and an unused sub or a squad player who wasn't even named
+  didn't. Any other market, or a `match_winner` leg whose fixture finished
+  without a recorded score (e.g. abandoned), is left `pending` for a
+  manual Won/Lost/Void call — there's no stored data to grade it from
+  automatically.
 - **Migrations are plain SQL** (`backend/migrations/*.sql`, run via
   `node-pg-migrate`), not an ORM's schema DSL. The point of this phase is
   to actually read and write real DDL, not have it generated — `.sql`-mode
