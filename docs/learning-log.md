@@ -3714,3 +3714,42 @@ Liverpool/Birmingham/Newcastle label correctly for Premier League and
 Sheffield/Birmingham/Cardiff/Bristol/Norwich label correctly for
 Championship -- and specifically confirming Manchester and Nottingham no
 longer appear on the Championship map now that the fix is in.
+
+## 2026-08-17 -- Leader lines instead of zoom/pan
+
+More map feedback: could a fanned-out cluster show where its members
+*actually* are, and should the map support zooming in/out? Asked to pick
+rather than default to the more ambitious option -- went with small
+leader lines back to each cluster's true location instead of interactive
+zoom/pan, and it's worth recording why, since "add zoom" was a completely
+reasonable ask that got turned down.
+
+Zoom/pan would have meant a real new interaction surface: wheel-zoom
+conflicting with normal page scroll, pinch-to-zoom on mobile, panning
+without losing which crest is which, keeping ~50 absolutely-positioned
+HTML `<Link>` markers in sync with whatever transform state a zoomed SVG
+viewBox was in, and testing all of that across pointer/touch/keyboard.
+Real, but new, complexity for what's meant to be a lightweight page
+decoration, not a primary navigation tool -- Teams are already one click
+away via the nav dropdown, so the map's job is orientation and a fun
+alternate way to browse, not the only way to reach a team.
+
+Leader lines solve the actual complaint ("where exactly is this") with
+none of that: `layoutMarkers` in `teamGeo.ts` already computed each
+cluster's true centroid internally (used to fan members out around it) --
+it just wasn't returned. Changed its return type from a bare marker array
+to `{ markers, clusterAnchors }`, where each marker carries its own
+cluster's center (`null` for an unclustered singleton, which needs no
+line since its marker already IS its true position) and `clusterAnchors`
+is the deduplicated list of real cluster locations. `EnglandWalesMap.tsx`
+draws a short dashed `<line>` from each fanned member back to its
+cluster's anchor, plus one small gold dot marking the anchor itself --
+all inside the existing outline `<svg>`, no new element or interaction
+required. Reads as a small starburst around each cluster: the real place,
+with each crest connected back to it.
+
+Verified visually again (screenshots, both competitions, both themes) --
+London's ring of 7 crests now has visible dashed spokes converging on a
+single gold dot, same for the smaller Manchester/Liverpool/Sheffield
+pairs, and it holds up in dark mode without any theme-specific code
+(`--accent-border`/`--gold` are already theme-aware tokens).

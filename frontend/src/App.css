@@ -645,6 +645,17 @@ section + section {
   stroke-width: 1.5;
 }
 
+.map-leader-line {
+  stroke: var(--accent-border);
+  stroke-width: 0.6;
+  stroke-dasharray: 2 1.5;
+  opacity: 0.75;
+}
+
+.map-cluster-anchor {
+  fill: var(--gold);
+}
+
 .map-city-label {
   position: absolute;
   transform: translate(-50%, calc(-50% - 44px));
