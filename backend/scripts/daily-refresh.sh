@@ -46,6 +46,19 @@ npm run db:seed:current-season
 echo "--- Backfilling lineups/player-stats for newly-finished fixtures ---"
 npm run db:seed:backfill-lineups
 
+# Transfer-window-only, through 2026-09-02 -- see the matching comment in
+# .github/workflows/daily-refresh.yml for why this is normally NOT part of
+# the daily job. Self-expiring: once today's date passes the cutoff this
+# just echoes and skips, no manual cleanup required.
+TRANSFER_WINDOW_CUTOFF="2026-09-02"
+TODAY="$(date -u +%Y-%m-%d)"
+if [[ "$TODAY" < "$TRANSFER_WINDOW_CUTOFF" || "$TODAY" == "$TRANSFER_WINDOW_CUTOFF" ]]; then
+  echo "--- Refreshing FPL rosters (transfer window, through $TRANSFER_WINDOW_CUTOFF) ---"
+  npm run db:seed:fpl
+else
+  echo "--- Skipping FPL roster refresh -- past transfer window cutoff ($TRANSFER_WINDOW_CUTOFF) ---"
+fi
+
 echo "--- Refitting the prediction model on fresh data ---"
 (cd ../model-service && .venv/bin/python -m app.train)
 

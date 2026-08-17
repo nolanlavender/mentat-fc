@@ -98,12 +98,31 @@ Until then it only runs when invoked by hand:
     pay that cost forever even once fully caught up.
   - `python -m app.train` (model-service) refits Dixon-Coles on the fresh
     data and writes new predictions.
-  - football-data.co.uk and FPL bootstrap are *not* part of the daily
-    refresh — football-data.co.uk's CSV only ever reflects matches already
-    played (nothing "current" to re-pull daily) and FPL's bootstrap-static
-    changes slowly enough that a manual `npm run db:seed` rerun covers it.
+  - football-data.co.uk and FPL bootstrap are *not* normally part of the
+    daily refresh — football-data.co.uk's CSV only ever reflects matches
+    already played (nothing "current" to re-pull daily) and FPL's
+    bootstrap-static changes slowly enough that a manual `npm run db:seed`
+    rerun covers it. **Dated exception, added 2026-08-17:** during an open
+    transfer window, that "changes slowly" assumption is false — a
+    completed transfer updates FPL's bootstrap-static (and therefore
+    `players.current_team_id`) instantly, and the goal-scorer model leans
+    directly on that column being fresh (see `docs/learning-log.md`'s
+    2026-08-16/17 entries on the Harry Wilson bug and its blended-history
+    follow-up). `npm run db:seed:fpl` is added to the daily job, but only
+    through the window's close (hardcoded `2026-09-02` cutoff in both
+    `daily-refresh.sh` and `daily-refresh.yml`) — cheap enough (one
+    bootstrap-static call) to just run daily for that stretch rather than
+    remembering to toggle it by hand, and self-expiring: once today's date
+    passes the cutoff the step no-ops on its own, so the original "manual
+    rerun is enough" reasoning above goes back to being true without any
+    cleanup. Scoped to FPL only, not football-data.co.uk or a Championship
+    equivalent — `current_team_id` is FPL/Premier-League-only in the first
+    place (see the golden-record note above), so Championship rosters have
+    no equivalent staleness gap to guard against; they're already kept
+    current by the lineup backfill's own appearance-derived logic.
 - **`backend/scripts/daily-refresh.sh`** runs `npm run db:seed:current-season`
-  → `npm run db:seed:backfill-lineups` → `python -m app.train`, in that
+  → `npm run db:seed:backfill-lineups` → (transfer-window only, through
+  2026-09-02) `npm run db:seed:fpl` → `python -m app.train`, in that
   order (order matters: the backfill only sees a fixture as a candidate
   once its status says `finished`, so the fixture-list refresh has to run
   first). Written to run under either a local `cron`/`launchd` entry or a

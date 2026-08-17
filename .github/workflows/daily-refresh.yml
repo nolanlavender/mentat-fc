@@ -46,6 +46,28 @@ jobs:
         working-directory: backend
         run: npm run db:seed:backfill-lineups
 
+      - name: Refresh FPL rosters (transfer window only, through 2026-09-02)
+        working-directory: backend
+        # See architecture.md's "Data refresh" note: FPL bootstrap is
+        # normally NOT part of the daily job, since players.current_team_id
+        # changes slowly enough that a manual rerun covers it. During an
+        # open transfer window that's not true -- a completed transfer
+        # updates FPL's bootstrap-static instantly, and the goal-scorer
+        # model leans on current_team_id being fresh (see learning-log's
+        # 2026-08-16/17 entries on the Harry Wilson bug). Cheap enough (one
+        # bootstrap-static call) to just run daily through the window's
+        # close rather than remembering to toggle it by hand; the date
+        # guard below turns it back into the documented no-op automatically
+        # once the window shuts, no manual cleanup required.
+        run: |
+          cutoff="2026-09-02"
+          today="$(date -u +%Y-%m-%d)"
+          if [[ "$today" < "$cutoff" || "$today" == "$cutoff" ]]; then
+            npm run db:seed:fpl
+          else
+            echo "Past the transfer window cutoff ($cutoff) -- skipping roster refresh."
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
