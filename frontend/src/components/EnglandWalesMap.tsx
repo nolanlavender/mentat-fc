@@ -27,7 +27,7 @@ export function EnglandWalesMap({ teams }: { teams: Team[] }) {
     const point = TEAM_CITY_COORDINATES[team.name];
     return point ? [{ id: team, point }] : [];
   });
-  const markers = layoutMarkers(markerInputs);
+  const { markers, clusterAnchors } = layoutMarkers(markerInputs);
 
   const teamNames = new Set(teams.map((t) => t.name));
   const relevantCityLabels = MAJOR_CITY_LABELS.filter((city) => city.triggerTeams.some((name) => teamNames.has(name)));
@@ -36,6 +36,27 @@ export function EnglandWalesMap({ teams }: { teams: Team[] }) {
     <div className="england-wales-map">
       <svg viewBox={`0 0 ${MAP_VIEW_WIDTH.toFixed(1)} ${MAP_VIEW_HEIGHT.toFixed(1)}`} className="map-outline" aria-hidden="true">
         <path d={OUTLINE_D} />
+        {/* Each fanned-out marker gets a short leader line back to its
+            cluster's real (pre-fan-out) location, plus one small dot
+            marking that real location -- without these, a ring of crests
+            around, say, London reads as "approximately this area" with no
+            visual cue for where the actual point is or which crest is
+            closest to it. */}
+        {markers
+          .filter((m): m is typeof m & { clusterCenter: NonNullable<typeof m.clusterCenter> } => m.clusterCenter !== null)
+          .map((m) => (
+            <line
+              key={`line-${m.id.id}`}
+              className="map-leader-line"
+              x1={m.clusterCenter.x}
+              y1={m.clusterCenter.y}
+              x2={m.x}
+              y2={m.y}
+            />
+          ))}
+        {clusterAnchors.map((anchor, i) => (
+          <circle key={`anchor-${i}`} className="map-cluster-anchor" cx={anchor.x} cy={anchor.y} r={2.5} />
+        ))}
       </svg>
       {relevantCityLabels.map((city) => {
         const { x, y } = project(city.point);

@@ -241,6 +241,19 @@ export interface LayoutMarker<T> {
   id: T;
   x: number;
   y: number;
+  // The cluster's true (pre-fan-out) center, for drawing a short leader
+  // line back to it -- null for a singleton marker, which IS its own true
+  // position already and needs no line pointing anywhere.
+  clusterCenter: ProjectedPoint | null;
+}
+
+export interface MarkerLayout<T> {
+  markers: LayoutMarker<T>[];
+  // One entry per cluster that actually fanned out (2+ members) -- a
+  // small dot marking the real shared location the fanned members are
+  // standing in for, deduplicated from the markers' own clusterCenter
+  // (multiple members share the exact same center object).
+  clusterAnchors: ProjectedPoint[];
 }
 
 // Several English city clusters (London most of all -- 10 clubs within a
@@ -268,7 +281,7 @@ function fanRadiusFor(clusterSize: number): number {
   return Math.max(MIN_FAN_RADIUS_PX, (clusterSize * ARC_BUDGET_PX) / (2 * Math.PI));
 }
 
-export function layoutMarkers<T>(inputs: MarkerInput<T>[]): LayoutMarker<T>[] {
+export function layoutMarkers<T>(inputs: MarkerInput<T>[]): MarkerLayout<T> {
   const projected = inputs.map((input) => project(input.point));
   const n = inputs.length;
   const parent = Array.from({ length: n }, (_, i) => i);
@@ -302,12 +315,13 @@ export function layoutMarkers<T>(inputs: MarkerInput<T>[]): LayoutMarker<T>[] {
     else groups.set(root, [i]);
   }
 
-  const result: LayoutMarker<T>[] = [];
+  const markers: LayoutMarker<T>[] = [];
+  const clusterAnchors: ProjectedPoint[] = [];
   for (const indices of groups.values()) {
     const cx = indices.reduce((sum, i) => sum + projected[i].x, 0) / indices.length;
     const cy = indices.reduce((sum, i) => sum + projected[i].y, 0) / indices.length;
     if (indices.length === 1) {
-      result.push({ id: inputs[indices[0]].id, x: cx, y: cy });
+      markers.push({ id: inputs[indices[0]].id, x: cx, y: cy, clusterCenter: null });
       continue;
     }
     // Fan each member out starting from its OWN true bearing from the
@@ -320,14 +334,17 @@ export function layoutMarkers<T>(inputs: MarkerInput<T>[]): LayoutMarker<T>[] {
       (a, b) => Math.atan2(projected[a].y - cy, projected[a].x - cx) - Math.atan2(projected[b].y - cy, projected[b].x - cx),
     );
     const radius = fanRadiusFor(sorted.length);
+    const clusterCenter = { x: cx, y: cy };
+    clusterAnchors.push(clusterCenter);
     sorted.forEach((i, k) => {
       const angle = (2 * Math.PI * k) / sorted.length - Math.PI / 2; // start at 12 o'clock, go clockwise
-      result.push({
+      markers.push({
         id: inputs[i].id,
         x: cx + radius * Math.cos(angle),
         y: cy + radius * Math.sin(angle),
+        clusterCenter,
       });
     });
   }
-  return result;
+  return { markers, clusterAnchors };
 }
