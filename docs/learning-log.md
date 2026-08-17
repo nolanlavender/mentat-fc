@@ -3664,3 +3664,53 @@ standings/map/fixtures all refetched for Championship. Also checked in
 dark mode -- the map's fill/stroke/marker colors are all CSS custom
 properties (`--accent-bg`/`--accent-border`/`--bg`/`--gold`), so the
 theme swap needed zero map-specific code.
+
+## 2026-08-17 -- Fixing the map: city labels, and a real bug in how "relevant" was decided
+
+Feedback on the Home page map, same day it shipped: the crest clusters
+alone don't say "this is London" without already knowing the crests, and
+the crowded areas were hard to read. Added `MAJOR_CITY_LABELS` -- text
+labels rendered the same way as the crest markers (percentage-positioned
+over the SVG outline), offset upward enough to clear a cluster's full fan
+radius rather than sitting on top of it (the first attempt used a 24px
+offset, comfortably clearing a 2-club pair but not London's ring of 7-8 --
+had to actually screenshot it to see the label rendering half-hidden
+behind a marker before realizing 24px wasn't enough; bumped to 44px).
+
+**First version of "should this label even show" was wrong, and a real
+bug, not just a rough edge.** Gated each label on whether any club
+projected within some pixel radius of the city's reference point -- 35px,
+picked to comfortably catch a fanned-out cluster. Screenshotting the
+Championship-only view caught the actual problem: Blackburn (no
+Manchester club anywhere in that competition) was close enough to the
+Manchester reference point to trigger a "Manchester" label anyway, and
+Derby did the same for "Nottingham" -- both real English cities sitting
+close enough together (Blackburn-Manchester ~30km, Derby-Nottingham
+~25km) that any distance threshold generous enough to still catch a real
+cluster was *also* generous enough to mislabel a nearby-but-different
+city. Distance from a reference point was never going to be the right
+signal for "is this specific named city actually here" -- switched
+`MAJOR_CITY_LABELS` to an explicit `triggerTeams` list per city (the
+specific canonical team names that belong to it, e.g. Manchester ->
+`['Manchester City', 'Manchester United']`), checked by literal set
+membership against whichever teams are actually being shown. Same "a few
+dozen clubs, cheap to hand-maintain" reasoning already used for
+`team-short-codes.ts` and `TEAM_CITY_COORDINATES` itself -- this is a
+genuinely more correct signal, not just a workaround, since "is club X
+literally in the current team list" has no false-positive case the way
+"is anything within N pixels" does.
+
+Also widened the map's share of the page layout (1.3fr -> 1.7fr of the
+two-column grid) since the crowded areas read as more cramped than
+necessary at the original size -- a real crest image will still help
+here (blank white circles in every scratch-Postgres screenshot are their
+own worst-case for "can you tell these apart," real club badges look
+nothing alike), but more on-screen room for the cluster rings costs
+nothing and helps regardless.
+
+Verified the same way as the original build: real screenshots (not just
+reading the diff) against both competitions, confirming London/Manchester/
+Liverpool/Birmingham/Newcastle label correctly for Premier League and
+Sheffield/Birmingham/Cardiff/Bristol/Norwich label correctly for
+Championship -- and specifically confirming Manchester and Nottingham no
+longer appear on the Championship map now that the fix is in.

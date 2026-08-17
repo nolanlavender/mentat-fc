@@ -611,7 +611,7 @@ section + section {
 
 .home-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(260px, 1fr);
+  grid-template-columns: minmax(0, 1.7fr) minmax(260px, 1fr);
   gap: 28px;
   align-items: start;
   margin-top: 16px;
@@ -643,6 +643,18 @@ section + section {
   fill: var(--accent-bg);
   stroke: var(--accent-border);
   stroke-width: 1.5;
+}
+
+.map-city-label {
+  position: absolute;
+  transform: translate(-50%, calc(-50% - 44px));
+  font-family: var(--heading);
+  font-size: 0.68em;
+  letter-spacing: 0.3px;
+  color: var(--text-h);
+  opacity: 0.55;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .map-marker {

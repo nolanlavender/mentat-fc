@@ -3,10 +3,12 @@ import type { Team } from '../api/types';
 import { Crest } from './Crest';
 import {
   ENGLAND_WALES_OUTLINE,
+  MAJOR_CITY_LABELS,
   MAP_VIEW_HEIGHT,
   MAP_VIEW_WIDTH,
   TEAM_CITY_COORDINATES,
   layoutMarkers,
+  project,
   projectedPathD,
 } from '../lib/teamGeo';
 
@@ -27,11 +29,27 @@ export function EnglandWalesMap({ teams }: { teams: Team[] }) {
   });
   const markers = layoutMarkers(markerInputs);
 
+  const teamNames = new Set(teams.map((t) => t.name));
+  const relevantCityLabels = MAJOR_CITY_LABELS.filter((city) => city.triggerTeams.some((name) => teamNames.has(name)));
+
   return (
     <div className="england-wales-map">
       <svg viewBox={`0 0 ${MAP_VIEW_WIDTH.toFixed(1)} ${MAP_VIEW_HEIGHT.toFixed(1)}`} className="map-outline" aria-hidden="true">
         <path d={OUTLINE_D} />
       </svg>
+      {relevantCityLabels.map((city) => {
+        const { x, y } = project(city.point);
+        return (
+          <span
+            key={city.name}
+            className="map-city-label"
+            aria-hidden="true"
+            style={{ left: `${(x / MAP_VIEW_WIDTH) * 100}%`, top: `${(y / MAP_VIEW_HEIGHT) * 100}%` }}
+          >
+            {city.name}
+          </span>
+        );
+      })}
       {markers.map((marker) => (
         <Link
           key={marker.id.id}
