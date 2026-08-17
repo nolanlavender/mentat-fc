@@ -3567,3 +3567,100 @@ existing daily lineup backfill already keeps their appearance-derived
 club assignment current). Widening this to "refresh everything more
 often" would have been solving a problem that doesn't exist for those
 other cases.
+
+## 2026-08-17 -- The Home page: a real-geography map without a real map file
+
+The last piece of the original UI-overhaul request: a new "/" landing
+page (competition filter, current standings, upcoming/recent fixtures)
+plus the "team crests on a real map" idea from the very first ask.
+`TeamListPage.tsx` (a bare team grid) is gone -- superseded now that the
+Teams nav dropdown handles "browse teams" and this page does something
+more useful with "/".
+
+**New backend piece: `GET /api/teams/standings?competition=X`.**
+`teams.service.ts` already had `getTablePosition(teamId)` (one team's
+position, from a Phase-2 build) -- `getStandings(competitionName)` is its
+whole-table sibling, same `team_fixture_results` view and same
+"most-recent-season-by-start-date" stand-in for `is_current` (still not
+wired up -- see `erd.md`), just grouped by every team in the season
+instead of filtered to one. Had to register the route before `/:id` in
+`teams.routes.ts`, or Express would parse `/standings` as an `:id` value.
+
+**The map: no live/in-play scores (confirmed with you directly) and no
+external basemap file.** Two decisions worth recording since both were
+made deliberately rather than defaulted into:
+
+1. The "games box" only shows upcoming fixtures and recent results, not
+   live scores -- `docs/architecture.md` already documents that this app
+   has zero live/in-play tracking (fixtures are only ever `scheduled` or
+   `finished`), and building a live scoreboard would have been new scope,
+   not a Home-page detail. Derived client-side from one shared
+   `from`/`to` window fetch (today ± 10 days) rather than two separate
+   backend endpoints -- `status === 'finished'` sorted descending is
+   "recent results," everything else sorted ascending is "upcoming,"
+   split out of the same array the existing `/api/fixtures` endpoint
+   already returns.
+2. Went looking for a real England+Wales boundary file first (Ordnance
+   Survey/ONS open data, Wikimedia Commons SVG maps) rather than assuming
+   a hand-drawn shape was the only option. Backed off once it became clear
+   getting one meant either a large multi-MB file needing Scotland/NI
+   cropped out programmatically, or scraping a specific SVG's raw `path`
+   data through tools (WebFetch) that summarize content through a model
+   rather than returning exact bytes -- a real risk of a garbled path
+   string for a feature that's explicitly meant to be lightweight and
+   self-contained (no attribution text to carry, no external asset to
+   keep in sync). Chose instead to hand-build a stylized outline from ~76
+   known coastline landmarks (Land's End, the Wash, Solway Firth, etc.),
+   projected through the *same* lat/lon -> pixel function used for every
+   team marker (`frontend/src/lib/teamGeo.ts`) -- explicitly documented in
+   code as approximate, not survey-grade. The projection itself is a
+   plain equirectangular one, but scaled by `cos(mean_latitude)` so a
+   degree of longitude and a degree of latitude cover the same real-world
+   distance at England's latitude; skipping that step is the single most
+   common way these quick maps end up visibly squashed east-west.
+
+**A genuine algorithm, not just data entry: fanning out crowded
+clusters.** London alone has 10 Premier League/Championship clubs within
+a few miles of each other -- plotted at literal coordinates, their crests
+would total overlap at any readable icon size (confirmed the "auto-fan"
+approach with you over a hardcoded "collapse to one badge" alternative,
+specifically so it keeps working correctly no matter which teams are
+actually in the league that season, promotion/relegation included, with
+no per-team offset table to maintain by hand). `layoutMarkers` in
+`teamGeo.ts` is plain union-find: any two markers projected within
+`CLUSTER_RADIUS_PX` of each other merge into a group (transitively, so a
+whole city-region like the West Midlands forms as one cluster without
+being told to), then each group's members fan out evenly around a ring
+centered on the group's own average position. First pass used a fixed
+ring radius and had two real problems, both caught by an actual rendered
+screenshot, not just by reading the code:
+- A *fixed* radius crushed London's 10 members together while barely
+  spreading a 2-member group -- fixed by scaling the ring radius with
+  cluster size (`radius = max(minimum, count * arc_budget / 2π)`, i.e.
+  aiming for a roughly constant arc-length gap between neighbors
+  regardless of how many are in the group).
+- Members were assigned ring positions in arbitrary (insertion) order,
+  which occasionally swung a fanned-out member around to visually
+  collide with an unrelated *singleton* marker sitting just outside the
+  cluster -- fixed by sorting each cluster's members by their own true
+  bearing from the group's centroid before assigning ring slots, so a
+  member fans out roughly toward the real compass direction it actually
+  sits in.
+
+**Verification, in order:** a standalone script rendered the projected
+outline + every current PL/Championship club's marker to a static SVG,
+screenshotted it, and was checked both visually (does this read as
+England and Wales, are the clusters legible) and numerically (a
+brute-force pairwise-distance scan for any two markers left closer than
+8px after fan-out -- went from 3 close pairs down to 1 after the
+size-aware radius fix, and that remaining pair turned out to be a
+genuinely separate club sitting just outside a cluster's boundary, not a
+bug). Then the real thing end-to-end: scratch Postgres seeded with real
+PL + Championship teams/fixtures, the actual dev backend/frontend running
+together, `GET /api/teams/standings` checked directly, and a Playwright
+script that clicked a real map marker and confirmed it navigated to that
+team's dashboard, then switched the competition filter and confirmed the
+standings/map/fixtures all refetched for Championship. Also checked in
+dark mode -- the map's fill/stroke/marker colors are all CSS custom
+properties (`--accent-bg`/`--accent-border`/`--bg`/`--gold`), so the
+theme swap needed zero map-specific code.

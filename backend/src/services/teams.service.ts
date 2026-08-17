@@ -190,6 +190,72 @@ async function getTablePosition(teamId: number): Promise<TablePosition | undefin
   };
 }
 
+export interface StandingsRow {
+  position: number;
+  team: Team;
+  played: number;
+  points: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalDifference: number;
+}
+
+export interface Standings {
+  competitionName: string;
+  seasonLabel: string;
+  rows: StandingsRow[];
+}
+
+// The whole-table sibling of getTablePosition above -- same "most recent
+// season by start_date" stand-in (competition_seasons.is_current isn't
+// wired up yet, see docs/erd.md) and the same team_fixture_results view,
+// just grouped by every team in the season instead of filtered to one.
+export async function getStandings(competitionName: string): Promise<Standings | undefined> {
+  if (!DASHBOARD_COMPETITIONS.includes(competitionName)) return undefined;
+
+  const relevantSeason = await pool.query(
+    `SELECT cs.id AS competition_season_id, c.name AS competition_name, s.label AS season_label
+     FROM competition_seasons cs
+     JOIN competitions c ON c.id = cs.competition_id
+     JOIN seasons s ON s.id = cs.season_id
+     WHERE c.name = $1
+     ORDER BY s.start_date DESC
+     LIMIT 1`,
+    [competitionName],
+  );
+  const season = relevantSeason.rows[0];
+  if (!season) return undefined;
+
+  const { rows } = await pool.query(
+    `SELECT tfr.team_id, t.name, t.short_name, t.logo_url,
+       count(*) AS played, sum(points) AS points,
+       sum(goals_for) AS goals_for, sum(goals_against) AS goals_against,
+       row_number() OVER (
+         ORDER BY sum(points) DESC, sum(goals_for) - sum(goals_against) DESC, sum(goals_for) DESC
+       ) AS position
+     FROM team_fixture_results tfr
+     JOIN teams t ON t.id = tfr.team_id
+     WHERE tfr.competition_season_id = $1 AND tfr.result IS NOT NULL
+     GROUP BY tfr.team_id, t.name, t.short_name, t.logo_url
+     ORDER BY position`,
+    [season.competition_season_id],
+  );
+
+  return {
+    competitionName: season.competition_name,
+    seasonLabel: season.season_label,
+    rows: rows.map((r) => ({
+      position: Number(r.position),
+      team: { id: r.team_id, name: r.name, shortName: r.short_name, logoUrl: r.logo_url },
+      played: Number(r.played),
+      points: Number(r.points),
+      goalsFor: Number(r.goals_for),
+      goalsAgainst: Number(r.goals_against),
+      goalDifference: Number(r.goals_for) - Number(r.goals_against),
+    })),
+  };
+}
+
 export interface TeamFormMatch {
   fixtureId: number;
   kickoffDate: string;

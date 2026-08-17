@@ -216,38 +216,6 @@ select {
   color: var(--text-h);
 }
 
-.team-list {
-  list-style: none;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 8px;
-  margin-top: 24px;
-}
-
-.team-list a {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text-h);
-  font-weight: 500;
-  text-decoration: none;
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease,
-    transform 0.15s ease;
-}
-
-.team-list a:hover {
-  border-color: var(--accent-border);
-  box-shadow: var(--shadow);
-  transform: translateY(-1px);
-}
-
 section {
   margin: 24px 0;
 }
@@ -639,4 +607,122 @@ section + section {
   font-size: 0.9em;
   opacity: 0.8;
   white-space: nowrap;
+}
+
+.home-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(260px, 1fr);
+  gap: 28px;
+  align-items: start;
+  margin-top: 16px;
+}
+
+@media (max-width: 800px) {
+  .home-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.home-map-section h2,
+.home-side-column h2 {
+  margin-top: 0;
+}
+
+.england-wales-map {
+  position: relative;
+  width: 100%;
+}
+
+.map-outline {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.map-outline path {
+  fill: var(--accent-bg);
+  stroke: var(--accent-border);
+  stroke-width: 1.5;
+}
+
+.map-marker {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 1px solid var(--accent-border);
+  box-shadow: var(--shadow);
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.map-marker:hover {
+  transform: translate(-50%, -50%) scale(1.35);
+  z-index: 1;
+  box-shadow: 0 0 0 2px var(--gold);
+}
+
+.standings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+.standings-table th,
+.standings-table td {
+  padding: 5px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.standings-table th:first-child,
+.standings-table td:first-child {
+  width: 1.5em;
+  opacity: 0.7;
+}
+
+.standings-table th:not(:first-child):not(:nth-child(2)),
+.standings-table td:not(:first-child):not(:nth-child(2)) {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.standings-team {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-h);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.standings-team:hover {
+  text-decoration: underline;
+}
+
+.home-fixture-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.9em;
+}
+
+.home-fixture-list li {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.home-fixture-list a {
+  color: var(--text-h);
+  text-decoration: none;
+}
+
+.home-fixture-list a:hover {
+  text-decoration: underline;
 }

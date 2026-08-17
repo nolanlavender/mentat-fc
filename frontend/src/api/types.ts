@@ -54,6 +54,22 @@ export interface FixtureSummary {
   topScorers: ScorerPrediction[];
 }
 
+export interface StandingsRow {
+  position: number;
+  team: Team;
+  played: number;
+  points: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalDifference: number;
+}
+
+export interface Standings {
+  competitionName: string;
+  seasonLabel: string;
+  rows: StandingsRow[];
+}
+
 export interface TablePosition {
   competitionName: string;
   seasonLabel: string;
