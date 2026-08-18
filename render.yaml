@@ -26,9 +26,7 @@ services:
         sync: false
       - key: API_FOOTBALL_KEY
         sync: false
-    # FPL_ENTRY_ID is deliberately not listed here -- it's optional (the app
-    # boots fine without it, only /api/fpl/my-team needs it, see
-    # backend/src/config/env.ts), and Render blueprint env vars are prompted
-    # for at setup time regardless of whether you actually have a value.
-    # Add it manually afterward, in the service's Environment tab, if you
-    # want that endpoint to work.
+    # No FPL_ENTRY_ID env var here -- removed 2026-08-18. Each user links
+    # their own FPL team from the My Team page itself (users.fpl_entry_id),
+    # not a server-wide config value. See docs/learning-log.md's 2026-08-18
+    # entry.

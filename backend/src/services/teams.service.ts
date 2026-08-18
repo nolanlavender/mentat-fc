@@ -335,18 +335,35 @@ async function getSquad(teamId: number): Promise<SquadPlayer[]> {
   // club" for the goal-scorer model: prefer current_team_id when set (FPL
   // is live, reflects a transfer instantly), falling back to whichever team
   // a player's most recent FINISHED fixture_lineups appearance was for --
-  // the only signal available for players FPL doesn't cover. Same
-  // real-world tradeoff as that model code accepted: an old appearance
-  // could in principle be stale (a player who left the two competitions
-  // entirely), but "most recent" naturally favors current reality, and this
-  // mirrors an already-reviewed, already-correct pattern rather than
-  // inventing a new one.
+  // the only signal available for players FPL doesn't cover.
+  //
+  // Real bug found in production 2026-08-18: the fallback originally had no
+  // bound on how old that "most recent" appearance could be, so a player who
+  // left the club entirely (transferred, released) kept showing up on its
+  // squad page indefinitely, as long as no more recent finished appearance
+  // for them existed anywhere in the dataset -- a real, distinct player was
+  // reported still listed on a Championship team's squad off a 2025 (prior
+  // season) appearance alone. Restricted the fallback to the current season
+  // only (the same "most recent season by start_date" stand-in
+  // getTablePosition/getStandings already use, since competition_seasons.
+  // is_current isn't wired up yet -- see docs/erd.md): a departed player
+  // simply drops off the list once their only appearances predate the
+  // current season, rather than showing under the wrong (now former) club.
+  // Same "no confident answer yet, not a confidently wrong one" tradeoff
+  // already accepted for the goal-scorer model's identical transfer-gap
+  // case (Harry Wilson, 2026-08-17) -- a genuinely current squad member who
+  // simply hasn't featured in a finished match yet this season won't show
+  // either, until real current-season lineup data exists for them.
   const { rows } = await pool.query<{ id: number; full_name: string; position: string | null; photo_url: string | null }>(
-    `WITH most_recent_appearance AS (
+    `WITH latest_season AS (
+       SELECT id FROM seasons ORDER BY start_date DESC LIMIT 1
+     ),
+     most_recent_appearance AS (
        SELECT DISTINCT ON (fl.player_id) fl.player_id, fl.team_id
        FROM fixture_lineups fl
        JOIN fixtures f ON f.id = fl.fixture_id
-       WHERE f.status = 'finished'
+       JOIN competition_seasons cs ON cs.id = f.competition_season_id
+       WHERE f.status = 'finished' AND cs.season_id = (SELECT id FROM latest_season)
        ORDER BY fl.player_id, f.kickoff_date DESC
      )
      SELECT p.id, p.full_name, p.position, p.photo_url
