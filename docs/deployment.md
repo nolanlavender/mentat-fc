@@ -39,9 +39,9 @@ required, just an option if you want it later.
    permanently, since already-applied migrations are a no-op.
 5. Once live, note the service's `.onrender.com` URL -- the frontend needs
    it next.
-6. Optional: add `FPL_ENTRY_ID` afterward (Environment tab) if you want
-   `/api/fpl/my-team` to work in production. Left out of the blueprint's
-   required prompts since the app runs fine without it.
+6. No `FPL_ENTRY_ID` step needed here anymore -- each user links their own
+   FPL team from the My Team page itself (2026-08-18, see
+   `docs/learning-log.md`), not a server-wide env var.
 7. Free tier spins down after ~15 minutes idle, adding cold-start latency
    to the next request -- expected, not a bug. Bump to the $7/mo starter
    tier later if that latency ever actually bothers you (see

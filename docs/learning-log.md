@@ -3951,3 +3951,77 @@ anytime-scorer Player dropdown includes the Championship-only player, and
 logged a full real anytime-scorer bet on that Championship fixture/player
 through the actual UI end to end, confirming it appears correctly in "All
 bets" afterward.
+
+## 2026-08-18 -- My Team was still single-tenant under the hood
+
+A real report: "my team is just broken." The page loaded, but the fix
+wasn't a rendering bug -- it was that `GET /api/fpl/my-team` had never
+actually been made multi-user.
+
+**Root cause.** My Team was built in Phase 4, before real multi-user auth
+existed (that came in Phase 6, pulled forward from Phase 9 for the bets
+tracker). At the time, one server-wide `FPL_ENTRY_ID` env var was a
+reasonable stand-in -- there was only ever one user, so "the app's team"
+and "my team" were the same thing. When auth was added, `fpl.routes.ts`
+picked up `requireAuth` the same way `bets.routes.ts` did, which correctly
+gates "is *someone* logged in" -- but the handler underneath never read
+`req.userId`. It kept reading the same env var. Every logged-in user saw
+the exact same hardcoded team (or, in a deployment where `FPL_ENTRY_ID`
+was never set, a config error). Adding `requireAuth` to a route is not
+the same thing as making that route's *data* per-user -- the middleware
+answers "who is asking," but nothing forces a handler to actually use
+that identity once it's been gated. That's a distinct mistake worth
+naming for future-me: it looks like the fix (a 401 for logged-out users!)
+while leaving the real per-tenant bug completely intact underneath.
+
+**The fix.** A nullable `users.fpl_entry_id` column (migration
+1701000000025) replaces the env var entirely -- `env.fplEntryId` is
+deleted from `config/env.ts`. Each user links their own team through a
+new `POST /api/fpl/link`, which live-validates the ID against FPL's real
+`/entry/{id}/` endpoint *before* saving it (catches a typo immediately
+with a clear message, rather than silently saving a bad ID that only
+surfaces as confusion later on the My Team page itself). `GET
+/api/fpl/my-team` now calls `getMyTeamForUser(req.userId)`, which looks up
+*that* user's own `fpl_entry_id` and returns a discriminated union:
+`{ linked: false } | ({ linked: true } & MyTeam)`. That's a small but
+deliberate type-design choice -- "hasn't linked a team yet" is the
+*common* state for a fresh user, not an error, so it's modeled as a
+normal variant the frontend branches on, not something caught out of a
+thrown exception. It's the same "empty/absent means not confidently known
+yet, not broken" convention this app already uses elsewhere (e.g.
+`FixtureSummary.topScorers: []` when no scorer prediction exists yet).
+The frontend (`MyTeamPage.tsx`) was rewritten from a plain `useFetch` read
+to an owned fetch/refresh/mutate cycle (the same shape `BetsPage.tsx`
+already established) because linking is a mutation that needs to
+invalidate the same GET the page reads: unlinked users see a short
+explainer plus a team-ID input; linked users see the existing squad view
+unchanged, plus a small "not your team? link a different one" toggle.
+
+**Verification, and an honest limit on how far it could go here.** Playwright
+confirmed a fresh registered user sees the link prompt (not a stale or
+shared team -- the actual bug, fixed), that blank submission is rejected
+client-side, and that submitting a numeric ID reaches the backend and
+attempts a real live FPL call. That live call currently can't succeed
+*from this sandbox*: the app's own `fetch()` calls do leave the
+container (confirmed they're not simply blocked outbound -- unlike a bare
+`curl`, which returns nothing at all here), but FPL/Cloudflare returns a
+`403` regardless of which entry ID is tried, including a low, deliberately
+generic ID chosen specifically to avoid probing any real person's actual
+account. This isn't a new gap this fix introduced -- `docs/PHASES.md`'s
+original Phase 4 checklist already flagged exactly this: "Untested
+against a real entry -- needs a real FPL_ENTRY_ID and a machine with
+network access." Rather than leave the per-user read path unverified
+because of that, I drove it through SQL directly: manually set one test
+user's `fpl_entry_id`, then hit `/api/fpl/my-team` with that user's real
+JWT and confirmed two things at once -- that user now gets a graceful
+502 from the live-fetch attempt (proving the DB read and the downstream
+call both fire on the right row), while a *second*, still-unlinked test
+user hitting the same endpoint still correctly gets `{"linked":false}`
+(proving isolation -- not just "it reads *a* row," but "it reads *this
+user's* row and no one else's," which is the actual bug this fix needed
+to close). Backend (`tsc --noEmit`, 31 `vitest` tests) and frontend
+(`tsc -b`) all pass clean. The one E2E spec (`bets-flow.spec.ts`) fails in
+this sandbox on an unrelated precondition -- the scratch DB has no
+seeded fixtures, which its own README lists as a prerequisite it doesn't
+set up for you -- and never exercises the FPL code path at all, so it's
+a pre-existing environment gap, not a regression from this change.

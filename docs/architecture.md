@@ -57,15 +57,18 @@ Notes:
 - Groq API calls go through a caching check first (common explainer
   queries shouldn't hit the API twice).
 - **One deliberate exception to "services only read Postgres":**
-  `GET /api/fpl/my-team` (Phase 4) calls FPL's public entry endpoints
-  *live, per request*, not through the batch seed pipeline. Squad picks are
-  single-user, low-volume, and change weekly (transfers) — pre-seeding them
-  the way historical fixtures are seeded would mean the data is stale the
-  moment a transfer happens, for no caching benefit (there's no rate-limit
-  budget to protect here the way there is for API-Football). Everything
-  else in the API still only reads Postgres; this is the one place a
-  request handler reaches out to a third party directly, and it's
-  deliberate, not a crack in the pattern.
+  `GET /api/fpl/my-team` (Phase 4, made per-user 2026-08-18) calls FPL's
+  public entry endpoints *live, per request*, not through the batch seed
+  pipeline. Each user links their own FPL team ID (`users.fpl_entry_id`,
+  set via `POST /api/fpl/link` — see `docs/erd.md`), and their squad picks
+  are fetched live for that ID on each request. This stays low-volume and
+  change weekly (transfers) per user — pre-seeding them the way historical
+  fixtures are seeded would mean the data is stale the moment a transfer
+  happens, for no caching benefit (there's no rate-limit budget to protect
+  here the way there is for API-Football). Everything else in the API
+  still only reads Postgres; this is the one place a request handler
+  reaches out to a third party directly, and it's deliberate, not a crack
+  in the pattern.
 
 ## Keeping data current (designed in Phase 1, script built 2026-08-15, scheduling deferred to Phase 10)
 
