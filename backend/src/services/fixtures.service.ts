@@ -160,11 +160,39 @@ export interface FixtureTeamStats {
   xg: number | null;
 }
 
+export interface FixtureLineupPlayer {
+  playerId: number;
+  playerName: string;
+  playerPhotoUrl: string | null;
+  teamId: number;
+  isStarting: boolean;
+  shirtNumber: number | null;
+  position: string | null;
+  // The four below are only populated once fixture_player_stats has been
+  // backfilled for this match (post-match, see backfillLineupsForCompetitionSeason)
+  // -- a pre-match/matchday-only lineup (seedTodaysLineups) has real
+  // players and positions but no performance numbers yet, same
+  // "null means not known yet, not zero" convention used everywhere else.
+  minutesPlayed: number | null;
+  goals: number | null;
+  assists: number | null;
+  rating: number | null;
+  yellowCards: number | null;
+  redCards: number | null;
+}
+
 export interface FixtureDetail extends FixtureSummary {
   venue: string | null;
   referee: string | null;
   teamStats: FixtureTeamStats[];
   odds: FixtureOdds[];
+  // Empty (not null) whenever no lineup has been captured for this fixture
+  // yet -- either it's more than a few hours from kickoff (see
+  // seedTodaysLineups's lookahead window) or API-Football simply has
+  // nothing for it. One flat list carrying each player's teamId, same
+  // shape as topScorers above, rather than pre-split into home/away --
+  // the frontend already knows which id is which team.
+  lineup: FixtureLineupPlayer[];
 }
 
 export async function getFixtureById(id: number): Promise<FixtureDetail | undefined> {
@@ -185,7 +213,7 @@ export async function getFixtureById(id: number): Promise<FixtureDetail | undefi
   const f = fixtureResult.rows[0];
   if (!f) return undefined;
 
-  const [statsResult, oddsResult, predictionResult, scorersResult] = await Promise.all([
+  const [statsResult, oddsResult, predictionResult, scorersResult, lineupResult] = await Promise.all([
     pool.query(
       `SELECT team_id, is_home, shots, shots_on_target, corners, fouls, yellow_cards, red_cards, xg
        FROM fixture_team_stats WHERE fixture_id = $1`,
@@ -210,6 +238,16 @@ export async function getFixtureById(id: number): Promise<FixtureDetail | undefi
        WHERE pgp.fixture_id = $1
        ORDER BY pgp.prob_scores DESC
        LIMIT ${TOP_SCORERS_PER_FIXTURE}`,
+      [id],
+    ),
+    pool.query(
+      `SELECT fl.player_id, p.full_name, p.photo_url, fl.team_id, fl.is_starting, fl.shirt_number, fl.position,
+         fps.minutes_played, fps.goals, fps.assists, fps.rating, fps.yellow_cards, fps.red_cards
+       FROM fixture_lineups fl
+       JOIN players p ON p.id = fl.player_id
+       LEFT JOIN fixture_player_stats fps ON fps.fixture_id = fl.fixture_id AND fps.player_id = fl.player_id
+       WHERE fl.fixture_id = $1
+       ORDER BY fl.is_starting DESC, fl.shirt_number ASC NULLS LAST, p.full_name ASC`,
       [id],
     ),
   ]);
@@ -265,6 +303,21 @@ export async function getFixtureById(id: number): Promise<FixtureDetail | undefi
       teamId: r.team_id,
       expectedGoals: Number(r.expected_goals),
       probScores: Number(r.prob_scores),
+    })),
+    lineup: lineupResult.rows.map((r) => ({
+      playerId: r.player_id,
+      playerName: r.full_name,
+      playerPhotoUrl: r.photo_url,
+      teamId: r.team_id,
+      isStarting: r.is_starting,
+      shirtNumber: r.shirt_number,
+      position: r.position,
+      minutesPlayed: r.minutes_played,
+      goals: r.goals,
+      assists: r.assists,
+      rating: r.rating === null ? null : Number(r.rating),
+      yellowCards: r.yellow_cards,
+      redCards: r.red_cards,
     })),
   };
 }

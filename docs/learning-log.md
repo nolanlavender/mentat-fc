@@ -3753,3 +3753,89 @@ London's ring of 7 crests now has visible dashed spokes converging on a
 single gold dot, same for the smaller Manchester/Liverpool/Sheffield
 pairs, and it holds up in dark mode without any theme-specific code
 (`--accent-border`/`--gold` are already theme-aware tokens).
+
+## 2026-08-18 -- Matchday lineup capture, a real caching bug it uncovered, and game pages
+
+Two asks: get real starting lineups on game days (not just after full
+time), and a match detail page showing team/player stats for a finished
+game. A third -- "grab lineups and retrain models" -- turned out to
+partly answer itself once I actually read `goal_scorer.py` again instead
+of assuming: `allocate_team_goals` distributes a fixture's predicted
+goals across every player who clears a season-level appearance-rate
+threshold. It has **no per-fixture "is this specific player confirmed to
+start today" input at all** -- so capturing today's lineup and
+immediately retraining wouldn't change that day's predictions one bit,
+since the model never looks at the lineup it would just have captured.
+That's exactly the player/injury/form-driven redesign flagged as future
+work, not something to fake with a no-op retrain now. Decided (and
+explained, not silently skipped) to leave the daily retrain exactly as it
+was -- once a day, on finished results -- and keep lineup capture as its
+own thing.
+
+**The real design fork was a caching bug, not a feature decision.**
+`backfillLineupsForCompetitionSeason` (the existing post-match backfill)
+only ever considers `status = 'finished'` fixtures, and migration
+`1701000000020`'s own comment explains why: `fetchCached`'s disk cache
+has no expiry, so a not-yet-played fixture swept into a backfill chunk
+would get its (necessarily empty) response cached under that fixture's
+key forever. Building a NEW check that runs on `scheduled` fixtures on
+purpose -- the whole point here -- walks straight back into that same
+landmine: check a fixture before its lineup is announced, and the empty
+result gets written to `raw/api-football/lineups/{id}.json` with no TTL,
+so *every later recheck, including the one that would finally see the
+real lineup*, just replays that stale empty file forever. Caught this by
+tracing `callApiFootball`'s actual caching mechanics before writing the
+new selection query, not after something broke. Fixed with a `skipCache`
+option on `callApiFootball`/`seedApiFootballLineup` -- bypasses the disk
+cache entirely for this one call path (still goes through budget
+tracking and retries) so a matchday recheck is always a real live call.
+Correct default behavior for the *existing* finished-only backfill is
+untouched -- `skipCache` is opt-in, and nothing about the post-match path
+changed.
+
+`seedTodaysLineups` (`backend/seed/sources/api-football.ts`) is the new
+selection query: fixtures with `status != 'finished'` kicking off within
+a generous ±3 hour window of now, with no `fixture_lineups` rows yet.
+Deliberately does NOT touch `lineups_checked_at` -- that column's whole
+meaning is "checked once finished, so empty is permanent" (the same
+migration above), and a pre-match empty result means something
+completely different ("not announced yet, try again soon"). A fixture
+whose lineup isn't out yet just gets rechecked next run, at the cost of
+one live call each time, until real rows land (then `NOT EXISTS` excludes
+it) or the match finishes and the regular backfill takes over. New hourly
+`.github/workflows/matchday-lineups.yml` runs it -- hourly is comfortably
+affordable now that the account is confirmed on API-Football's paid
+7500/day Pro tier rather than the free 100/day `docs/CLAUDE.md` still
+described (fixed that stale note while I was in there; a non-matchday run
+of this workflow costs one cheap DB query and zero API calls anyway,
+since the selection query only matches something actually kicking off
+soon).
+
+**Game pages**: `GET /api/fixtures/:id` already computed almost
+everything needed (team stats, odds, the model's prediction, top scorer
+picks) -- it just never joined `fixture_lineups`/`fixture_player_stats`
+together into one per-player list. Added exactly that (`FixtureDetail.lineup`),
+one flat array carrying each player's `teamId` rather than pre-split into
+home/away, the same shape `topScorers` already uses -- the frontend
+splits it per team itself. New `/fixtures/:id` page (`FixturePage.tsx`)
+adapts to whatever state the fixture is actually in rather than being two
+separate pages: a finished match shows the real score, match stats, and
+each player's actual minutes/goals/assists/cards/rating; an upcoming one
+shows the model's prediction and the closing market price instead of a
+score, and either the real lineup (if captured) or "no lineup yet" if
+not -- same page, same query, just different fields populated. Linked in
+from the Home page's upcoming/recent fixture lists and the Predictions
+page's fixture rows, both of which pointed nowhere clickable before.
+
+Verified against real seeded data end-to-end, not just each piece in
+isolation: a finished fixture with a full lineup, per-player stats, team
+stats, a prediction, and closing odds rendered correctly (score, stats
+table, both teams' starting XI/subs with real goals/assists/cards/rating
+per player); an upcoming fixture with a prediction but no lineup yet
+correctly showed the pre-match state. `seedTodaysLineups`'s exact
+selection query was run standalone against five seeded candidate
+fixtures covering every branch (in-window, outside the lookahead,
+kicked-off-but-not-finished, already-finished, and already-has-a-lineup)
+and selected precisely the two that should have matched, nothing else.
+Real click-through from both the Home page and the Predictions page
+confirmed the new links actually land on a working game page.
