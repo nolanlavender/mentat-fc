@@ -1,9 +1,32 @@
 import { Link, useParams } from 'react-router-dom';
 import { useFetch } from '../hooks/useFetch';
 import { apiUrl } from '../api/client';
-import type { FixtureDetail, FixtureLineupPlayer } from '../api/types';
+import type { FixtureDetail, FixtureLineupPlayer, FixtureOdds } from '../api/types';
 import { Crest, PlayerPhoto } from '../components/Crest';
 import { shortCode } from '../lib/teamDisplay';
+
+const TOP_SCORERS_SHOWN = 5;
+
+// Same "remove the bookmaker's margin" conversion model-service/app/data.py's
+// load_closing_match_winner_probabilities uses to build the evaluation
+// baseline: 1/price is each outcome's raw implied probability, and the
+// three don't sum to 1 (that gap is the bookmaker's overround), so they're
+// renormalized to sum to 1 -- a fair probability estimate, directly
+// comparable to the model's own probability instead of a mix of percentages
+// and decimal odds that takes real effort to eyeball against each other.
+function marketImpliedProbabilities(odds: FixtureOdds[]): { home: number; draw: number; away: number } | null {
+  const marketOdds = odds.filter((o) => o.bookmaker === 'market_avg' && o.market === 'match_winner' && o.snapshotType === 'closing');
+  const home = marketOdds.find((o) => o.outcome === 'home')?.price;
+  const draw = marketOdds.find((o) => o.outcome === 'draw')?.price;
+  const away = marketOdds.find((o) => o.outcome === 'away')?.price;
+  if (!home || !draw || !away) return null;
+
+  const impliedHome = 1 / home;
+  const impliedDraw = 1 / draw;
+  const impliedAway = 1 / away;
+  const total = impliedHome + impliedDraw + impliedAway;
+  return { home: impliedHome / total, draw: impliedDraw / total, away: impliedAway / total };
+}
 
 function formatKickoff(iso: string): string {
   return new Date(iso).toLocaleString(undefined, {
@@ -104,7 +127,7 @@ export function FixturePage() {
   const finished = data.status === 'finished';
   const homeStats = data.teamStats.find((s) => s.teamId === data.homeTeam.id) ?? null;
   const awayStats = data.teamStats.find((s) => s.teamId === data.awayTeam.id) ?? null;
-  const marketOdds = data.odds.filter((o) => o.bookmaker === 'market_avg' && o.market === 'match_winner' && o.snapshotType === 'closing');
+  const marketProbability = marketImpliedProbabilities(data.odds);
 
   return (
     <div className="page fixture-page">
@@ -152,14 +175,30 @@ export function FixturePage() {
               </>
             )}
           </p>
-          {marketOdds.length > 0 && (
+          {marketProbability && (
             <p>
-              Market (closing):{' '}
-              {marketOdds
-                .map((o) => `${o.outcome === 'home' ? shortCode(data.homeTeam) : o.outcome === 'away' ? shortCode(data.awayTeam) : 'Draw'} ${o.price.toFixed(2)}`)
-                .join(' · ')}
+              Market (closing, vig removed): {shortCode(data.homeTeam)} {formatPercent(marketProbability.home)} · Draw{' '}
+              {formatPercent(marketProbability.draw)} · {shortCode(data.awayTeam)} {formatPercent(marketProbability.away)}
             </p>
           )}
+        </section>
+      )}
+
+      {data.topScorers.length > 0 && (
+        <section>
+          <h2>Predicted goalscorers</h2>
+          <ol className="fixture-scorer-list">
+            {data.topScorers.slice(0, TOP_SCORERS_SHOWN).map((s) => (
+              <li key={s.playerId}>
+                <Link to={`/players/${s.playerId}`} className="fixture-lineup-link">
+                  <PlayerPhoto src={s.playerPhotoUrl} alt="" size={22} />
+                  {s.playerName}
+                  <span className="fixture-meta">({s.teamId === data.homeTeam.id ? shortCode(data.homeTeam) : shortCode(data.awayTeam)})</span>
+                </Link>
+                <span className="fixture-lineup-stats">{formatPercent(s.probScores)}</span>
+              </li>
+            ))}
+          </ol>
         </section>
       )}
 

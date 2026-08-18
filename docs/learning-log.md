@@ -3839,3 +3839,45 @@ kicked-off-but-not-finished, already-finished, and already-has-a-lineup)
 and selected precisely the two that should have matched, nothing else.
 Real click-through from both the Home page and the Predictions page
 confirmed the new links actually land on a working game page.
+
+## 2026-08-18 -- Apples to apples: model vs. market in the same unit
+
+Quick follow-up on the game page: "Model vs. market" showed the model's
+probabilities as percentages and the market's as raw decimal odds side by
+side -- technically both real numbers, but not actually comparable
+without doing the conversion in your head first, which defeats the point
+of putting them next to each other.
+
+Didn't invent a new conversion -- `model-service/app/data.py`'s
+`load_closing_match_winner_probabilities` already does exactly this for
+the evaluation baseline (`app.evaluate` compares the model against it),
+just never surfaced to a page: decimal odds -> raw implied probability is
+`1/price`; the three outcomes' raw implied probabilities don't sum to 1
+(that gap is the bookmaker's overround, its built-in margin), so they get
+renormalized to sum to 1 -- a "fair," vig-removed probability, the
+correct thing to compare a model's own probability against, not the
+bookmaker's actual quoted price. Reimplemented client-side in
+`FixturePage.tsx` (`marketImpliedProbabilities`) rather than adding it to
+`fixtures.service.ts` -- it's a presentation-only transform on data the
+page already has (`FixtureDetail.odds`), the same reasoning that's kept
+`yourImpliedProbability` in `bets.service.ts` as a plain function over
+already-fetched rows rather than its own query.
+
+Also added the "Predicted goalscorers" section that was supposed to be
+part of the original game-page build and got missed -- `FixtureDetail.topScorers`
+was already being fetched (same field the Predictions page's "Likely
+scorers" uses) but the game page just never rendered it. Ranked list,
+each player linking to their own page, team abbreviation, probability --
+shown regardless of whether the match has finished yet, since "the
+model's pre-match pick vs. who actually scored" (visible right below in
+the lineup section, once the match is finished) is exactly the kind of
+model-vs-reality comparison this app exists to surface.
+
+Verified against the same seeded fixture as the original game-page build,
+now with `player_goal_predictions` and `fixture_odds` rows added: model
+and market both render as percentages (58.0%/24.0%/18.0% vs. the manually-
+computed 53.7%/24.8%/21.5% from 1.80/3.90/4.50 -- checked the arithmetic
+by hand, not just eyeballed it), predicted goalscorers list correctly
+ranked by probability, and an upcoming fixture with no odds/scorer
+predictions seeded degrades cleanly (both sections just don't render, no
+crash) rather than showing an empty table or a NaN.
