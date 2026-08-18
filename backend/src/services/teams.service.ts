@@ -327,12 +327,33 @@ export interface SquadPlayer {
 }
 
 async function getSquad(teamId: number): Promise<SquadPlayer[]> {
-  // Populated from FPL (players.current_team_id), Premier League only --
-  // FPL has no Championship data. Championship team dashboards get an empty
-  // squad until fixture_lineups is backfilled and becomes the real source
-  // for this. See docs/erd.md's note on players.current_team_id.
+  // players.current_team_id comes from FPL, Premier League only -- a
+  // Championship player never gets it set, so this used to return an empty
+  // squad for every Championship team (docs/erd.md's original note on the
+  // column). Fixed the same way model-service/app/data.py's
+  // load_player_squad_appearances already resolves a player's "effective
+  // club" for the goal-scorer model: prefer current_team_id when set (FPL
+  // is live, reflects a transfer instantly), falling back to whichever team
+  // a player's most recent FINISHED fixture_lineups appearance was for --
+  // the only signal available for players FPL doesn't cover. Same
+  // real-world tradeoff as that model code accepted: an old appearance
+  // could in principle be stale (a player who left the two competitions
+  // entirely), but "most recent" naturally favors current reality, and this
+  // mirrors an already-reviewed, already-correct pattern rather than
+  // inventing a new one.
   const { rows } = await pool.query<{ id: number; full_name: string; position: string | null; photo_url: string | null }>(
-    `SELECT id, full_name, position, photo_url FROM players WHERE current_team_id = $1 ORDER BY position, full_name`,
+    `WITH most_recent_appearance AS (
+       SELECT DISTINCT ON (fl.player_id) fl.player_id, fl.team_id
+       FROM fixture_lineups fl
+       JOIN fixtures f ON f.id = fl.fixture_id
+       WHERE f.status = 'finished'
+       ORDER BY fl.player_id, f.kickoff_date DESC
+     )
+     SELECT p.id, p.full_name, p.position, p.photo_url
+     FROM players p
+     LEFT JOIN most_recent_appearance mra ON mra.player_id = p.id
+     WHERE COALESCE(p.current_team_id, mra.team_id) = $1
+     ORDER BY p.position, p.full_name`,
     [teamId],
   );
   return rows.map((r) => ({ id: r.id, fullName: r.full_name, position: r.position, photoUrl: r.photo_url }));

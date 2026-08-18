@@ -319,8 +319,17 @@ erDiagram
   until the paid-tier API-Football backfill runs. FPL's bootstrap-static
   already carries a player's current team directly and is always live, so
   it populates this column — but only for Premier League players (FPL has
-  no Championship data). Championship squads stay empty until lineups are
-  backfilled; a known, documented gap, not a bug in the dashboard endpoint.
+  no Championship data). **Fixed 2026-08-18** (`teams.service.ts`'s
+  `getSquad`): Championship squads used to just be empty because of that
+  gap, until the Bets page's anytime-scorer picker made it a real blocker,
+  not just a cosmetic one. Now falls back to whichever team a player's most
+  recent *finished* `fixture_lineups` appearance was for whenever
+  `current_team_id` is null — the same "prefer the live FPL signal, fall
+  back to appearance history" resolution `model-service/app/data.py`'s
+  `load_player_squad_appearances` already used for the goal-scorer model
+  (see `docs/learning-log.md`'s 2026-08-16/17 entries), reused rather than
+  reinvented. `current_team_id` still wins whenever it's set, so this
+  changes nothing about Premier League squads.
 - **`users`/`bets`/`bet_legs`**, added Phase 6. Originally designed
   single-user with no `user_id` at all (see git history); revised
   mid-Phase-6 once real multi-user login was actually wanted, pulling

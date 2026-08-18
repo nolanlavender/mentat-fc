@@ -3,6 +3,9 @@ import { authedGet, apiRequest } from '../api/client';
 import type { Bet, BetLeg, BetResult, BetsRoiSummary, SquadPlayer, Team } from '../api/types';
 import { positionGroup } from '../lib/positions';
 import { americanToDecimal, isValidAmericanOdds } from '../lib/odds';
+import { currentSeasonLabel } from '../lib/season';
+
+const COMPETITIONS = ['Premier League', 'Championship'] as const;
 
 interface UpcomingFixture {
   id: number;
@@ -62,8 +65,13 @@ export function BetsPage() {
   const [squadsByTeam, setSquadsByTeam] = useState<Record<number, SquadPlayer[]>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [seasonFilter, setSeasonFilter] = useState('');
+  // Defaults to the current season, all teams, all competitions -- "how
+  // have I done this year, overall" is the useful thing to see first;
+  // narrowing to a specific team/competition/past season is a deliberate
+  // filter action from there, not the default view.
+  const [seasonFilter, setSeasonFilter] = useState(currentSeasonLabel());
   const [teamFilter, setTeamFilter] = useState('');
+  const [competitionFilter, setCompetitionFilter] = useState('');
 
   const [draftLegs, setDraftLegs] = useState<DraftLeg[]>([]);
   const [legMarket, setLegMarket] = useState<Market>(MATCH_WINNER);
@@ -84,6 +92,7 @@ export function BetsPage() {
       const params = new URLSearchParams();
       if (seasonFilter) params.set('season', seasonFilter);
       if (teamFilter) params.set('teamId', teamFilter);
+      if (competitionFilter) params.set('competition', competitionFilter);
       const qs = params.toString() ? `?${params.toString()}` : '';
       const [betsRes, summaryRes] = await Promise.all([
         authedGet<Bet[]>(`/api/bets${qs}`),
@@ -99,12 +108,20 @@ export function BetsPage() {
 
   useEffect(() => {
     refresh();
-  }, [seasonFilter, teamFilter]);
+  }, [seasonFilter, teamFilter, competitionFilter]);
 
   useEffect(() => {
     const today = new Date().toISOString().slice(0, 10);
-    authedGet<UpcomingFixture[]>(`/api/fixtures?competition=Premier%20League&from=${today}&limit=50`)
-      .then(setFixtures)
+    // Premier League + Championship, merged -- deliberately not FA Cup
+    // (never a user-facing betting market, see docs/CLAUDE.md's "Data
+    // scope vs. app scope"). Two calls rather than an unfiltered fetch,
+    // same pattern PredictionsPage.tsx already uses to merge competitions.
+    Promise.all(
+      COMPETITIONS.map((c) =>
+        authedGet<UpcomingFixture[]>(`/api/fixtures?competition=${encodeURIComponent(c)}&from=${today}&limit=50`),
+      ),
+    )
+      .then((results) => setFixtures(results.flat().sort((a, b) => a.kickoffAt.localeCompare(b.kickoffAt))))
       .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
     authedGet<Team[]>('/api/teams')
       .then(setTeams)
@@ -301,6 +318,17 @@ export function BetsPage() {
               {teams?.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Competition
+            <select value={competitionFilter} onChange={(e) => setCompetitionFilter(e.target.value)}>
+              <option value="">All competitions</option>
+              {COMPETITIONS.map((c) => (
+                <option key={c} value={c}>
+                  {c}
                 </option>
               ))}
             </select>
