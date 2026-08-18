@@ -135,8 +135,15 @@ PL-only:
   deliberate scope boundary, not a data gap.
 - **Fantasy:** Premier League only — not a scope choice, just what FPL is.
   There's no Championship fantasy data to show.
-- **Betting tracker:** Premier League only for now — unchanged, revisit
-  deliberately if that ever needs to widen.
+- **Betting tracker:** Premier League **and Championship**, widened
+  2026-08-18 — the deliberate revisit this note asked for, prompted by a
+  real report that Championship teams were selectable but had no
+  fixtures/players to actually bet on. Match-winner and anytime-scorer
+  bets both cover both competitions now; anytime-scorer needed a real
+  fix alongside the widening, not just a fixture-list change — see
+  `docs/erd.md`'s `players.current_team_id` note for why Championship
+  squads used to come back empty. Still not FA Cup — never a real
+  betting market here, same as Team dashboards/predictions.
 - Championship/FA Cup data involving lower-tier opponents feeds the joint
   model as training signal even for matchups the app never predicts or
   displays.

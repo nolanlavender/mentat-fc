@@ -3881,3 +3881,73 @@ by hand, not just eyeballed it), predicted goalscorers list correctly
 ranked by probability, and an upcoming fixture with no odds/scorer
 predictions seeded degrades cleanly (both sections just don't render, no
 crash) rather than showing an empty table or a NaN.
+
+## 2026-08-18 -- Widening the Bets page to Championship, and a real "how did I do" default
+
+Real bug report, with a screenshot: picking Queens Park Rangers as the
+Team for an anytime-scorer bet left the Fixture dropdown permanently
+stuck on "Select an upcoming fixture…". Two separate causes stacked on
+top of each other, both real:
+
+1. **The mismatch bug.** The Bets page's Team dropdown was always
+   unscoped (`GET /api/teams`, every Premier League *and* Championship
+   club), but its Fixture fetch was hardcoded to `competition=Premier
+   League` only. Pick any Championship team and the fixture list the
+   dropdown filters against never had anything from that competition in
+   it in the first place -- not a loading glitch, a guaranteed empty
+   result every time.
+2. **A deeper gap underneath it.** Even with fixtures fixed, an
+   anytime-scorer leg still needs a real player list, and `getSquad`
+   (behind `/api/teams/:id/dashboard`) only ever returned players with
+   `current_team_id` set -- FPL-only, so every Championship team's squad
+   came back empty. Documented as a known gap back in Phase 2 (`docs/erd.md`),
+   but "documented" and "actually fine to ship on" are different things
+   once a real feature (this one) depends on it.
+
+Asked before touching anything, since `docs/CLAUDE.md` explicitly flags
+"Betting tracker: Premier League only for now" as a scope boundary to
+revisit *deliberately*, not accidentally: widen fully (match-winner AND
+anytime-scorer), match-winner only (skip the squad-data gap for now), or
+revert to Premier-League-only and just stop the Team dropdown from
+offering Championship teams. Chose the full widen.
+
+`getSquad`'s fix reuses a pattern this codebase already trusted for
+exactly this class of problem, rather than inventing a new one:
+`model-service/app/data.py`'s `load_player_squad_appearances` resolves a
+player's "effective club" for the goal-scorer model the same way --
+prefer `current_team_id` when FPL has it, fall back to whichever team a
+player's most recent *finished* `fixture_lineups` appearance was for when
+it doesn't. `getSquad` now does the identical `COALESCE(current_team_id,
+most_recent_finished_appearance.team_id)` resolution. Premier League
+squads are untouched (their `current_team_id` always wins); Championship
+squads now resolve for real instead of coming back empty. The Bets
+page's fixture fetch was widened the same way `PredictionsPage.tsx`
+already merges two competitions -- two parallel calls, not an unfiltered
+one (deliberately still excluding FA Cup, never a real betting market
+here).
+
+**Separately, the Record section's summary had no useful default at
+all** -- season was a blank free-text box ("e.g. 2024/25"), so the first
+thing you saw on the page was every bet ever logged, lumped together,
+with no competition filter to narrow it at all. Added a `currentSeasonLabel()`
+helper (`frontend/src/lib/season.ts`) -- every season in this app is
+seeded starting August 1st, so "the current season" is derivable from
+today's date with that same cutover, no round-trip to the backend needed
+just to ask what season it thinks it is. Pre-fills the season field
+(still editable, not locked) so the very first thing you see is "how
+have I done this season, overall" -- and added the competition filter
+that was simply missing (the backend's `getRoiSummary`/`listBets` already
+accepted a `competition` query param; nothing on the frontend ever sent
+one).
+
+Verified end-to-end against real seeded data, not just the query changes
+in isolation: `getSquad`'s SQL confirmed directly against a Championship
+player reachable only through appearance history (no `current_team_id`
+at all); real browser flow registered a user, confirmed the season field
+pre-filled to the correct current season and the competition dropdown had
+the right options, confirmed both the match-winner and anytime-scorer
+Fixture dropdowns now include a Championship fixture, confirmed the
+anytime-scorer Player dropdown includes the Championship-only player, and
+logged a full real anytime-scorer bet on that Championship fixture/player
+through the actual UI end to end, confirming it appears correctly in "All
+bets" afterward.
