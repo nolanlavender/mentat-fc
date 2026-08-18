@@ -590,9 +590,25 @@ export async function upsertPlayerForTeamRoster(
   // No confident match against this team's roster candidates (new signing
   // not yet linked elsewhere, or a genuinely ambiguous name) -- fall
   // through to the normal golden-record path, same as any other
-  // API-Football sighting.
+  // API-Football sighting, but matched by name only, NOT this endpoint's
+  // own numeric id.
+  //
+  // Real crash found in production 2026-08-18: passing p.externalApiFootballId
+  // straight through here violates this file's own documented rule (see
+  // this function's own comment above) that this endpoint's id space
+  // doesn't always agree with /fixtures/lineups' -- upsertPlayerGoldenRecord
+  // treats ANY externalApiFootballId it's given as the 'api_football'
+  // source specifically, the same space lineups/player-stats use. When
+  // this endpoint's numeric id for one real person collides with a
+  // DIFFERENT real person's already-linked lineups-sourced id (the exact
+  // shape of gap the Reece James example above documents), the unhandled
+  // INSERT hit players_external_api_football_id_key's unique constraint
+  // and crashed the whole batch, well before the run ever reached teams
+  // later in the list. Every exit path in this function already links the
+  // id under its own 'api_football_squads' source instead (see below) --
+  // that's the correct, collision-safe place for it; it was never meant to
+  // reach 'api_football' at all.
   const id = await upsertPlayerGoldenRecord(pool, {
-    externalApiFootballId: p.externalApiFootballId,
     fullName: p.fullName,
     photoUrl: p.photoUrl,
   });
