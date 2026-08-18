@@ -682,6 +682,72 @@ export interface FixtureInput {
 }
 
 export async function upsertFixture(pool: Pool, f: FixtureInput): Promise<number> {
+  // Real crash found in production 2026-08-18: the natural key
+  // (competition_season_id, home_team_id, away_team_id, kickoff_date) is
+  // the right PRIMARY dedup target (see migration 1701000000006's comment
+  // -- it's what lets a CSV-seeded row and a later API-Football pass agree
+  // on the same real fixture with no shared id space between sources), but
+  // it silently assumed kickoff_date never changes for a given real match.
+  // A rescheduled fixture (postponement, a TV-driven date change) is the
+  // same real match with the same external_api_football_id, but a natural
+  // key that no longer matches whatever it was first seeded under. The
+  // INSERT ... ON CONFLICT below only ever targets the natural key, so a
+  // reschedule made it attempt a fresh INSERT instead of finding the
+  // existing row -- and that INSERT collided with the separate partial
+  // unique index on external_api_football_id
+  // (fixtures_external_api_football_id_idx), crashing the whole seed run
+  // instead of just updating the date.
+  //
+  // Fixed by checking external_api_football_id FIRST when the caller has
+  // one -- API-Football's own numeric id is durable across a reschedule in
+  // a way the natural key isn't, the same "most reliable identifier first"
+  // principle upsertPlayerGoldenRecord already uses for players. Falls
+  // back to the natural-key upsert, unchanged, when there's no external id
+  // yet (a CSV-seeded row not yet enriched by an API-Football pass).
+  if (f.externalApiFootballId !== undefined) {
+    const { rows: existing } = await pool.query<{ id: number }>(`SELECT id FROM fixtures WHERE external_api_football_id = $1`, [
+      f.externalApiFootballId,
+    ]);
+    if (existing[0]) {
+      const id = existing[0].id;
+      await pool.query(
+        `UPDATE fixtures SET
+           competition_season_id = $2,
+           home_team_id = $3,
+           away_team_id = $4,
+           kickoff_at = $5,
+           kickoff_date = $6,
+           status = $7,
+           round = COALESCE($8, round),
+           home_score = COALESCE($9, home_score),
+           away_score = COALESCE($10, away_score),
+           home_score_ht = COALESCE($11, home_score_ht),
+           away_score_ht = COALESCE($12, away_score_ht),
+           referee = COALESCE($13, referee),
+           venue = COALESCE($14, venue),
+           updated_at = now()
+         WHERE id = $1`,
+        [
+          id,
+          f.competitionSeasonId,
+          f.homeTeamId,
+          f.awayTeamId,
+          f.kickoffAt,
+          f.kickoffDate,
+          f.status,
+          f.round ?? null,
+          f.homeScore ?? null,
+          f.awayScore ?? null,
+          f.homeScoreHt ?? null,
+          f.awayScoreHt ?? null,
+          f.referee ?? null,
+          f.venue ?? null,
+        ],
+      );
+      return id;
+    }
+  }
+
   const { rows } = await pool.query<{ id: number }>(
     `INSERT INTO fixtures (
        competition_season_id, home_team_id, away_team_id, kickoff_at, kickoff_date,
