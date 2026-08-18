@@ -4346,3 +4346,72 @@ have caught, that a scratch-Postgres reproduction with synthetic data
 never would) surface once fixtures/lineups/rosters are all flowing for
 real. Worth treating the next few days' runs as still being watched, not
 assumed clean just because this specific crash is fixed.
+
+## 2026-08-18 -- A third crash in the same run, and the real question it raised: is the id scheme itself wrong?
+
+Immediately after the fixtures reschedule fix, the very next daily-refresh
+step (`db:seed:backfill-lineups`) hit a third crash, same day:
+`duplicate key value violates unique constraint "players_natural_key_key"`
+inside `upsertPlayerGoldenRecord`. Asked directly, given the pattern: is
+the deterministic-hash id scheme itself the wrong approach?
+
+**Answer: no, the scheme's fine -- three unrelated write paths shared the
+identical unhandled failure mode.** `players.natural_key` (migration
+1701000000013) is `md5(full_name | date_of_birth)`, a STORED generated
+column -- Postgres recomputes and re-enforces its uniqueness on ANY write
+that touches either input column, not just on INSERT. The crash was in
+`upsertPlayerGoldenRecord`'s early-return branch: a player already
+correctly identified by their own stable `external_api_football_id`
+(never in doubt) was having its `full_name` upgraded from an abbreviated
+form and/or its `date_of_birth` filled in for the first time -- and the
+resulting name+DOB combination already belonged to a completely different
+row (almost certainly the same real person's FPL-seeded duplicate,
+created before this row ever got its own external id linked). The UPDATE
+assumed success and let Postgres's own constraint be the check, exactly
+like the two crashes before it today (`players_external_api_football_id_key`
+from the squads-endpoint fallback, `fixtures_external_api_football_id_idx`
+from a reschedule) -- three different columns, three different tables,
+one identical root shape: *write first, let the database discover the
+collision, crash instead of deciding what it means.*
+
+**Fixed the same way as the fixtures crash: check before writing, not
+after.** Before the UPDATE, compute what the row's final `full_name`/
+`date_of_birth` would be and query whether a *different* row already owns
+that exact natural_key. If yes, skip writing just those two columns (every
+other field -- nationality, position, `external_fpl_id`, photo -- still
+updates normally) and log the collision instead of crashing. Deliberately
+did **not** attempt an automatic merge here, even though this file already
+has one (`repair-duplicate-players.ts`'s `mergeOrphan`, built for exactly
+this kind of duplicate): that script runs deliberately, once, with its own
+review of what it's about to do -- reaching for the same machinery blind,
+mid-batch, inside a live seed run that a whole daily pipeline depends on
+completing, is a different risk profile than the same merge run on
+purpose. A detected collision is real, useful signal (something worth
+reconciling with that script) -- it doesn't have to be resolved in the
+same moment it's discovered.
+
+Verified against a scratch-Postgres reproduction of the exact shape:
+seeded an api_football-linked row with an abbreviated name and no DOB,
+plus a separate FPL-seeded row already holding the real full name and
+real DOB, then replayed the exact call that crashes in production (a
+later sighting under the same external id, now offering the upgraded name
+and the colliding DOB). Confirmed it resolves without crashing, leaves
+both the name and DOB untouched on the original row (no data silently
+overwritten into a bad state), and leaves the other row completely
+unaffected. Separately confirmed a genuinely non-colliding name/DOB update
+still applies exactly as before. Backend `tsc --noEmit` and all 31
+`vitest` tests pass clean.
+
+**The actual, real answer to "should the ids work differently":** the
+recurring gap across all three crashes wasn't the ids -- deterministic
+hashes and stable external ids are still the right design, doing exactly
+what they're for (letting independent sources agree on the same row
+without a shared id space). It's that this file's UPDATE statements, in
+three separate places, never checked whether a write would collide with
+an already-claimed identity before attempting it. Worth treating as one
+real, general lesson rather than three unrelated bugs: any UPDATE
+touching a uniqueness-constrained (or generated-and-constrained) column
+needs a check-first step, the same pattern now applied in all three
+places today. Not auditing every remaining `UPDATE` in this file for the
+same shape right now -- flagging it here as the thing to actually watch
+for, rather than assuming these three were the only ones.

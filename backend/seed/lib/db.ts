@@ -302,16 +302,68 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
       // never the other direction, so a good name can't get clobbered by a
       // later abbreviated sighting.
       const shouldUpgradeName = parseAbbreviatedName(existingFullName) !== null && parseAbbreviatedName(p.fullName) === null;
+
+      // Real crash found in production 2026-08-18: full_name and
+      // date_of_birth both feed players.natural_key (a STORED generated
+      // column -- migration 1701000000013), so writing either one here
+      // recomputes it immediately. If the resulting name+DOB combination
+      // already belongs to a DIFFERENT row (this row was originally
+      // created DOB-less from one API-Football sighting; a separate row
+      // already exists for the exact same real name+DOB, most likely an
+      // FPL-seeded duplicate of the same real person), the UPDATE itself
+      // hits players_natural_key_key's unique constraint and crashes.
+      // This row's own identity was never in question (matched by its own
+      // stable external_api_football_id) -- only what to do once the
+      // requested change would collide with someone else's already-claimed
+      // identity. Same shape as today's other two production crashes: an
+      // UPDATE assumed success on a uniqueness-constrained column instead
+      // of checking first.
+      //
+      // Rather than guess at a merge mid-batch, this checks first and, if
+      // writing name/DOB would collide, simply leaves both untouched for
+      // now (every other field still updates normally) and logs the
+      // collision -- no data lost, no batch-wide crash. This file already
+      // has dedicated, deliberately-run merge tooling for exactly this
+      // (see repair-duplicate-players.ts), built to reconcile a real
+      // duplicate on purpose, with its own safety checks -- not something
+      // to attempt blind, mid-batch, inside a live seed run.
+      const finalFullName = shouldUpgradeName ? p.fullName : existingFullName;
+      const { rows: collisionRows } = await pool.query<{ id: number }>(
+        `SELECT p2.id
+         FROM players p1
+         JOIN players p2 ON p2.id != p1.id
+         WHERE p1.id = $1
+           AND p2.natural_key = md5(lower(trim($2)) || '|' || coalesce((COALESCE(p1.date_of_birth, $3) - date '1970-01-01')::text, ''))`,
+        [id, finalFullName, p.dateOfBirth ?? null],
+      );
+      const wouldCollide = collisionRows.length > 0;
+      if (wouldCollide) {
+        console.warn(
+          `upsertPlayerGoldenRecord: skipping name/DOB update for player ${id} ("${existingFullName}") -- ` +
+            `would collide with player ${collisionRows[0].id}'s natural_key. Likely a real duplicate; ` +
+            `reconcile with repair-duplicate-players.ts.`,
+        );
+      }
       await pool.query(
         `UPDATE players SET
-           full_name = CASE WHEN $7 THEN $8 ELSE full_name END,
-           date_of_birth = COALESCE(date_of_birth, $2),
+           full_name = CASE WHEN $7 AND NOT $9 THEN $8 ELSE full_name END,
+           date_of_birth = CASE WHEN $9 THEN date_of_birth ELSE COALESCE(date_of_birth, $2) END,
            nationality = COALESCE($3, nationality),
            position = COALESCE($4, position),
            external_fpl_id = COALESCE($5, external_fpl_id),
            photo_url = COALESCE(photo_url, $6)
          WHERE id = $1`,
-        [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.photoUrl ?? null, shouldUpgradeName, p.fullName],
+        [
+          id,
+          p.dateOfBirth ?? null,
+          p.nationality ?? null,
+          p.position ?? null,
+          p.externalFplId ?? null,
+          p.photoUrl ?? null,
+          shouldUpgradeName,
+          p.fullName,
+          wouldCollide,
+        ],
       );
       if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
       return id;
