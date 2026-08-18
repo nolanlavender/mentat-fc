@@ -286,6 +286,8 @@ export interface BetsRoiSummary {
   winRatePercent: number | null;
 }
 
+export type MyTeamResponse = { linked: false } | ({ linked: true } & MyTeam);
+
 export interface MyTeam {
   entryName: string;
   managerName: string;

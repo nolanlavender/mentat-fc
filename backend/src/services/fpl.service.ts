@@ -1,15 +1,14 @@
 import { pool } from '../db/pool.js';
-import { env } from '../config/env.js';
 import { AppError, UpstreamError } from '../lib/errors.js';
 
 const FPL_BASE = 'https://fantasy.premierleague.com/api';
 
 // Live, per-request calls to FPL's public entry endpoints -- deliberately
 // NOT run through the seed pipeline's fetch-if-absent cache. That cache
-// exists to protect a scarce resource (API-Football's 100/day cap); squad
-// picks are single-user, low-volume, and change weekly (transfers), so
-// there's no budget to protect here. Caching this would only reintroduce
-// staleness for something cheap enough to just fetch fresh every time.
+// exists to protect a scarce resource (API-Football's 100/day cap); a
+// squad fetch is low-volume and changes weekly (transfers), so there's no
+// budget to protect here. Caching this would only reintroduce staleness
+// for something cheap enough to just fetch fresh every time.
 //
 // The /entry/{id}/ shape is now confirmed against a real response (tested
 // live during pre-season 2026-07-30: current_event correctly came back
@@ -89,6 +88,12 @@ export interface MyTeam {
   isPreview: boolean;
 }
 
+// A discriminated union, not MyTeam-or-null: `linked: false` is a normal,
+// common state (most users haven't linked a team yet), not an error to
+// throw and catch. Keeps the frontend's "show the link form" branch a
+// plain type check instead of parsing an error message.
+export type MyTeamResponse = { linked: false } | ({ linked: true } & MyTeam);
+
 // entry.current_event is null before the season's first deadline, but a
 // squad may already be saved for gameweek 1 -- try that as a preview
 // instead of only ever saying "nothing to show." A 404 here specifically
@@ -104,18 +109,14 @@ async function fetchPicksOrNull(entryId: number, eventId: number): Promise<FplPi
   }
 }
 
-export async function getMyTeam(): Promise<MyTeam> {
-  if (!env.fplEntryId) {
-    throw new AppError('FPL_ENTRY_ID is not configured -- set it in backend/.env to use this endpoint.', 400);
-  }
-
-  const entry = await fetchFplLive<FplEntry>(`/entry/${env.fplEntryId}/`);
+async function getMyTeam(entryId: number): Promise<MyTeam> {
+  const entry = await fetchFplLive<FplEntry>(`/entry/${entryId}/`);
   const isPreview = !entry.current_event;
   const eventId = entry.current_event ?? 1;
 
   const picksData = isPreview
-    ? await fetchPicksOrNull(env.fplEntryId, eventId)
-    : await fetchFplLive<FplPicksResponse>(`/entry/${env.fplEntryId}/event/${eventId}/picks/`);
+    ? await fetchPicksOrNull(entryId, eventId)
+    : await fetchFplLive<FplPicksResponse>(`/entry/${entryId}/event/${eventId}/picks/`);
 
   if (!picksData) {
     throw new AppError('No squad saved for gameweek 1 yet -- pick your team on fantasy.premierleague.com first.', 400);
@@ -165,4 +166,28 @@ export async function getMyTeam(): Promise<MyTeam> {
     players,
     isPreview,
   };
+}
+
+export async function getMyTeamForUser(userId: number): Promise<MyTeamResponse> {
+  const { rows } = await pool.query<{ fpl_entry_id: number | null }>('SELECT fpl_entry_id FROM users WHERE id = $1', [userId]);
+  const fplEntryId = rows[0]?.fpl_entry_id;
+  if (!fplEntryId) return { linked: false };
+  const team = await getMyTeam(fplEntryId);
+  return { linked: true, ...team };
+}
+
+// Confirms the id is a real FPL entry (live fetch, not just a positive
+// integer check) before saving it -- a typo'd id would otherwise save
+// silently and only surface as a confusing failure the next time someone
+// loads "My Team", far from where the mistake actually happened.
+export async function linkFplEntry(userId: number, fplEntryId: number): Promise<void> {
+  try {
+    await fetchFplLive<FplEntry>(`/entry/${fplEntryId}/`);
+  } catch (err) {
+    if (err instanceof UpstreamError && err.upstreamStatus === 404) {
+      throw new AppError(`No FPL team found with id ${fplEntryId} -- double check the number from fantasy.premierleague.com.`, 400);
+    }
+    throw err;
+  }
+  await pool.query('UPDATE users SET fpl_entry_id = $1 WHERE id = $2', [fplEntryId, userId]);
 }

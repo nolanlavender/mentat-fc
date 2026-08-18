@@ -206,6 +206,7 @@ erDiagram
         text email UK
         text password_hash
         timestamptz created_at
+        int fpl_entry_id "nullable -- this user's own FPL team, self-linked"
     }
     bets {
         int id PK
@@ -354,6 +355,21 @@ erDiagram
   `void`) that never grow, unlike `market`/`selection`. `users.password_hash`
   is a bcrypt hash, never a plaintext password — one-way by design,
   verified at login via `bcrypt.compare`, never decrypted.
+- **`users.fpl_entry_id`** (added 2026-08-18, migration
+  1701000000025) fixes a real bug: My Team was originally built in Phase 4
+  around a single server-wide `FPL_ENTRY_ID` env var, before multi-user
+  login existed. When auth was bolted on later, the route gained a
+  `requireAuth` check but the handler never actually used `req.userId` --
+  every logged-in user still saw the one team named in the env var (or a
+  config error if it was unset). Fix: a nullable `fpl_entry_id` column
+  directly on `users`, set via a new `POST /api/fpl/link` endpoint that
+  live-validates the ID against FPL's real API before saving (so a typo
+  fails immediately with a clear message, not silently). `GET
+  /api/fpl/my-team` now returns a discriminated union --
+  `{ linked: false } | { linked: true, ...team }` -- so "hasn't linked a
+  team yet" renders as a normal onboarding prompt, not an error, matching
+  this codebase's "empty/null means not confidently known yet" convention
+  used elsewhere (e.g. `topScorers: []`).
 - **`bets.odds_override_decimal`** (added 2026-08-17, migration
   1701000000024) is the one deliberate exception to "derive, don't
   duplicate" above: combined odds still *default* to the product of each
