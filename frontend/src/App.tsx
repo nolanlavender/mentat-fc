@@ -33,9 +33,9 @@ function Nav() {
         Mentat FC
       </Link>
       <TeamsNavDropdown />
-      <Link to="/my-team">My Team</Link>
       <Link to="/predictions">Predictions</Link>
       <Link to="/bets">Bets</Link>
+      <Link to="/my-team">My Team</Link>
       <span className="nav-spacer" />
       {user ? (
         <>
