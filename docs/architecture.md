@@ -118,20 +118,34 @@ Until then it only runs when invoked by hand:
     remembering to toggle it by hand, and self-expiring: once today's date
     passes the cutoff the step no-ops on its own, so the original "manual
     rerun is enough" reasoning above goes back to being true without any
-    cleanup. Scoped to FPL only, not football-data.co.uk or a Championship
-    equivalent — `current_team_id` is FPL/Premier-League-only in the first
-    place (see the golden-record note above), so Championship rosters have
-    no equivalent staleness gap to guard against; they're already kept
-    current by the lineup backfill's own appearance-derived logic.
+    cleanup. Scoped to FPL only, not football-data.co.uk. **Was** also
+    scoped away from Championship on the (wrong) assumption that
+    `current_team_id` was FPL/Premier-League-only and Championship rosters
+    were "already kept current by the lineup backfill's own
+    appearance-derived logic" — that logic turned out to have a real
+    staleness gap (see `docs/erd.md`'s `players.current_team_id` note and
+    `docs/learning-log.md`'s 2026-08-18 entries: a departed player kept
+    showing on his old squad page indefinitely). **Fixed 2026-08-18**:
+    `npm run db:seed:photos` (despite the name, no longer just photos) is
+    now a *daily*, not just manual, step — `GET /players/squads?team={id}`
+    is API-Football's own live "current roster" signal for Championship,
+    the same authority FPL provides for Premier League, and running it
+    daily is what actually keeps `current_team_id` accurate for transfers
+    rather than just correcting a stale snapshot on whenever someone
+    happens to rerun it by hand. Not gated to the transfer-window cutoff
+    above — Championship transfers aren't tied to FPL's calendar — and
+    cheap regardless (~44 calls/day, trivial against the paid tier's
+    7500/day budget).
 - **`backend/scripts/daily-refresh.sh`** runs `npm run db:seed:current-season`
   → `npm run db:seed:backfill-lineups` → (transfer-window only, through
-  2026-09-02) `npm run db:seed:fpl` → `python -m app.train`, in that
-  order (order matters: the backfill only sees a fixture as a candidate
-  once its status says `finished`, so the fixture-list refresh has to run
-  first). Written to run under either a local `cron`/`launchd` entry or a
-  GitHub Actions scheduled workflow -- same script, same commands, only
-  the trigger differs. **Decided 2026-08-16: skip the local `cron`/
-  `launchd` step entirely and wire this up once, in Phase 10, as the
+  2026-09-02) `npm run db:seed:fpl` → `npm run db:seed:photos` →
+  `python -m app.train`, in that order (order matters: the backfill only
+  sees a fixture as a candidate once its status says `finished`, so the
+  fixture-list refresh has to run first). Written to run under either a
+  local `cron`/`launchd` entry or a GitHub Actions scheduled workflow --
+  same script, same commands, only the trigger differs. **Decided
+  2026-08-16: skip the local `cron`/`launchd` step entirely and wire this
+  up once, in Phase 10, as the
   GitHub Actions workflow.** The local-scheduler step was only ever a
   stopgap for "before the app is deployed" -- since Phase 10 was always
   going to replace it with the exact same commands under a different

@@ -344,7 +344,23 @@ erDiagram
   transfer-gap case in the goal-scorer model (Harry Wilson, 2026-08-17): a
   genuinely current squad member who hasn't featured in a finished match
   yet this season won't show either, until real current-season data exists
-  for them.
+  for them. **Superseded the same day** by the proper fix: `current_team_id`
+  is no longer FPL-exclusive. `GET /players/squads?team={id}`
+  (API-Football's own "who's actually on this roster right now" endpoint,
+  already pulled for player photos) now also writes `current_team_id` for
+  Championship players via `upsertPlayerForTeamRoster` — the same
+  authoritative live signal FPL already provides for Premier League, not an
+  inference from match history at all. Its sibling `clearStaleTeamRoster`
+  clears `current_team_id` for anyone previously on a team but absent from
+  its latest full squads response, so a transfer is reflected immediately
+  rather than waiting for the old club's last appearance to age out. Added
+  to the daily refresh workflow (`db:seed:photos`, despite the name) so
+  this stays current automatically, not just on a manual rerun. The
+  season-bounded appearance fallback above is kept, not removed — it's now
+  a secondary safety net for a player who hasn't been through a squads sync
+  yet, rather than the primary signal. See `docs/learning-log.md`'s
+  2026-08-18 entries for the full sequence (first the season bound, then
+  this).
 - **`users`/`bets`/`bet_legs`**, added Phase 6. Originally designed
   single-user with no `user_id` at all (see git history); revised
   mid-Phase-6 once real multi-user login was actually wanted, pulling

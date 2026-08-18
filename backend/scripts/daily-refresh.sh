@@ -59,6 +59,15 @@ else
   echo "--- Skipping FPL roster refresh -- past transfer window cutoff ($TRANSFER_WINDOW_CUTOFF) ---"
 fi
 
+echo "--- Syncing current team rosters (Championship, via API-Football squads) ---"
+# As of 2026-08-18, not just photos -- GET /players/squads?team={id} is the
+# authoritative "who's on this roster right now" signal for Championship
+# teams (FPL only covers Premier League, see the FPL step above). Not
+# gated to the transfer window: Championship transfers aren't tied to
+# FPL's calendar. See the matching step in .github/workflows/daily-refresh.yml
+# and docs/learning-log.md's 2026-08-18 entry.
+npm run db:seed:photos
+
 echo "--- Refitting the prediction model on fresh data ---"
 (cd ../model-service && .venv/bin/python -m app.train)
 
