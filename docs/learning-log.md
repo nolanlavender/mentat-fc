@@ -4196,3 +4196,76 @@ widened candidate pool, no duplicates. Then checked the real
 `GET /api/teams/:id/dashboard` endpoint end-to-end and confirmed a
 simulated transfer correctly moved a player from one team's squad to
 another's. Backend `tsc --noEmit` and all 31 `vitest` tests pass clean.
+
+## 2026-08-18 -- A real production crash, and a latent bug the new roster sync finally triggered
+
+First real production run of the new roster-sync logic (`npm run
+db:seed:photos`, run for real against Neon by request) crashed partway
+through Premier League, right after Liverpool:
+
+```
+error: duplicate key value violates unique constraint "players_external_api_football_id_key"
+  ... at upsertPlayerGoldenRecord ... at upsertPlayerForTeamRoster ...
+```
+
+**Not a bug introduced by today's changes -- a pre-existing gap they were
+simply the first thing to actually reach.** `upsertPlayerForTeamRoster`'s
+fallback (when a squads-endpoint sighting doesn't match anyone in the
+team's roster candidates) called the general-purpose
+`upsertPlayerGoldenRecord`, passing the squads endpoint's own numeric
+player id straight through as `externalApiFootballId`. But this file's own
+comments, since 2026-08-16, explicitly document that the squads endpoint's
+id space does NOT always agree with `/fixtures/lineups`'/`/fixtures/players`'
+(the Reece James example: 19890 via lineups, 19545 via squads, same real
+person) -- `upsertPlayerGoldenRecord` treats any id it's given as the
+`'api_football'` source specifically, the one lineups/player-stats own.
+When this particular squads-endpoint id happened to already be taken by a
+*different* real player (linked under `'api_football'` from an earlier
+lineups-sourced sighting), the raw INSERT hit the column's unique
+constraint directly and crashed the whole batch -- stopping the run cold
+before it ever reached Championship, which is why QPR/Preston/Lincoln
+(reported as suddenly showing zero players) were actually just never
+touched by this run at all, not actively wiped.
+
+Why this never fired before today, despite the fallback code being
+unchanged in shape from the original `upsertPlayerPhotoForTeam`: Premier
+League's `current_team_id` was already reliably FPL-set, so nearly every
+real sighting matched cleanly in an earlier, team-scoped tier and never
+reached this fallback at all. It took a genuinely new-to-the-database name
+mismatch to actually exercise this path for real.
+
+**Fix matches what the code already said it should do, just didn't.**
+Stopped passing `externalApiFootballId` into the fallback call entirely --
+every exit path in `upsertPlayerForTeamRoster` already links this
+endpoint's id under its own `'api_football_squads'` source right after
+(collision-safe, since that's a separate namespace with its own unique
+constraint), so the `'api_football'`-space id was never supposed to leak
+into this call in the first place. The fallback now matches purely by
+name, exactly like `upsertPlayerGoldenRecord`'s existing no-DOB,
+no-external-id path already handles for any other caller that doesn't
+have a trustworthy id to offer.
+
+Verified against a scratch-Postgres reproduction built to match the exact
+production shape: an existing player row with `external_api_football_id`
+set but deliberately no corresponding `player_external_ids` row under
+`'api_football'` (the gap that let the id lookup miss it), and a squads
+sighting for a completely different name whose numeric id collides with
+that existing row's. Confirmed the call now resolves cleanly instead of
+throwing, creates a real new row under its own name and its own
+`'api_football_squads'` link, leaves `players.external_api_football_id`
+null on the new row (the colliding id never reaches that namespace at
+all), and leaves the original, unrelated player completely untouched.
+Re-ran every check from the earlier same-day roster-sync entry to confirm
+nothing else regressed. Backend `tsc --noEmit` and all 31 `vitest` tests
+pass clean.
+
+Real, still-open follow-up worth a future pass, not fixed today (out of
+scope for a crash fix, and no evidence yet it's actually biting anyone):
+`upsertPlayerGoldenRecord`'s exact-name-match tier (`existingByName`) has
+its own `COALESCE($4, external_api_football_id)` argument order, which
+*overwrites* an already-set id whenever a caller supplies one, rather than
+preserving it -- backwards from the "fill a gap, don't clobber a good
+value" pattern used everywhere else in this file. Today's fix happens to
+route around it (no id is passed from this call site anymore), but any
+future caller that reaches this exact-name tier with a real id could still
+hit the identical crash shape via an UPDATE instead of an INSERT.
