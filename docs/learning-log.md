@@ -4269,3 +4269,80 @@ value" pattern used everywhere else in this file. Today's fix happens to
 route around it (no id is passed from this call site anymore), but any
 future caller that reaches this exact-name tier with a real id could still
 hit the identical crash shape via an UPDATE instead of an INSERT.
+
+## 2026-08-18 -- First real daily-refresh run, a DATABASE_URL red herring, and a genuine reschedule bug
+
+Getting `daily-refresh.yml` actually running for real (not just
+committed) surfaced three separate problems in quick succession, only one
+of which was a real code bug -- worth recording all three, since telling
+them apart under pressure is its own real skill.
+
+**Problem 1, a real config issue: `DATABASE_URL` truncated when pasted
+into the GitHub secret.** The workflow failed with `getaddrinfo ENOTFOUND
+ep-nameless-frog-axyy8q2v-pooler.c-4.us-east-2.aws` -- a hostname missing
+its `.neon.tech` suffix. Nothing to fix in the repo; a copy-paste gap in
+GitHub's secret UI.
+
+**Problem 2, a wrong diagnosis on my part.** Saw an `@` in the connection
+string and jumped to "unescaped `@` in the password" without evidence --
+plausible-sounding, but wrong. When re-encoding it to `%40` produced a
+harder failure (`TypeError: Invalid URL`), the actual shape of the string
+made the real issue obvious: the *mandatory* separator `@` between
+password and host had been encoded, not an extra one *inside* the
+password. There was never a special character needing escaping in the
+first place. Lesson worth keeping: a single plausible-looking character
+isn't evidence on its own, and the fix that makes an error message get
+*more specific/fundamental* (a garbled host vs. total parse failure) is
+worth treating as a signal the previous diagnosis, not just the previous
+fix, was wrong.
+
+Also flagged for real, not hypothetically: the user pasted the actual
+production DB username and password into this conversation while
+debugging. Advised rotating the Neon password afterward rather than
+treating a credential that's touched a chat transcript as still private,
+regardless of how the conversation is normally handled.
+
+**Problem 3, once the connection string was finally right: a genuine,
+new production crash.** `seedApiFootballFixtures` hit `duplicate key
+value violates unique constraint "fixtures_external_api_football_id_idx"`.
+`upsertFixture`'s `ON CONFLICT` only ever targeted the natural key
+(`competition_season_id, home_team_id, away_team_id, kickoff_date`) --
+the deliberate primary dedup target since Phase 1, so a CSV-seeded row and
+a later API-Football pass can agree on the same real match with no shared
+id space between sources (see migration 1701000000006's comment). What
+that design never accounted for: a **rescheduled fixture** -- same real
+match, same `external_api_football_id`, but a `kickoff_date` that's
+genuinely different from whatever it was first seeded under (a
+postponement, a TV-driven date change). The natural-key `ON CONFLICT`
+target no longer matched the existing row, so Postgres attempted a fresh
+INSERT -- which collided head-on with the *separate* partial unique index
+on `external_api_football_id`
+(`fixtures_external_api_football_id_idx`, migration
+1701000000006), crashing instead of updating the date.
+
+Fixed by checking `external_api_football_id` FIRST when the caller has
+one, before ever touching the natural-key path -- the same "most reliable
+identifier first" principle `upsertPlayerGoldenRecord` already uses for
+players, just never extended to fixtures. A match by external id now
+UPDATEs the existing row directly (including the natural-key columns
+themselves, since a reschedule is exactly the case where those need to
+change), and only falls through to the natural-key `ON CONFLICT` insert
+path, unchanged, when there's no external id yet (a CSV-seeded row not
+yet enriched).
+
+Verified against a scratch-Postgres reproduction of the exact shape: seed
+a fixture with an external id and one date, "reschedule" it (same
+external id, a new date) through the same function, and confirm it
+updates the same row (not a crash, not a duplicate) with the new date
+correctly applied -- plus confirmed a genuinely new fixture with no
+external id yet still inserts normally through the unchanged natural-key
+path. Backend `tsc --noEmit` and all 31 `vitest` tests pass clean.
+
+Real, deliberately out-of-scope observation for next time daily-refresh
+actually runs end to end: this was the *first* real production run of
+`db:seed:current-season` since deployment, so it's very possible more
+of this shape of gap (things quietly true "one real production run" would
+have caught, that a scratch-Postgres reproduction with synthetic data
+never would) surface once fixtures/lineups/rosters are all flowing for
+real. Worth treating the next few days' runs as still being watched, not
+assumed clean just because this specific crash is fixed.
