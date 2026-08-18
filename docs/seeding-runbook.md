@@ -23,10 +23,15 @@ which competitions Phase 2's endpoints filter to.
 1. **`backend/seed/raw/`** (gitignored, machine-local) — every payload
    actually fetched from football-data.co.uk / API-Football / FPL, cached
    to disk. Fetch-if-absent: reruns of the seed script never re-fetch
-   something already here. This is what protects API-Football's 100/day
-   budget *during* the backfill itself — it has to exist before a snapshot
-   does, and it stays gitignored because it's large-ish and fully
-   reproducible from step 3 below.
+   something already here. This is what protects API-Football's daily call
+   budget *during* the backfill itself (see `docs/CLAUDE.md`'s "Data
+   sources" note on the account's current paid-tier limit) — it has to
+   exist before a snapshot does, and it stays gitignored because it's
+   large-ish and fully reproducible from step 3 below. One deliberate
+   exception: `seedTodaysLineups`'s matchday lineup checks never write to
+   this cache at all (`skipCache`, see that function's own comment) —
+   caching a pre-match "not announced yet" response here would permanently
+   block ever seeing the real lineup once it lands.
 2. **`backend/seed/snapshot/mentat_fc_seed.dump`** (committed to git) — a
    `pg_dump` of the fully seeded database. Restoring it (`npm run
    db:restore`) rehydrates a working dev database in seconds, no network,

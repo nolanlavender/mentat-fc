@@ -135,6 +135,22 @@ Until then it only runs when invoked by hand:
   trigger, scheduling it locally now would mean setting it up and tearing
   it down again shortly after, for no real benefit. Until Phase 10, the
   script only runs when invoked by hand.
+- **`.github/workflows/matchday-lineups.yml`** (added 2026-08-18) runs
+  `npm run db:seed:matchday-lineups` hourly, separate from the once-a-day
+  refresh above. Checks fixtures kicking off soon (or that kicked off
+  recently but aren't `finished` yet) for a real, confirmed starting
+  lineup — typically announced by API-Football roughly an hour before
+  kickoff, a genuinely different signal from `backfillLineupsForCompetitionSeason`'s
+  post-match-only path, not just a more-frequent version of it. Not a live
+  score ticker (see the boundary below, unchanged) — this only ever writes
+  to `fixture_lineups`, never scores or in-play state. Deliberately doesn't
+  retrain the model afterward: `goal_scorer.py`'s player-share allocation
+  has no per-fixture "is this player confirmed to start today" input yet
+  (that's real future work, see `docs/CLAUDE.md`'s player/injury/form-
+  driven model note), so retraining right after a lineup lands wouldn't
+  change that day's predictions. See `docs/learning-log.md`'s 2026-08-18
+  entry for the `fetchCached`-poisoning bug this uncovered and fixed
+  (`skipCache`) along the way.
 - **What this explicitly doesn't cover**: live/in-play score updates (this
   app is not building a live-score ticker) and live betting odds (Phase 6,
   The Odds API, a separate concern from historical odds).

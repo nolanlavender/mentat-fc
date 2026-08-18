@@ -1,0 +1,60 @@
+name: Matchday lineup check
+
+# Separate from daily-refresh.yml on purpose -- that one runs once a day
+# and only ever looks at *finished* fixtures (backfillLineupsForCompetitionSeason).
+# This one runs far more often, checking fixtures kicking off soon (or that
+# kicked off recently but aren't finished yet) for a real, confirmed
+# starting lineup -- typically announced by API-Football roughly an hour
+# before kickoff. See seedTodaysLineups (backend/seed/sources/api-football.ts)
+# for why that's a genuinely different check from the post-match backfill,
+# not just a more-frequent version of it.
+#
+# Deliberately does NOT retrain the prediction model after finding a new
+# lineup. The goal-scorer model (model-service/app/goal_scorer.py)
+# allocates each fixture's predicted goals across every player who clears
+# a season-level appearance-rate threshold -- it has no per-fixture "is
+# this specific player confirmed to start today" input yet, so retraining
+# right after a lineup lands wouldn't change that day's predictions at
+# all. Making today's confirmed lineup actually influence a fixture's own
+# prediction is real future work (see docs/CLAUDE.md's player/injury/
+# form-driven model note), not something to fake with a no-op retrain
+# here. The regular daily-refresh.yml retrain, once a day on finished
+# results, is unaffected by this workflow.
+#
+# Hourly is comfortably inside budget -- confirmed via the account's
+# api-sports.io dashboard, the plan is 7500 calls/day (see api-football.ts's
+# DAILY_BUDGET), not the free tier's 100/day docs/CLAUDE.md originally
+# described. A non-matchday run costs one cheap DB query and zero API
+# calls, since the fixture-selection query only matches something kicking
+# off in the next few hours.
+#
+# Requires the same three repository secrets as daily-refresh.yml
+# (Settings > Secrets and variables > Actions): DATABASE_URL,
+# API_FOOTBALL_KEY, JWT_SECRET.
+on:
+  schedule:
+    - cron: '0 * * * *' # every hour, on the hour (see architecture.md's note on Actions cron delay tolerance)
+  workflow_dispatch: {} # manual "Run workflow" button, for testing or catching up on demand
+
+jobs:
+  matchday-lineups:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Check for newly-confirmed starting lineups
+        working-directory: backend
+        run: npm run db:seed:matchday-lineups

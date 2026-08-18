@@ -54,6 +54,51 @@ export interface FixtureSummary {
   topScorers: ScorerPrediction[];
 }
 
+export interface FixtureTeamStats {
+  teamId: number;
+  isHome: boolean;
+  shots: number | null;
+  shotsOnTarget: number | null;
+  corners: number | null;
+  fouls: number | null;
+  yellowCards: number | null;
+  redCards: number | null;
+  xg: number | null;
+}
+
+export interface FixtureOdds {
+  bookmaker: string;
+  market: string;
+  outcome: string;
+  line: number;
+  price: number;
+  snapshotType: string;
+}
+
+export interface FixtureLineupPlayer {
+  playerId: number;
+  playerName: string;
+  playerPhotoUrl: string | null;
+  teamId: number;
+  isStarting: boolean;
+  shirtNumber: number | null;
+  position: string | null;
+  minutesPlayed: number | null;
+  goals: number | null;
+  assists: number | null;
+  rating: number | null;
+  yellowCards: number | null;
+  redCards: number | null;
+}
+
+export interface FixtureDetail extends FixtureSummary {
+  venue: string | null;
+  referee: string | null;
+  teamStats: FixtureTeamStats[];
+  odds: FixtureOdds[];
+  lineup: FixtureLineupPlayer[];
+}
+
 export interface StandingsRow {
   position: number;
   team: Team;

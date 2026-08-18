@@ -81,11 +81,11 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
   return (
     <li className="prediction-row">
       <div className="prediction-fixture">
-        <strong className="fixture-teams">
+        <Link to={`/fixtures/${fixture.id}`} className="fixture-teams">
           <Crest src={fixture.homeTeam.logoUrl} alt="" />
           {fixture.homeTeam.name} vs {fixture.awayTeam.name}
           <Crest src={fixture.awayTeam.logoUrl} alt="" />
-        </strong>
+        </Link>
         <span className="prediction-meta">
           {fixture.competitionName} · {new Date(fixture.kickoffAt).toLocaleString()}
         </span>

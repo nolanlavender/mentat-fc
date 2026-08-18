@@ -127,7 +127,7 @@ export function HomePage() {
             <ul className="home-fixture-list">
               {upcoming.map((f) => (
                 <li key={f.id}>
-                  <Link to={`/predictions`}>{fixtureLine(f)}</Link>
+                  <Link to={`/fixtures/${f.id}`}>{fixtureLine(f)}</Link>
                 </li>
               ))}
             </ul>
@@ -138,7 +138,9 @@ export function HomePage() {
             {recentResults.length === 0 && fixturesWindow && <p>Nothing finished in the last {FIXTURE_WINDOW_DAYS} days.</p>}
             <ul className="home-fixture-list">
               {recentResults.map((f) => (
-                <li key={f.id}>{fixtureLine(f)}</li>
+                <li key={f.id}>
+                  <Link to={`/fixtures/${f.id}`}>{fixtureLine(f)}</Link>
+                </li>
               ))}
             </ul>
           </section>

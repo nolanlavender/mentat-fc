@@ -70,9 +70,18 @@ function writeBudgetState(state: { date: string; callsUsed: number }): void {
   writeFileSync(budgetStatePath, JSON.stringify(state), 'utf-8');
 }
 
-async function callApiFootball<T>(path: string, cacheFile: string): Promise<T> {
+// skipCache exists for exactly one case (matchday lineup checks -- see
+// seedApiFootballLineup below): fetchCached's disk cache has no expiry, so
+// a fixture checked before its lineup is announced would otherwise get an
+// empty {response: []} written to disk under that fixture's cache key
+// forever, and every later recheck -- including the one that would
+// finally see the real, announced lineup -- would just replay that same
+// stale empty file instead of calling the API again. skipCache bypasses
+// the disk cache entirely (still goes through budget tracking/retries
+// below) so a matchday recheck is always a real live call.
+async function callApiFootball<T>(path: string, cacheFile: string, options: { skipCache?: boolean } = {}): Promise<T> {
   const cachePath = new URL(`../raw/api-football/${cacheFile}`, import.meta.url).pathname;
-  const text = await fetchCached(cachePath, async () => {
+  const doFetch = async (): Promise<string> => {
     const state = readBudgetState();
     if (state.callsUsed >= DAILY_BUDGET) throw new BudgetExhaustedError();
 
@@ -129,7 +138,8 @@ async function callApiFootball<T>(path: string, cacheFile: string): Promise<T> {
       writeBudgetState({ date: state.date, callsUsed: state.callsUsed + 1 });
       return res.text();
     }
-  });
+  };
+  const text = options.skipCache ? await doFetch() : await fetchCached(cachePath, doFetch);
   return JSON.parse(text) as T;
 }
 
@@ -233,11 +243,18 @@ interface ApiFootballLineupsResponse {
  * it throws BudgetExhaustedError once the daily cap is hit so the caller can
  * stop cleanly and report progress instead of crashing mid-backfill.
  */
-export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: number, fixtureId: number): Promise<void> {
+export async function seedApiFootballLineup(
+  pool: Pool,
+  fixtureExternalId: number,
+  fixtureId: number,
+  options: { skipCache?: boolean } = {},
+): Promise<{ announced: boolean }> {
   const data = await callApiFootball<ApiFootballLineupsResponse>(
     `/fixtures/lineups?fixture=${fixtureExternalId}`,
     `lineups/${fixtureExternalId}.json`,
+    options,
   );
+  if (data.response.length === 0) return { announced: false };
 
   for (const teamLineup of data.response) {
     const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name), teamLineup.team.logo ?? undefined, teamLineup.team.id);
@@ -276,6 +293,66 @@ export async function seedApiFootballLineup(pool: Pool, fixtureExternalId: numbe
       });
     }
   }
+  return { announced: true };
+}
+
+// Real starting lineups are typically confirmed by API-Football roughly an
+// hour before kickoff -- these bounds are deliberately generous around
+// that (catch it if it lands early, keep trying for a few hours after
+// kickoff in case of a delay or a temporary gap in API-Football's own
+// data) rather than tuned tight, since checking a fixture that turns out
+// to have nothing yet costs one live call and nothing else.
+const MATCHDAY_LOOKBACK_HOURS = 3;
+const MATCHDAY_LOOKAHEAD_HOURS = 3;
+
+export interface MatchdayLineupsResult {
+  checked: number;
+  announced: number;
+  stoppedOnBudget: boolean;
+}
+
+/**
+ * The pre-match sibling of backfillLineupsForCompetitionSeason: checks
+ * lineups for fixtures kicking off soon (or that kicked off recently but
+ * aren't marked 'finished' yet), not just already-finished ones. This is
+ * a genuinely different signal from the post-match backfill -- a real,
+ * bookmaker-grade "who's actually playing today" confirmation, not
+ * derived from historical rates -- and it's why seedApiFootballLineup is
+ * called with skipCache here: a not-yet-announced lineup must never get
+ * permanently cached (see that option's own comment).
+ *
+ * Deliberately does NOT touch fixtures.lineups_checked_at -- that column's
+ * whole meaning is "checked once finished, so an empty result is genuinely
+ * permanent" (migration 1701000000020). A fixture whose lineup isn't
+ * announced yet just gets rechecked again next time this runs, until
+ * either real rows land (the NOT EXISTS below then excludes it from the
+ * next run) or the match finishes and the regular backfill takes over.
+ */
+export async function seedTodaysLineups(pool: Pool): Promise<MatchdayLineupsResult> {
+  const { rows } = await pool.query<{ id: number; external_api_football_id: number }>(
+    `SELECT f.id, f.external_api_football_id
+     FROM fixtures f
+     WHERE f.status != 'finished'
+       AND f.external_api_football_id IS NOT NULL
+       AND f.kickoff_at BETWEEN now() - ($1 || ' hours')::interval AND now() + ($2 || ' hours')::interval
+       AND NOT EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id)
+     ORDER BY f.kickoff_at ASC`,
+    [MATCHDAY_LOOKBACK_HOURS, MATCHDAY_LOOKAHEAD_HOURS],
+  );
+
+  let announced = 0;
+  for (const row of rows) {
+    try {
+      const result = await seedApiFootballLineup(pool, row.external_api_football_id, row.id, { skipCache: true });
+      if (result.announced) announced++;
+    } catch (err) {
+      if (err instanceof BudgetExhaustedError) {
+        return { checked: announced, announced, stoppedOnBudget: true };
+      }
+      throw err;
+    }
+  }
+  return { checked: rows.length, announced, stoppedOnBudget: false };
 }
 
 interface ApiFootballPlayerStatsResponse {

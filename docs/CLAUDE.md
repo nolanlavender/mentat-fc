@@ -87,10 +87,13 @@ reasoning."
 
 ## Data sources
 
-- **Fixtures / lineups / standings:** API-Football (free tier: 100
-  requests/day). Pulled for Premier League, Championship, and FA Cup, 3
-  seasons — see "Data scope vs. app scope" below for why it's wider than
-  what the app shows.
+- **Fixtures / lineups / standings:** API-Football. Started on the free
+  tier (100 requests/day); now on a paid Pro plan (7500/day, confirmed via
+  the account's api-sports.io dashboard — see `api-football.ts`'s
+  `DAILY_BUDGET`), upgraded once per-fixture player-stats and a matchday
+  lineup check made the free tier's budget too tight. Pulled for Premier
+  League, Championship, and FA Cup, 3 seasons — see "Data scope vs. app
+  scope" below for why it's wider than what the app shows.
 - **Fantasy:** Official FPL public API (`fantasy.premierleague.com/api/...`)
   — free, no key required. Premier League only, current season only — that's
   inherent to what FPL is, not a gap.
