@@ -249,6 +249,41 @@ async function findPlayerByExternalId(pool: Pool, source: string, externalId: nu
 }
 
 /**
+ * Safely claims external_fpl_id or external_api_football_id for a player
+ * row -- both are UNIQUE (migration 1701000000005). Real crashes found in
+ * production 2026-08-18, three separate times, all the same shape: an
+ * UPDATE (or an INSERT ... ON CONFLICT DO UPDATE) wrote one of these
+ * columns directly, assumed it would succeed, and let Postgres discover a
+ * collision with a DIFFERENT row's already-claimed value -- crashing the
+ * whole batch instead of anyone deciding what the collision actually
+ * means. Every write to either column in this file now goes through here
+ * instead of writing it inline.
+ *
+ * Skips (logs, doesn't throw) when a different row already has the value
+ * -- same "check first, don't guess a merge mid-batch" choice already made
+ * for the players.natural_key collision below. A real collision here is
+ * evidence of a duplicate worth reconciling with repair-duplicate-players.ts,
+ * not something to resolve automatically inside a live seed run a whole
+ * daily pipeline depends on completing.
+ */
+async function claimPlayerExternalId(
+  pool: Pool,
+  playerId: number,
+  column: 'external_fpl_id' | 'external_api_football_id',
+  value: number,
+): Promise<void> {
+  const { rows } = await pool.query<{ id: number }>(`SELECT id FROM players WHERE ${column} = $1 AND id != $2`, [value, playerId]);
+  if (rows[0]) {
+    console.warn(
+      `claimPlayerExternalId: skipping ${column}=${value} for player ${playerId} -- already claimed by player ${rows[0].id}. ` +
+        `Likely a real duplicate; reconcile with repair-duplicate-players.ts.`,
+    );
+    return;
+  }
+  await pool.query(`UPDATE players SET ${column} = $2 WHERE id = $1`, [playerId, value]);
+}
+
+/**
  * One golden-record entry point for both sources, instead of a separate
  * upsert per external ID (which is what let the same real player get two
  * disconnected rows -- one from FPL, one from API-Football -- with no link
@@ -346,26 +381,18 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
       }
       await pool.query(
         `UPDATE players SET
-           full_name = CASE WHEN $7 AND NOT $9 THEN $8 ELSE full_name END,
-           date_of_birth = CASE WHEN $9 THEN date_of_birth ELSE COALESCE(date_of_birth, $2) END,
+           full_name = CASE WHEN $6 AND NOT $8 THEN $7 ELSE full_name END,
+           date_of_birth = CASE WHEN $8 THEN date_of_birth ELSE COALESCE(date_of_birth, $2) END,
            nationality = COALESCE($3, nationality),
            position = COALESCE($4, position),
-           external_fpl_id = COALESCE($5, external_fpl_id),
-           photo_url = COALESCE(photo_url, $6)
+           photo_url = COALESCE(photo_url, $5)
          WHERE id = $1`,
-        [
-          id,
-          p.dateOfBirth ?? null,
-          p.nationality ?? null,
-          p.position ?? null,
-          p.externalFplId ?? null,
-          p.photoUrl ?? null,
-          shouldUpgradeName,
-          p.fullName,
-          wouldCollide,
-        ],
+        [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.photoUrl ?? null, shouldUpgradeName, p.fullName, wouldCollide],
       );
-      if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+      if (p.externalFplId !== undefined) {
+        await claimPlayerExternalId(pool, id, 'external_fpl_id', p.externalFplId);
+        await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+      }
       return id;
     }
 
@@ -404,12 +431,12 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
         const id = candidates[0].id;
         await pool.query(
           `UPDATE players SET
-             external_api_football_id = $2,
-             position = COALESCE(position, $3),
-             photo_url = COALESCE(photo_url, $4)
+             position = COALESCE(position, $2),
+             photo_url = COALESCE(photo_url, $3)
            WHERE id = $1`,
-          [id, p.externalApiFootballId, p.position ?? null, p.photoUrl ?? null],
+          [id, p.position ?? null, p.photoUrl ?? null],
         );
+        await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
         await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
         return id;
       }
@@ -438,37 +465,75 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
       if (fuzzyMatches.length === 1) {
         const match = fuzzyMatches[0];
         const preferIncomingName = nameWordCount(p.fullName) < nameWordCount(match.full_name);
+
+        // Same players.natural_key collision risk as the found-by-id
+        // branch above (full_name feeds it) -- check before writing,
+        // same reasoning, see that branch's comment for the full story.
+        const finalFullName = preferIncomingName ? p.fullName : match.full_name;
+        const { rows: collisionRows } = await pool.query<{ id: number }>(
+          `SELECT p2.id
+           FROM players p1
+           JOIN players p2 ON p2.id != p1.id
+           WHERE p1.id = $1
+             AND p2.natural_key = md5(lower(trim($2)) || '|' || coalesce((p1.date_of_birth - date '1970-01-01')::text, ''))`,
+          [match.id, finalFullName],
+        );
+        const wouldCollide = collisionRows.length > 0;
+        if (wouldCollide) {
+          console.warn(
+            `upsertPlayerGoldenRecord: skipping full_name update for player ${match.id} ("${match.full_name}") -- ` +
+              `would collide with player ${collisionRows[0].id}'s natural_key. Likely a real duplicate; ` +
+              `reconcile with repair-duplicate-players.ts.`,
+          );
+        }
         await pool.query(
           `UPDATE players SET
-             external_api_football_id = $2,
-             full_name = CASE WHEN $3 THEN $4 ELSE full_name END,
+             full_name = CASE WHEN $2 AND NOT $4 THEN $3 ELSE full_name END,
              position = COALESCE(position, $5),
              photo_url = COALESCE(photo_url, $6)
            WHERE id = $1`,
-          [match.id, p.externalApiFootballId, preferIncomingName, p.fullName, p.position ?? null, p.photoUrl ?? null],
+          [match.id, preferIncomingName, p.fullName, wouldCollide, p.position ?? null, p.photoUrl ?? null],
         );
+        await claimPlayerExternalId(pool, match.id, 'external_api_football_id', p.externalApiFootballId);
         await linkPlayerExternalId(pool, match.id, 'api_football', p.externalApiFootballId);
         return match.id;
       }
     }
   }
 
+  // The three write paths below all used to pass external_fpl_id/
+  // external_api_football_id straight into the INSERT/UPDATE column list.
+  // Real crash found in production 2026-08-18 (players_external_fpl_id_key):
+  // an ON CONFLICT (natural_key) DO UPDATE only resolves a natural_key
+  // collision -- it does nothing to protect the SEPARATE unique
+  // constraints on these two columns, whether hit via a fresh INSERT (no
+  // natural_key collision, but the id is already claimed elsewhere) or via
+  // the DO UPDATE's own COALESCE(EXCLUDED.x, players.x) (which overwrites
+  // whenever the incoming value is non-null, and can just as easily
+  // collide). Both id columns are now left out of these three statements
+  // entirely and claimed afterward via claimPlayerExternalId, same as
+  // every other write path in this function.
+
   if (p.dateOfBirth) {
     const { rows } = await pool.query<{ id: number }>(
-      `INSERT INTO players (full_name, date_of_birth, nationality, position, external_fpl_id, external_api_football_id, photo_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO players (full_name, date_of_birth, nationality, position, photo_url)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (natural_key) DO UPDATE SET
          nationality = COALESCE(EXCLUDED.nationality, players.nationality),
          position = COALESCE(EXCLUDED.position, players.position),
-         external_fpl_id = COALESCE(EXCLUDED.external_fpl_id, players.external_fpl_id),
-         external_api_football_id = COALESCE(EXCLUDED.external_api_football_id, players.external_api_football_id),
          photo_url = COALESCE(players.photo_url, EXCLUDED.photo_url)
        RETURNING id`,
-      [p.fullName, p.dateOfBirth, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
+      [p.fullName, p.dateOfBirth, p.nationality ?? null, p.position ?? null, p.photoUrl ?? null],
     );
     const id = rows[0].id;
-    if (p.externalApiFootballId !== undefined) await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
-    if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+    if (p.externalApiFootballId !== undefined) {
+      await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
+      await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
+    }
+    if (p.externalFplId !== undefined) {
+      await claimPlayerExternalId(pool, id, 'external_fpl_id', p.externalFplId);
+      await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+    }
     return id;
   }
 
@@ -480,31 +545,39 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
     await pool.query(
       `UPDATE players SET
          position = COALESCE($2, position),
-         external_fpl_id = COALESCE($3, external_fpl_id),
-         external_api_football_id = COALESCE($4, external_api_football_id),
-         photo_url = COALESCE(photo_url, $5)
+         photo_url = COALESCE(photo_url, $3)
        WHERE id = $1`,
-      [id, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
+      [id, p.position ?? null, p.photoUrl ?? null],
     );
-    if (p.externalApiFootballId !== undefined) await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
-    if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+    if (p.externalApiFootballId !== undefined) {
+      await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
+      await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
+    }
+    if (p.externalFplId !== undefined) {
+      await claimPlayerExternalId(pool, id, 'external_fpl_id', p.externalFplId);
+      await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+    }
     return id;
   }
 
   const inserted = await pool.query<{ id: number }>(
-    `INSERT INTO players (full_name, nationality, position, external_fpl_id, external_api_football_id, photo_url)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO players (full_name, nationality, position, photo_url)
+     VALUES ($1, $2, $3, $4)
      ON CONFLICT (natural_key) DO UPDATE SET
        position = COALESCE(EXCLUDED.position, players.position),
-       external_fpl_id = COALESCE(EXCLUDED.external_fpl_id, players.external_fpl_id),
-       external_api_football_id = COALESCE(EXCLUDED.external_api_football_id, players.external_api_football_id),
        photo_url = COALESCE(players.photo_url, EXCLUDED.photo_url)
      RETURNING id`,
-    [p.fullName, p.nationality ?? null, p.position ?? null, p.externalFplId ?? null, p.externalApiFootballId ?? null, p.photoUrl ?? null],
+    [p.fullName, p.nationality ?? null, p.position ?? null, p.photoUrl ?? null],
   );
   const id = inserted.rows[0].id;
-  if (p.externalApiFootballId !== undefined) await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
-  if (p.externalFplId !== undefined) await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+  if (p.externalApiFootballId !== undefined) {
+    await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
+    await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
+  }
+  if (p.externalFplId !== undefined) {
+    await claimPlayerExternalId(pool, id, 'external_fpl_id', p.externalFplId);
+    await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
+  }
   return id;
 }
 
