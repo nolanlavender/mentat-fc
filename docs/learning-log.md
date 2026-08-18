@@ -4415,3 +4415,87 @@ needs a check-first step, the same pattern now applied in all three
 places today. Not auditing every remaining `UPDATE` in this file for the
 same shape right now -- flagging it here as the thing to actually watch
 for, rather than assuming these three were the only ones.
+
+## 2026-08-18 -- The fourth crash, and doing the audit properly instead of a fourth patch
+
+A fourth crash, same day, same shape: `players_external_fpl_id_key`, this
+time in `seedFplBootstrap`. Asked directly, and rightly, to stop patching
+one symptom at a time and check the whole file. That's what this entry
+covers -- a real, systematic pass instead of another isolated fix.
+
+**What the audit actually found.** Grepping every write to
+`external_fpl_id`/`external_api_football_id` in `upsertPlayerGoldenRecord`
+turned up **five** places doing the same unguarded write, not two. Today's
+earlier natural_key fix only patched the branch that had already crashed
+(the found-by-external-id early return); the other four were sitting
+there un-triggered, waiting for the right data shape:
+
+1. The abbreviated-name match branch -- `external_api_football_id = $2`
+   written directly.
+2. The team-scoped fuzzy-name match branch -- same, plus a **second,
+   previously unflagged** risk: it also writes `full_name` without
+   checking whether the resulting `natural_key` would collide, the exact
+   same gap the early-return branch had before this morning's fix, just
+   never triggered here yet either.
+3. The `dateOfBirth`-present `INSERT ... ON CONFLICT (natural_key)` path
+   -- today's actual crash. `ON CONFLICT (natural_key)` only resolves a
+   *natural_key* collision; it does nothing for the two other UNIQUE
+   columns riding along in the same statement, whether hit via a fresh
+   INSERT (no natural_key collision, but the id's already claimed
+   elsewhere -- exactly what happened) or via the `DO UPDATE`'s own
+   `COALESCE(EXCLUDED.x, players.x)`, which overwrites whenever the
+   incoming value is non-null and can just as easily collide.
+4. The exact-name-match (`existingByName`) branch -- identical
+   `COALESCE($n, column)` overwrite-and-maybe-collide shape.
+5. The final natural-key-insert fallback (no DOB, no name match) -- same
+   shape as #3.
+
+**Fixed with one shared helper instead of five more one-off checks.**
+`claimPlayerExternalId(pool, playerId, column, value)` -- looks up whether
+a *different* row already has the value; if so, logs and skips (leaves
+the row's existing value alone, same "check first, don't guess a merge
+mid-batch" choice as the natural_key fix); if not, sets it directly. Every
+one of the five sites now leaves `external_fpl_id`/`external_api_football_id`
+out of its own INSERT/UPDATE column list entirely and calls this
+afterward -- one code path owns "is this id already someone else's,"
+instead of five statements each getting to independently forget to ask.
+The fuzzy-match branch's `full_name`/`natural_key` risk (#2 above) got
+the same inline check the early-return branch already had, adapted to
+that branch's shape (no DOB available there, so the check is against
+`p1.date_of_birth` as stored rather than a supplied one).
+
+**Why a shared helper this time, not five more inline copies:** the
+inline-checks approach from earlier today (three separate, slightly
+different SQL blocks for three separate crashes) is exactly what made
+this easy to under-scope in the first place -- each fix looked locally
+complete without anyone re-deriving "does this same pattern exist
+anywhere else." A single, small, well-named function that every call site
+routes through is easier to audit for completeness (grep for the two
+column names, confirm every hit either goes through the helper or has a
+documented reason not to) than five bespoke blocks.
+
+Verified against five scenarios in one scratch-Postgres script, one per
+call site, each built to reproduce the exact collision that site is
+vulnerable to (including a literal replay of today's real crash --
+`external_fpl_id` already claimed, hit via the `dateOfBirth` path):
+confirmed every one resolves without crashing, leaves the colliding id
+unclaimed on the new/matched row, and leaves whichever row already held
+it completely untouched. Re-ran every regression check written earlier
+today (the natural_key collision reproduction, the full roster-sync
+suite) to confirm nothing broke. Backend `tsc --noEmit` and all 31
+`vitest` tests pass clean.
+
+**Explicitly not fixed today, flagged instead:** `getOrCreateTeam` and
+`setTeamExternalFplId` (teams' own `external_api_football_id`/
+`external_fpl_id`, both also UNIQUE per migration 1701000000004) have a
+structurally similar gap -- `getOrCreateTeam`'s `ON CONFLICT DO UPDATE`
+happens to COALESCE in the safe direction already (existing value wins,
+never overwrites), but a genuinely fresh team INSERT whose incoming id is
+already claimed by a different team row would still crash the same way,
+and `setTeamExternalFplId` is a bare direct `UPDATE` with no check at
+all. Left alone because there's no evidence yet it's an active problem
+(far fewer teams than players, ids don't reassign the way abbreviated
+player names do) -- but it's the same shape of risk, worth applying
+`claimTeamExternalId` (the obvious team-scoped sibling of today's
+`claimPlayerExternalId`) to if a real report ever surfaces here too,
+rather than rediscovering the same lesson a fifth time.
