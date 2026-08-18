@@ -330,7 +330,21 @@ erDiagram
   `load_player_squad_appearances` already used for the goal-scorer model
   (see `docs/learning-log.md`'s 2026-08-16/17 entries), reused rather than
   reinvented. `current_team_id` still wins whenever it's set, so this
-  changes nothing about Premier League squads.
+  changes nothing about Premier League squads. **A second real bug found
+  the same day**, from a real report that a Championship squad page listed
+  a player under a club he'd since left: the appearance fallback had no
+  bound on how old "most recent" could be, so a departed player kept
+  showing up indefinitely as long as no one else's more recent appearance
+  for that club existed. `getSquad` now restricts the fallback to
+  appearances within the current season only (same "most recent season by
+  `start_date`" stand-in `getTablePosition`/`getStandings` already use) --
+  a departed player simply drops off the squad list once his only
+  appearances predate the current season, rather than showing under his
+  former club. Same tradeoff already accepted for the identical
+  transfer-gap case in the goal-scorer model (Harry Wilson, 2026-08-17): a
+  genuinely current squad member who hasn't featured in a finished match
+  yet this season won't show either, until real current-season data exists
+  for them.
 - **`users`/`bets`/`bet_legs`**, added Phase 6. Originally designed
   single-user with no `user_id` at all (see git history); revised
   mid-Phase-6 once real multi-user login was actually wanted, pulling

@@ -4025,3 +4025,75 @@ this sandbox on an unrelated precondition -- the scratch DB has no
 seeded fixtures, which its own README lists as a prerequisite it doesn't
 set up for you -- and never exercises the FPL code path at all, so it's
 a pre-existing environment gap, not a regression from this change.
+
+## 2026-08-18 -- A departed player never actually left the squad page
+
+A real report, and a sharp follow-up question that pinned down the actual
+bug: a Championship team's squad page listed a player ("João Pedro" on
+Hull City) who didn't look right. First instinct was to check whether this
+was another instance of the name-collision problem this project has hit
+several times before (see the 2026-08-16/17 entries) -- and it partly was:
+his player page showed no current team and a game log of real 2025
+appearances, which does match a genuinely different, lower-profile real
+person who happens to share a common name with the famous Chelsea player,
+not a duplicate-identity bug. That part of the system was working as
+designed.
+
+But the real question turned out to be different, and better, than "is
+this the right person": *should he be listed as currently on this squad at
+all*, given his only appearances were from the prior season? No -- and
+that's true regardless of whether he's a name-collision or the genuine
+Chelsea one. `getSquad`'s Championship fallback (added 2026-08-18 earlier
+the same day, see the erd.md note on `players.current_team_id`) resolves
+"who's on this team" from a player's *single most recent finished
+`fixture_lineups` appearance*, with no bound on how old that appearance
+could be. A player who's since transferred away, been released, or simply
+stopped appearing keeps showing up on his old club's squad page forever,
+as long as no one else's more recent appearance for that club supersedes
+him -- which never happens for someone who's genuinely left.
+
+The fix mirrors a pattern already established elsewhere in this codebase
+rather than inventing a new one: `getTablePosition`/`getStandings` already
+stand in for "current season" (since `competition_seasons.is_current`
+isn't wired up yet) by picking whichever season has the latest
+`start_date`. `getSquad`'s fallback CTE now joins through
+`competition_seasons`/`seasons` and only counts an appearance if it falls
+in that same latest season -- a departed player's stale appearance simply
+no longer counts, so he drops off the list instead of showing under a club
+he's left. This is the same "no confident answer yet, not a confidently
+wrong one" tradeoff already accepted for the *identical* shape of gap in
+the goal-scorer model (Harry Wilson, 2026-08-17): a genuinely current
+squad member who hasn't played a finished match yet this season won't show
+either, until real current-season lineup data exists for them -- an honest
+gap, not a wrong answer.
+
+Deliberately scoped narrow: `players.current_team_id` (FPL, Premier League
+only) is untouched by this change and still wins outright via `COALESCE`
+whenever it's set, so Premier League squads are completely unaffected.
+Also deliberately *not* done here, flagged instead as a real, larger piece
+of technical debt worth a future revisit: API-Football's own
+`/players/squads?team=` endpoint already returns each team's actual
+current roster (confirmed for real 2026-08-16, currently used only to
+enrich `photo_url` via `upsertPlayerPhotoForTeam` -- see that function's
+own comment, which explicitly notes "nothing here touches which team a
+player is on"). That's a strictly more authoritative signal than deriving
+current-ness from appearance recency, and could set `current_team_id` for
+Championship players the exact same way FPL already does for Premier
+League ones -- eliminating this entire class of staleness bug outright
+instead of bounding it by season. Not attempted today: it would mean
+teaching the squads-endpoint entity-matching path (which currently
+requires a player to already have `current_team_id = teamId` to be
+considered a match candidate -- see `upsertPlayerPhotoForTeam`'s WHERE
+clause) to also handle first-time Championship sightings, a real,
+separate piece of design work, not a one-line change.
+
+Verified against a targeted scratch-Postgres reproduction built directly
+from the report, not just reasoning about the query: seeded two seasons
+(2025/26, 2026/27), a team, and two players -- one with only a 2025/26
+appearance for the team ("Departed Player"), one with a 2026/27 appearance
+("Current Player") -- then hit the real `/api/teams/:id/dashboard`
+endpoint. Confirmed the departed player no longer appears in the squad at
+all while the current one does, and separately confirmed a third player
+with `current_team_id` set directly (the Premier League/FPL path) still
+shows regardless of having no lineup appearance at all, proving that path
+is untouched. Backend `tsc --noEmit` and all 31 `vitest` tests pass clean.
