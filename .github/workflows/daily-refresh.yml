@@ -68,6 +68,20 @@ jobs:
             echo "Past the transfer window cutoff ($cutoff) -- skipping roster refresh."
           fi
 
+      - name: Sync current team rosters (Championship, via API-Football squads)
+        working-directory: backend
+        # As of 2026-08-18, db:seed:photos does more than its name says --
+        # GET /players/squads?team={id} is the authoritative "who's on this
+        # roster right now" signal for Championship teams (FPL only covers
+        # Premier League, see the FPL step above), and this run is what
+        # keeps players.current_team_id fresh for them: a departed player
+        # gets cleared, a new signing gets picked up. Unlike FPL's step,
+        # not gated to a transfer window -- Championship transfers aren't
+        # tied to FPL's calendar, and this is a flat ~44 calls/day
+        # regardless (trivial against the paid tier's 7500/day budget).
+        # See docs/learning-log.md's 2026-08-18 entry.
+        run: npm run db:seed:photos
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

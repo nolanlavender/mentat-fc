@@ -188,13 +188,18 @@ export async function setTeamExternalFplId(pool: Pool, teamId: number, externalF
   await pool.query(`UPDATE teams SET external_fpl_id = $2 WHERE id = $1`, [teamId, externalFplId]);
 }
 
-// A direct overwrite, not a COALESCE-preserve-old upsert: FPL's
-// bootstrap-static always reflects the current reality of a live fantasy
-// game, so on a rerun it should win over whatever was there before (a
-// transfer moved the player, and that stops being true, not something to
-// preserve). Only FPL touches this column -- API-Football-sourced sightings
-// (lineups, player-stats) know "this player played for this team in this
-// match," not "this is the player's current team," so they don't call this.
+// A direct overwrite, not a COALESCE-preserve-old upsert: both callers'
+// sources always reflect current reality on a rerun, so either should win
+// over whatever was there before (a transfer moved the player, and that
+// stops being true, not something to preserve). Two callers, deliberately
+// not three: FPL's bootstrap-static (Premier League) and, since
+// 2026-08-18, upsertPlayerForTeamRoster's GET /players/squads?team={id}
+// sightings (Championship and PL both, though PL's FPL signal usually
+// lands first) -- both are genuine "this is the player's CURRENT team"
+// signals. API-Football's lineups/player-stats sightings still don't call
+// this and never should: they only know "this player played for this team
+// in THIS match," which stops being true the moment a transfer happens,
+// exactly the staleness getSquad's 2026-08-18 fix had to work around.
 export async function setPlayerCurrentTeam(pool: Pool, playerId: number, teamId: number): Promise<void> {
   await pool.query(`UPDATE players SET current_team_id = $2 WHERE id = $1`, [playerId, teamId]);
 }
@@ -260,7 +265,7 @@ async function findPlayerByExternalId(pool: Pool, source: string, externalId: nu
  *    (This is the same "api_football" id space players.external_api_football_id
  *    has always tracked -- callers seeing a DIFFERENT API-Football id
  *    space, like /players/squads, use their own source name and their own
- *    matching, see upsertPlayerPhotoForTeam.)
+ *    matching, see upsertPlayerForTeamRoster.)
  * 2. players.natural_key (full name + date of birth, generated column),
  *    the merge target when we know a DOB -- normally an FPL-sourced call.
  * 3. An exact case-insensitive name match against an existing row, for the
@@ -366,7 +371,7 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
     // name, API-Football's lineups/player-stats sometimes use their common
     // football name), but this time on the path that actually feeds
     // model-service's goal-scorer training data, not just photos. Reusing
-    // upsertPlayerPhotoForTeam's same word-subsequence match and the same
+    // upsertPlayerForTeamRoster's same word-subsequence match and the same
     // safety rule: only attempted when the caller knows which team this
     // sighting is FOR (most lineup/player-stats calls do), scoped to that
     // team's roster, and only acted on with exactly one candidate -- the
@@ -451,30 +456,69 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
   return id;
 }
 
+// Shared by upsertPlayerForTeamRoster's two candidate queries below. Same
+// "current_team_id if set, else this season's most recent finished
+// appearance" resolution teams.service.ts's getSquad uses -- deliberately
+// reused, not reinvented (see that function's own comment, and
+// docs/learning-log.md's 2026-08-18 entry). Needed here specifically
+// because a Championship player's current_team_id is never set before
+// their FIRST squads-endpoint sighting -- matching on current_team_id
+// alone (this function's original behavior) could therefore never succeed
+// for a team FPL doesn't cover, and every sighting fell through to
+// inserting a fresh orphan row instead of finding the real one already
+// populated by /fixtures/lineups.
+const ROSTER_CANDIDATES_CTE = `
+  WITH latest_season AS (
+    SELECT id FROM seasons ORDER BY start_date DESC LIMIT 1
+  ),
+  recent_appearance AS (
+    SELECT DISTINCT ON (fl.player_id) fl.player_id, fl.team_id
+    FROM fixture_lineups fl
+    JOIN fixtures f ON f.id = fl.fixture_id
+    JOIN competition_seasons cs ON cs.id = f.competition_season_id
+    WHERE f.status = 'finished' AND cs.season_id = (SELECT id FROM latest_season)
+    ORDER BY fl.player_id, f.kickoff_date DESC
+  ),
+  roster_candidates AS (
+    SELECT p.id, p.full_name
+    FROM players p
+    LEFT JOIN recent_appearance ra ON ra.player_id = p.id
+    WHERE COALESCE(p.current_team_id, ra.team_id) = $1
+  )
+`;
+
 /**
- * Enrichment-only upsert for GET /players/squads?team={id} -- deliberately
- * NOT routed through upsertPlayerGoldenRecord's usual external-id-first
- * matching, because that checks the 'api_football' source specifically.
- * Real, confirmed quirk in production data 2026-08-16: this endpoint can
- * carry a DIFFERENT internal player id than /fixtures/lineups or
- * /fixtures/players use for the exact same real person (Reece James is
- * external_api_football_id 19890 via lineups, but 19545 via this endpoint
- * -- same shape of issue already seen with Bruno Fernandes across two
- * other endpoints). This id space gets its own source, 'api_football_squads',
- * in player_external_ids -- checked first, so a repeat sighting of the
- * same squads-endpoint id resolves in one lookup without re-solving the
- * name ambiguity below every time.
+ * Resolves a GET /players/squads?team={id} sighting to a real player row
+ * AND records that this team is that player's current one via
+ * setPlayerCurrentTeam -- previously photo-only (see git history), fixed
+ * 2026-08-18 alongside getSquad's season-bound fallback. This endpoint is
+ * API-Football's own "who's actually on this roster right now" signal
+ * (confirmed for real 2026-08-16), the same authority FPL already provides
+ * for Premier League, so it's the right source to extend
+ * players.current_team_id to Championship with, replacing reliance on
+ * appearance-recency alone: a transferred player's old club kept a "most
+ * recent" appearance for them until their new club accumulated one of its
+ * own, so they kept showing up on the old squad page in that gap. See
+ * docs/learning-log.md's 2026-08-18 entry for the real report that caught
+ * this and the full reasoning.
  *
- * On a first sighting, since this call is already scoped to one team, the
- * match is scoped the same way: look for a CURRENT roster player on THIS
- * team by exact name or the same abbreviated initial+surname fallback used
- * elsewhere, a much smaller and safer candidate set (~25-30 players) than
- * a global lookup. Only ever touches photo_url on the players row itself --
- * never overwrites players.external_api_football_id with this endpoint's
+ * Deliberately NOT routed through upsertPlayerGoldenRecord's usual
+ * external-id-first matching, because that checks the 'api_football'
+ * source specifically. Real, confirmed quirk in production data
+ * 2026-08-16: this endpoint can carry a DIFFERENT internal player id than
+ * /fixtures/lineups or /fixtures/players use for the exact same real
+ * person (Reece James is external_api_football_id 19890 via lineups, but
+ * 19545 via this endpoint -- same shape of issue already seen with Bruno
+ * Fernandes across two other endpoints). This id space gets its own
+ * source, 'api_football_squads', in player_external_ids -- checked first,
+ * so a repeat sighting of the same squads-endpoint id resolves in one
+ * lookup without re-solving the name ambiguity below every time.
+ *
+ * Never overwrites players.external_api_football_id with this endpoint's
  * possibly-different id, since the one already linked there is presumably
  * the one every other row (lineups, player-stats) already points at.
  */
-export async function upsertPlayerPhotoForTeam(
+export async function upsertPlayerForTeamRoster(
   pool: Pool,
   teamId: number,
   p: { externalApiFootballId: number; fullName: string; photoUrl?: string },
@@ -482,6 +526,7 @@ export async function upsertPlayerPhotoForTeam(
   const existing = await findPlayerByExternalId(pool, 'api_football_squads', p.externalApiFootballId);
   if (existing) {
     await pool.query(`UPDATE players SET photo_url = COALESCE(photo_url, $2) WHERE id = $1`, [existing.id, p.photoUrl ?? null]);
+    await setPlayerCurrentTeam(pool, existing.id, teamId);
     return existing.id;
   }
 
@@ -491,18 +536,17 @@ export async function upsertPlayerPhotoForTeam(
   // Corozo").
   const abbreviated = parseAbbreviatedName(p.fullName);
   const { rows: candidates } = await pool.query<{ id: number }>(
-    `SELECT id FROM players
-     WHERE current_team_id = $1
-       AND (
-         lower(full_name) = lower($2)
-         OR ($3::text IS NOT NULL AND lower(left(full_name, 1)) = $3 AND $4 = ANY((string_to_array(lower(full_name), ' '))[2:]))
-       )`,
+    `${ROSTER_CANDIDATES_CTE}
+     SELECT id FROM roster_candidates
+     WHERE lower(full_name) = lower($2)
+        OR ($3::text IS NOT NULL AND lower(left(full_name, 1)) = $3 AND $4 = ANY((string_to_array(lower(full_name), ' '))[2:]))`,
     [teamId, p.fullName, abbreviated?.initial ?? null, abbreviated?.surname ?? null],
   );
   if (candidates.length === 1) {
     const id = candidates[0].id;
     await pool.query(`UPDATE players SET photo_url = COALESCE(photo_url, $2) WHERE id = $1`, [id, p.photoUrl ?? null]);
     await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
+    await setPlayerCurrentTeam(pool, id, teamId);
     return id;
   }
 
@@ -515,15 +559,15 @@ export async function upsertPlayerPhotoForTeam(
     // and neither exact nor abbreviated-initial+surname matching bridges
     // that gap. namesLikelyMatch's word-subsequence check catches it in
     // both directions without needing to know in advance which source has
-    // the longer form. Still scoped to this team's small roster and still
-    // requires a unique match, so the false-positive risk that made this
-    // too risky to do as a *global* fallback (see upsertPlayerGoldenRecord)
-    // doesn't apply here. When it matches, the stored name is upgraded to
-    // whichever of the two is shorter -- the common football name is
-    // consistently the shorter one in every real case seen so far,
-    // regardless of which source it came from.
+    // the longer form. Still scoped to this team's roster candidates and
+    // still requires a unique match, so the false-positive risk that made
+    // this too risky to do as a *global* fallback (see
+    // upsertPlayerGoldenRecord) doesn't apply here. When it matches, the
+    // stored name is upgraded to whichever of the two is shorter -- the
+    // common football name is consistently the shorter one in every real
+    // case seen so far, regardless of which source it came from.
     const { rows: roster } = await pool.query<{ id: number; full_name: string }>(
-      `SELECT id, full_name FROM players WHERE current_team_id = $1`,
+      `${ROSTER_CANDIDATES_CTE} SELECT id, full_name FROM roster_candidates`,
       [teamId],
     );
     const fuzzyMatches = roster.filter((r) => namesLikelyMatch(r.full_name, p.fullName));
@@ -538,20 +582,45 @@ export async function upsertPlayerPhotoForTeam(
         [match.id, p.photoUrl ?? null, preferIncomingName, p.fullName],
       );
       await linkPlayerExternalId(pool, match.id, 'api_football_squads', p.externalApiFootballId);
+      await setPlayerCurrentTeam(pool, match.id, teamId);
       return match.id;
     }
   }
 
-  // No confident match against this team's current roster (new signing not
-  // yet linked elsewhere, or a genuinely ambiguous name) -- fall through to
-  // the normal golden-record path, same as any other API-Football sighting.
+  // No confident match against this team's roster candidates (new signing
+  // not yet linked elsewhere, or a genuinely ambiguous name) -- fall
+  // through to the normal golden-record path, same as any other
+  // API-Football sighting.
   const id = await upsertPlayerGoldenRecord(pool, {
     externalApiFootballId: p.externalApiFootballId,
     fullName: p.fullName,
     photoUrl: p.photoUrl,
   });
   await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
+  await setPlayerCurrentTeam(pool, id, teamId);
   return id;
+}
+
+/**
+ * The complement to upsertPlayerForTeamRoster's writes: clears
+ * current_team_id for anyone previously recorded as being on teamId but
+ * absent from a fresh, real GET /players/squads?team={id} response --
+ * without this, current_team_id could only ever gain members for a team,
+ * never lose one who'd transferred out, released, or dropped out of
+ * first-team football entirely. Call once per team, after processing that
+ * team's full squad response.
+ *
+ * Refuses to act on an empty roster list -- a transient/malformed API
+ * response returning zero players is far more likely than a real team
+ * genuinely having none, and clearing every current player over one bad
+ * call would be a lot of damage from a single flaky response.
+ */
+export async function clearStaleTeamRoster(pool: Pool, teamId: number, currentRosterPlayerIds: number[]): Promise<void> {
+  if (currentRosterPlayerIds.length === 0) return;
+  await pool.query(`UPDATE players SET current_team_id = NULL WHERE current_team_id = $1 AND NOT (id = ANY($2::int[]))`, [
+    teamId,
+    currentRosterPlayerIds,
+  ]);
 }
 
 export async function upsertFplGameweek(

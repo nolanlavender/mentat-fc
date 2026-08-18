@@ -14,7 +14,8 @@ import {
   upsertFixturePlayerStats,
   upsertFixturePlayerStatsBatch,
   upsertPlayerGoldenRecord,
-  upsertPlayerPhotoForTeam,
+  upsertPlayerForTeamRoster,
+  clearStaleTeamRoster,
   markFixturesLineupsChecked,
   type FixturePlayerStatsInput,
 } from '../lib/db.js';
@@ -723,10 +724,14 @@ interface ApiFootballSquadsResponse {
  * combined instead of dozens of pages per league, and can't leave a whole
  * league partially covered the way a crash mid-pagination did.
  *
- * Routed through upsertPlayerPhotoForTeam, not the general-purpose golden-
- * record upsert -- see that function's own comment for why: this
- * endpoint's player ids don't always agree with the ids /fixtures/lineups
- * and /fixtures/players use for the same real person.
+ * Despite the name (kept for historical continuity with docs/learning-log.md's
+ * earlier entries, not just photos anymore as of 2026-08-18): also the
+ * authoritative source for players.current_team_id on teams FPL doesn't
+ * cover, via upsertPlayerForTeamRoster/clearStaleTeamRoster -- see those
+ * functions' own comments, and this endpoint's data doesn't always agree
+ * with the ids /fixtures/lineups and /fixtures/players use for the same
+ * real person, which is why it's routed through its own matching path
+ * rather than the general-purpose golden-record upsert.
  */
 export async function seedApiFootballTeamSquadPhotos(
   pool: Pool,
@@ -741,13 +746,16 @@ export async function seedApiFootballTeamSquadPhotos(
   const squad = data.response[0];
   if (!squad) return { playersSeen: 0 };
 
+  const rosterPlayerIds: number[] = [];
   for (const player of squad.players) {
-    await upsertPlayerPhotoForTeam(pool, teamId, {
+    const id = await upsertPlayerForTeamRoster(pool, teamId, {
       externalApiFootballId: player.id,
       fullName: player.name,
       photoUrl: player.photo ?? undefined,
     });
+    rosterPlayerIds.push(id);
   }
+  await clearStaleTeamRoster(pool, teamId, rosterPlayerIds);
 
   return { playersSeen: squad.players.length };
 }

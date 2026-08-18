@@ -4097,3 +4097,102 @@ all while the current one does, and separately confirmed a third player
 with `current_team_id` set directly (the Premier League/FPL path) still
 shows regardless of having no lineup appearance at all, proving that path
 is untouched. Backend `tsc --noEmit` and all 31 `vitest` tests pass clean.
+
+## 2026-08-18 -- Bounding the symptom vs. fixing the signal: giving Championship a real "current roster"
+
+The season-bound fix above (same day, a few hours earlier) treated the
+*symptom*: it stopped a departed player from showing up forever, by aging
+out any appearance older than the current season. Offered to go further
+and actually fix the *signal* underneath it, and got a "let's do this" --
+so this entry is that follow-up.
+
+**Why the season bound wasn't the real fix.** It only ever adds a
+time limit to an inference ("this is probably still true because it was
+true recently"), which has a real remaining gap: a player transferred
+*within* the current season, who's already picked up a fresh appearance
+for his old club this season, would still show there even after the
+transfer, right up until his new club accumulates an appearance of its
+own. Bounding by season narrows the window this can happen in; it can't
+close it.
+
+**The actual fix: stop inferring "current" from match history at all for
+Championship, the same way Premier League never has to.** `GET
+/players/squads?team={id}` -- already being called for player photos, per
+the 2026-08-16 entries -- is API-Football's own definitive "who's on this
+roster right now" answer, the exact same kind of live authority FPL's
+bootstrap-static already provides for Premier League. It was sitting
+right there, unused for the one thing that actually mattered. Extended
+`setPlayerCurrentTeam` (previously FPL-exclusive by design, per its own
+comment) to a second caller, `upsertPlayerForTeamRoster` -- the renamed,
+rewritten `upsertPlayerPhotoForTeam` -- so a squads-endpoint sighting now
+sets `players.current_team_id` directly, not just `photo_url`.
+
+**The chicken-and-egg problem this created, and how the season-bound work
+from earlier the same day solved it for free.** The old matching logic
+required `current_team_id = teamId` just to find a *candidate* to match
+a name against -- fine for Premier League (FPL always sets it first), but
+circular for Championship, where `current_team_id` starts every single
+row at NULL. Every squads-endpoint sighting would have fallen through to
+inserting a fresh orphan row on first run, duplicating every player
+already correctly populated by `/fixtures/lineups`. Fixed by widening the
+candidate pool to the *exact same* "current_team_id if set, else this
+season's most recent finished appearance" resolution `getSquad` had just
+been given a few hours earlier in the same session -- built as a shared
+SQL fragment (`ROSTER_CANDIDATES_CTE`) rather than copy-pasted, so the two
+call sites can't quietly drift apart. A player's real, appearance-rich row
+gets found and matched on the very first squads sync; from then on,
+`current_team_id` is set and every future lookup (including `getSquad`
+itself) can just use it directly, no inference needed.
+
+**Clearing is the half a pure "add current_team_id" signal can't do on
+its own, and it's the half that actually matters most.** Appearance-based
+inference can only ever add a match, never say "this player is
+definitively no longer here" -- there's no way to derive an absence from
+data that simply stops arriving. A live roster endpoint can say that
+directly: `clearStaleTeamRoster` runs once per team after processing its
+full squads response, and clears `current_team_id` for anyone previously
+recorded on that team but missing from this run's actual roster. Guarded
+against acting on an empty roster list -- a flaky/malformed API response
+returning zero players is far more likely than a real team having none,
+and clearing everyone off one bad call would do a lot of damage for a
+transient blip.
+
+**Made this run daily, not just on a manual `npm run db:seed:photos`.**
+The whole point was reliability matching FPL's; a fix that only applies
+when someone remembers to run a script by hand doesn't clear that bar.
+Added as a new step in both `.github/workflows/daily-refresh.yml` and the
+local `backend/scripts/daily-refresh.sh` (kept in sync, per that script's
+own note about being Phase 10's eventual GitHub Actions replacement),
+right after the FPL roster step. Deliberately *not* gated to the
+transfer-window cutoff the FPL step uses -- Championship transfers aren't
+tied to FPL's fantasy calendar at all -- and the cost is flat regardless
+of window (~44 calls/day for Premier League + Championship combined,
+trivial against the paid API-Football tier's 7500/day budget).
+
+**Scope check: `getSquad`'s season-bound fallback from earlier wasn't
+wasted work.** Kept, not removed -- it's now the fallback for a player who
+hasn't been through a squads sync yet (a brand-new signing between daily
+runs, or before the very first sync completes after this deploys), same
+"no confident answer yet, not a confidently wrong one" role it always had,
+just demoted from primary signal to safety net now that a better primary
+signal exists.
+
+Verified against a targeted scratch-Postgres reproduction, calling the
+real exported functions directly (`upsertPlayerForTeamRoster`,
+`clearStaleTeamRoster`) rather than mocking anything: (1) a player with an
+existing lineups-sourced row and a current-season appearance, no
+`current_team_id` yet, correctly matched on first squads sync instead of
+duplicating -- confirmed exactly one row exists afterward; (2) the same
+player survives a fresh sync that still includes him; (3) a fresh sync
+that *doesn't* include him (simulating a transfer or release) correctly
+clears `current_team_id` to NULL; (4) re-sighted under a second team's
+squads response (same external id, simulating the transfer landing)
+correctly resolves to the same row and moves `current_team_id` to the new
+team, not a duplicate; (5) an empty roster list is confirmed a no-op,
+doesn't wipe a real player. Separately re-verified the abbreviated
+("M. Test") and word-subsequence fuzzy ("João Fuzzy" for "João Fuzzy
+Longname Silva") matching tiers still resolve correctly against the
+widened candidate pool, no duplicates. Then checked the real
+`GET /api/teams/:id/dashboard` endpoint end-to-end and confirmed a
+simulated transfer correctly moved a player from one team's squad to
+another's. Backend `tsc --noEmit` and all 31 `vitest` tests pass clean.

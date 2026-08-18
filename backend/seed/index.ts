@@ -215,10 +215,15 @@ export async function backfillTeamLogos(): Promise<void> {
  * db:seed:current-season` first if that count is ever non-zero.
  *
  * Current season only, same reasoning as backfillTeamLogos above: this is
- * about getting headshots for the squads actually playing right now, not
- * an exhaustive historical sweep. Nothing here touches which team a player
- * is "on" (players.current_team_id stays FPL's alone to set, see
- * lib/db.ts's setPlayerCurrentTeam) -- this only ever enriches photo_url.
+ * about the squads actually playing right now, not an exhaustive
+ * historical sweep. As of 2026-08-18, this is also the authoritative
+ * source for players.current_team_id on teams FPL doesn't cover
+ * (Championship) -- see lib/db.ts's upsertPlayerForTeamRoster and
+ * clearStaleTeamRoster, and docs/learning-log.md's 2026-08-18 entry for
+ * why deriving "current" from appearance recency alone wasn't enough.
+ * Despite the function/script name, this run is no longer just cosmetic
+ * enrichment: skipping it for too long means Championship squad pages
+ * drift stale the same way they used to before this fix.
  */
 export async function backfillPlayerPhotos(): Promise<void> {
   if (!process.env.API_FOOTBALL_KEY) {
