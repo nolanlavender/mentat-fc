@@ -21,23 +21,83 @@ def load_finished_matches(conn: psycopg.Connection, competition_names: list[str]
     Championship + FA Cup together, see app.train) can be built from one
     query instead of three separately-fetched frames stitched together by
     the caller.
+
+    Also carries each side's own xG for the match (home_xg/away_xg,
+    nullable) -- not used by DixonColesModel.fit() directly, which only
+    ever reads home_score/away_score, but see blend_xg_into_scores below
+    for how a caller opts into using it. Two separate LEFT JOINs (not one),
+    since fixture_team_stats is one row per team per fixture, not one row
+    per fixture with home/away columns.
     """
     query = """
         SELECT f.id AS fixture_id, f.kickoff_date, c.name AS competition_name,
                f.home_team_id, ht.name AS home_team,
                f.away_team_id, at.name AS away_team,
-               f.home_score, f.away_score
+               f.home_score, f.away_score,
+               home_stats.xg AS home_xg, away_stats.xg AS away_xg
         FROM fixtures f
         JOIN teams ht ON ht.id = f.home_team_id
         JOIN teams at ON at.id = f.away_team_id
         JOIN competition_seasons cs ON cs.id = f.competition_season_id
         JOIN competitions c ON c.id = cs.competition_id
+        LEFT JOIN fixture_team_stats home_stats ON home_stats.fixture_id = f.id AND home_stats.team_id = f.home_team_id
+        LEFT JOIN fixture_team_stats away_stats ON away_stats.fixture_id = f.id AND away_stats.team_id = f.away_team_id
         WHERE c.name = ANY(%(competition_names)s)
           AND f.home_score IS NOT NULL
           AND f.away_score IS NOT NULL
         ORDER BY f.kickoff_date
     """
     return _query_df(conn, query, {"competition_names": competition_names})
+
+
+def blend_xg_into_scores(matches: pd.DataFrame, xg_weight: float) -> pd.DataFrame:
+    """
+    Returns a copy of `matches` with home_score/away_score replaced by a
+    blend of the actual final score and that side's own xG for the match,
+    wherever xG is available. xG is a lower-variance read on a team's true
+    underlying attacking/defensive performance than the actual goal count
+    -- a team can dominate on chances and still lose 0-1 on one bad
+    bounce, or scrape a win from a single shot on target -- so blending it
+    into what DixonColesModel.fit() sees as "goals" makes the fit less
+    noisy without discarding what actually happened.
+
+    xg_weight is how much of the blend is xG: 0.0 leaves scores completely
+    unchanged (today's behavior), 1.0 fits on pure xG, values in between
+    interpolate. Falls back to the real score untouched wherever xG is
+    missing for that side -- xG coverage isn't complete (older fixtures
+    and lower-tier competitions often don't have it, see
+    fixture_team_stats.xg's own nullable column) -- never invents a
+    substitute value for a match that doesn't have one.
+
+    Deliberately a separate opt-in step, not folded into
+    load_finished_matches or DixonColesModel.fit() itself: app.evaluate is
+    the sandbox for finding a good xg_weight (same role
+    HALF_LIFE_DAYS already plays there) before app.train's deployed value
+    gets updated to match.
+    """
+    blended = matches.copy()
+    # A blended score is inherently fractional (goals mixed with xG), so
+    # these columns need a float dtype regardless of xg_weight -- real
+    # crash found writing this: home_score/away_score come back int64 from
+    # Postgres, and assigning float values into an int64 column raises
+    # rather than silently upcasting on a recent pandas.
+    blended["home_score"] = blended["home_score"].astype(float)
+    blended["away_score"] = blended["away_score"].astype(float)
+    # Same dtype issue as above -- an all-null xg column (real when a whole
+    # competition/season predates xG coverage) infers as object dtype
+    # rather than float64, which then fails the same strict-upcast check
+    # even on a fully-empty assignment.
+    blended["home_xg"] = blended["home_xg"].astype(float)
+    blended["away_xg"] = blended["away_xg"].astype(float)
+    has_home_xg = blended["home_xg"].notna()
+    has_away_xg = blended["away_xg"].notna()
+    blended.loc[has_home_xg, "home_score"] = (1 - xg_weight) * blended.loc[has_home_xg, "home_score"] + xg_weight * blended.loc[
+        has_home_xg, "home_xg"
+    ]
+    blended.loc[has_away_xg, "away_score"] = (1 - xg_weight) * blended.loc[has_away_xg, "away_score"] + xg_weight * blended.loc[
+        has_away_xg, "away_xg"
+    ]
+    return blended
 
 
 def load_upcoming_fixtures(conn: psycopg.Connection, competition_name: str) -> pd.DataFrame:
