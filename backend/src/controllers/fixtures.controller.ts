@@ -4,13 +4,14 @@ import { NotFoundError } from '../lib/errors.js';
 import { parseIdParam } from '../lib/validation.js';
 
 export async function getFixtures(req: Request, res: Response): Promise<void> {
-  const { competition, teamId, from, to, limit } = req.query;
+  const { competition, teamId, from, to, date, limit } = req.query;
   res.json(
     await listFixtures({
       competitionName: typeof competition === 'string' ? competition : undefined,
       teamId: typeof teamId === 'string' ? parseIdParam(teamId, 'team') : undefined,
       from: typeof from === 'string' ? from : undefined,
       to: typeof to === 'string' ? to : undefined,
+      date: typeof date === 'string' ? date : undefined,
       limit: typeof limit === 'string' ? Number(limit) : undefined,
     }),
   );
