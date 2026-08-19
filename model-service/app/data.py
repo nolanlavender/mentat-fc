@@ -22,19 +22,29 @@ def load_finished_matches(conn: psycopg.Connection, competition_names: list[str]
     query instead of three separately-fetched frames stitched together by
     the caller.
 
-    Also carries each side's own xG for the match (home_xg/away_xg,
-    nullable) -- not used by DixonColesModel.fit() directly, which only
-    ever reads home_score/away_score, but see blend_xg_into_scores below
-    for how a caller opts into using it. Two separate LEFT JOINs (not one),
-    since fixture_team_stats is one row per team per fixture, not one row
-    per fixture with home/away columns.
+    Also carries each side's own shots on target for the match
+    (home_shots_on_target/away_shots_on_target, nullable) -- not used by
+    DixonColesModel.fit() directly, which only ever reads
+    home_score/away_score, but see blend_shots_on_target_into_scores below
+    for how a caller opts into using it. Two separate LEFT JOINs (not
+    one), since fixture_team_stats is one row per team per fixture, not
+    one row per fixture with home/away columns.
+
+    True xG would have been the more standard signal here, but it isn't
+    available from any current data source -- checked directly against a
+    real API-Football /fixtures/statistics response (2026-08-19): no
+    expected-goals field anywhere in it, only shot/card/pass counts.
+    Shots on target (football-data.co.uk's HST/AST CSV columns, already
+    populated for every Premier League and Championship match) is the
+    closest real signal actually sitting in the DB.
     """
     query = """
         SELECT f.id AS fixture_id, f.kickoff_date, c.name AS competition_name,
                f.home_team_id, ht.name AS home_team,
                f.away_team_id, at.name AS away_team,
                f.home_score, f.away_score,
-               home_stats.xg AS home_xg, away_stats.xg AS away_xg
+               home_stats.shots_on_target AS home_shots_on_target,
+               away_stats.shots_on_target AS away_shots_on_target
         FROM fixtures f
         JOIN teams ht ON ht.id = f.home_team_id
         JOIN teams at ON at.id = f.away_team_id
@@ -50,53 +60,77 @@ def load_finished_matches(conn: psycopg.Connection, competition_names: list[str]
     return _query_df(conn, query, {"competition_names": competition_names})
 
 
-def blend_xg_into_scores(matches: pd.DataFrame, xg_weight: float) -> pd.DataFrame:
+def blend_shots_on_target_into_scores(matches: pd.DataFrame, blend_weight: float) -> pd.DataFrame:
     """
     Returns a copy of `matches` with home_score/away_score replaced by a
-    blend of the actual final score and that side's own xG for the match,
-    wherever xG is available. xG is a lower-variance read on a team's true
-    underlying attacking/defensive performance than the actual goal count
-    -- a team can dominate on chances and still lose 0-1 on one bad
-    bounce, or scrape a win from a single shot on target -- so blending it
-    into what DixonColesModel.fit() sees as "goals" makes the fit less
-    noisy without discarding what actually happened.
+    blend of the actual final score and a goals-scaled version of that
+    side's own shots on target for the match, wherever shots-on-target
+    data is available. Like xG would have been, shots on target is a
+    lower-variance read on a team's true underlying attacking performance
+    than the actual goal count -- a team can rack up shots on target and
+    still lose 0-1 to one save going the wrong way -- so blending it into
+    what DixonColesModel.fit() sees as "goals" makes the fit less noisy
+    without discarding what actually happened.
 
-    xg_weight is how much of the blend is xG: 0.0 leaves scores completely
-    unchanged (today's behavior), 1.0 fits on pure xG, values in between
-    interpolate. Falls back to the real score untouched wherever xG is
-    missing for that side -- xG coverage isn't complete (older fixtures
-    and lower-tier competitions often don't have it, see
-    fixture_team_stats.xg's own nullable column) -- never invents a
+    Shots on target isn't on the same scale as goals, though -- a team
+    typically has several times as many shots on target as actual goals
+    in a match, so blending it in raw would badly inflate the fitted
+    attack/defense parameters. Rescaled here by the training set's own
+    mean goals-per-shot-on-target ratio (computed across whichever rows
+    actually have both a real score and a real shots-on-target figure,
+    home and away pooled together) rather than a hardcoded assumed
+    conversion rate that might not hold for this specific
+    dataset/competition -- self-calibrating to whatever `matches` is
+    passed in, so a Premier League call and a Championship call (which
+    may have genuinely different real conversion rates) each get their
+    own correct scale.
+
+    blend_weight is how much of the blend is the rescaled shots-on-target
+    signal: 0.0 leaves scores completely unchanged (today's deployed
+    behavior), 1.0 fits on pure rescaled shots-on-target, values in
+    between interpolate. Falls back to the real score untouched wherever
+    shots-on-target is missing for that side -- never invents a
     substitute value for a match that doesn't have one.
 
     Deliberately a separate opt-in step, not folded into
     load_finished_matches or DixonColesModel.fit() itself: app.evaluate is
-    the sandbox for finding a good xg_weight (same role
+    the sandbox for finding a good blend_weight (same role
     HALF_LIFE_DAYS already plays there) before app.train's deployed value
     gets updated to match.
     """
     blended = matches.copy()
-    # A blended score is inherently fractional (goals mixed with xG), so
-    # these columns need a float dtype regardless of xg_weight -- real
-    # crash found writing this: home_score/away_score come back int64 from
+    # A blended score is inherently fractional, so these columns need a
+    # float dtype regardless of blend_weight -- real crash found building
+    # the xG version of this: home_score/away_score come back int64 from
     # Postgres, and assigning float values into an int64 column raises
-    # rather than silently upcasting on a recent pandas.
+    # rather than silently upcasting on a recent pandas. Same fix applies
+    # to the shots-on-target columns themselves (an all-null column, real
+    # whenever a whole competition/season has no CSV coverage yet, infers
+    # as object dtype and hits the identical issue).
     blended["home_score"] = blended["home_score"].astype(float)
     blended["away_score"] = blended["away_score"].astype(float)
-    # Same dtype issue as above -- an all-null xg column (real when a whole
-    # competition/season predates xG coverage) infers as object dtype
-    # rather than float64, which then fails the same strict-upcast check
-    # even on a fully-empty assignment.
-    blended["home_xg"] = blended["home_xg"].astype(float)
-    blended["away_xg"] = blended["away_xg"].astype(float)
-    has_home_xg = blended["home_xg"].notna()
-    has_away_xg = blended["away_xg"].notna()
-    blended.loc[has_home_xg, "home_score"] = (1 - xg_weight) * blended.loc[has_home_xg, "home_score"] + xg_weight * blended.loc[
-        has_home_xg, "home_xg"
-    ]
-    blended.loc[has_away_xg, "away_score"] = (1 - xg_weight) * blended.loc[has_away_xg, "away_score"] + xg_weight * blended.loc[
-        has_away_xg, "away_xg"
-    ]
+    blended["home_shots_on_target"] = blended["home_shots_on_target"].astype(float)
+    blended["away_shots_on_target"] = blended["away_shots_on_target"].astype(float)
+
+    has_home_sot = blended["home_shots_on_target"].notna()
+    has_away_sot = blended["away_shots_on_target"].notna()
+    goals_with_sot = pd.concat(
+        [blended.loc[has_home_sot, "home_score"], blended.loc[has_away_sot, "away_score"]]
+    )
+    sot = pd.concat(
+        [blended.loc[has_home_sot, "home_shots_on_target"], blended.loc[has_away_sot, "away_shots_on_target"]]
+    )
+    if sot.empty or sot.sum() == 0:
+        return blended  # nothing to blend with -- leave every score untouched
+
+    conversion_rate = goals_with_sot.sum() / sot.sum()
+
+    blended.loc[has_home_sot, "home_score"] = (1 - blend_weight) * blended.loc[
+        has_home_sot, "home_score"
+    ] + blend_weight * (blended.loc[has_home_sot, "home_shots_on_target"] * conversion_rate)
+    blended.loc[has_away_sot, "away_score"] = (1 - blend_weight) * blended.loc[
+        has_away_sot, "away_score"
+    ] + blend_weight * (blended.loc[has_away_sot, "away_shots_on_target"] * conversion_rate)
     return blended
 
 
