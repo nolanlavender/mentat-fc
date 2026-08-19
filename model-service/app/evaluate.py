@@ -12,6 +12,11 @@ docs/learning-log.md's Phase 5 entry for why "beat the market" isn't
 really the bar here; this is about finding out honestly where the model
 actually stands, which is the real point of this step.
 
+Also the sandbox for trying a candidate XG_BLEND_WEIGHT (see that
+constant's own comment, and app.data.blend_xg_into_scores) -- edit the
+constant, rerun, compare the Brier/log-loss numbers against a 0.0 baseline
+run, same process HALF_LIFE_DAYS already went through.
+
 Usage: python -m app.evaluate
 """
 
@@ -22,7 +27,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from app.data import load_closing_match_winner_probabilities, load_finished_matches
+from app.data import blend_xg_into_scores, load_closing_match_winner_probabilities, load_finished_matches
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 
@@ -42,6 +47,15 @@ MIN_MATCHES_FOR_BACKTEST = 100
 # Phase 5 entry for the full table) -- back to 180 as the best of what's
 # been tested so far.
 HALF_LIFE_DAYS = 180
+
+# How much of the fit's "goals" for a match is that side's own xG instead
+# of the actual final score -- see app.data.blend_xg_into_scores. 0.0 =
+# today's deployed behavior, completely unchanged. Not yet validated
+# against real data (no xG-blended value has been promoted to app.train's
+# deployed constant), so this starts at 0.0 rather than guessing a
+# plausible-sounding nonzero default -- try 0.25/0.5/0.75/1.0 here and
+# compare the backtest, same process HALF_LIFE_DAYS went through above.
+XG_BLEND_WEIGHT = 0.0
 
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
@@ -129,6 +143,7 @@ def main() -> None:
         if len(matches) < MIN_MATCHES_FOR_BACKTEST:
             print(f"Only {len(matches)} matches across {FIT_COMPETITIONS}, not enough for a meaningful backtest, skipping.")
             return
+        print(f"HALF_LIFE_DAYS={HALF_LIFE_DAYS}  XG_BLEND_WEIGHT={XG_BLEND_WEIGHT}")
 
         # One global date cutoff across the joint dataset, not a separate
         # per-competition split -- matches came back ordered by kickoff_date
@@ -141,7 +156,12 @@ def main() -> None:
         train_matches = matches[matches["kickoff_date"] < cutoff_date]
         test_matches = matches[matches["kickoff_date"] >= cutoff_date]
 
-        pl_train = train_matches[train_matches["competition_name"] == "Premier League"]
+        # xG blending (if XG_BLEND_WEIGHT != 0) only ever applies to what
+        # gets fit on -- test_matches, used below for the actual held-out
+        # outcomes, must stay real scores untouched, or the backtest would
+        # be scoring the model against a distorted version of what really
+        # happened instead of reality.
+        pl_train = blend_xg_into_scores(train_matches[train_matches["competition_name"] == "Premier League"], XG_BLEND_WEIGHT)
         pl_model = DixonColesModel()
         pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS)
         print(f"Premier League fit on {pl_model.fitted_on} matches, {len(pl_model.teams)} teams, cutoff {cutoff_date}")
@@ -149,7 +169,9 @@ def main() -> None:
             pl_model, conn, "Premier League", test_matches[test_matches["competition_name"] == "Premier League"], len(pl_train)
         )
 
-        championship_train = train_matches[train_matches["competition_name"] == "Championship"]
+        championship_train = blend_xg_into_scores(
+            train_matches[train_matches["competition_name"] == "Championship"], XG_BLEND_WEIGHT
+        )
         championship_model = DixonColesModel()
         championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS)
         print(f"Championship fit on {championship_model.fitted_on} matches, {len(championship_model.teams)} teams, cutoff {cutoff_date}")
@@ -165,7 +187,7 @@ def main() -> None:
         # only for FA Cup, the one competition that actually needs
         # cross-league comparability. See app.train's 2026-08-15 note.
         joint_model = DixonColesModel()
-        joint_model.fit(train_matches, half_life_days=HALF_LIFE_DAYS)
+        joint_model.fit(blend_xg_into_scores(train_matches, XG_BLEND_WEIGHT), half_life_days=HALF_LIFE_DAYS)
         print(
             f"Joint fit (for FA Cup) on {joint_model.fitted_on} matches across {', '.join(FIT_COMPETITIONS)}, "
             f"{len(joint_model.teams)} teams, cutoff {cutoff_date}"

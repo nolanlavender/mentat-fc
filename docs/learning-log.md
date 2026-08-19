@@ -4560,3 +4560,100 @@ row navigates to its real detail page, and the manual date input jumps
 to an arbitrary date and matches the same fixture reached via the
 day-at-a-time buttons. Backend `tsc --noEmit`, frontend `tsc -b`, and all
 31 backend `vitest` tests pass clean.
+
+## 2026-08-19 -- A model-improvement roadmap, and the first real piece: blending xG into the fit
+
+A real planning conversation before any code: how to make the match
+outcome model smarter using data already being collected (player stats,
+team stats, formations, injuries, lineups). Landed on five concrete
+pieces, but first had to sort them into what they actually *are*, since
+that determines how each one plugs in:
+
+1. **Better baseline ratings** (xG/shots blended into the Dixon-Coles fit)
+   -- still classic Dixon-Coles: one attack number, one defense number
+   per team, just estimated from richer data than goals alone.
+2. **Match-specific adjustments layered on top** (player availability,
+   injuries, a corners-based set-piece-matchup proxy) -- the baseline
+   rating from #1 stays what it is, but gets scaled up/down for a
+   *specific* fixture based on context the baseline can't see. Still a
+   Poisson model, still `attack x defense x home_advantage`, just with
+   more multiplicative terms conditioned on the match instead of only the
+   two teams' season identities.
+3. **Penalty takers** -- a completely separate track, living in the
+   goal-scorer allocation model, not touching match-outcome predictions
+   at all.
+
+Two ideas got tested against reality before being accepted into the plan,
+not just taken on faith:
+
+- **Head-to-head record** was flagged as a likely trap, not built:
+  two teams typically meet 2x/season, so 3 seasons of history is 5-6
+  games -- too small a sample for "Team A has beaten Team B 4 of the last
+  5" to mean anything beyond noise, and Dixon-Coles' attack/defense
+  ratings already capture the real reason one team beats another (they're
+  just stronger). Deferred pending an actual backtest rather than either
+  assumed-good or dismissed outright.
+- **Goal-source tagging** (to actually name which goals came from set
+  pieces vs. open play) was checked against real API-Football data before
+  designing around it -- a real `GET /fixtures/events` response showed
+  `detail` only ever distinguishes Normal Goal / Penalty / Own Goal, no
+  play-pattern field at all. Confirmed the fallback plan (a corners-won/
+  conceded proxy from `fixture_team_stats`, already in the DB) is the
+  right one, rather than assuming true goal-tagging was available and
+  discovering the gap mid-build.
+
+**First piece actually built: xG blended into the Dixon-Coles fit.**
+`DixonColesModel.fit()` only ever read `home_score`/`away_score` --
+actual goals, a genuinely noisy signal (a team can dominate on chances
+and lose 0-1 on one bad bounce). `fixture_team_stats.xg` has been sitting
+unused since migration 1701000000014. New `app.data.blend_xg_into_scores(matches,
+xg_weight)`: replaces each side's score with a blend of the real score and
+that side's own xG wherever xG exists, falling back to the untouched real
+score when it doesn't (xG coverage isn't complete -- older fixtures and
+lower-tier competitions often lack it). `dixon_coles.py`'s actual fitting
+math is completely untouched -- the blend happens one layer up, in
+whatever gets passed to `.fit()`.
+
+Wired into `app.evaluate` (not `app.train` yet) as a new `XG_BLEND_WEIGHT`
+constant, exactly the same "experimentation sandbox, promote only once
+validated" pattern `HALF_LIFE_DAYS` already established there -- default
+0.0 (today's behavior, byte-for-byte unchanged) rather than guessing a
+plausible nonzero starting value. `app.evaluate`'s backtest only ever
+blends the *training* portion before fitting; the held-out test matches
+used to score the backtest stay real, unblended scores throughout --
+scoring a model against a distorted version of what actually happened
+would defeat the entire point of a backtest.
+
+**A real bug the new unit tests caught immediately, not a hypothetical
+one:** `home_score`/`away_score` come back `int64` from Postgres, and a
+blended value is inherently fractional -- assigning a float into an
+int64 pandas column raises on a recent pandas version instead of
+silently upcasting like older versions did. Fixed by explicitly casting
+both the score and xG columns to float before blending (the all-null-xG
+case, real whenever a whole competition/season predates xG coverage,
+needed the same explicit cast -- pandas infers an all-null column as
+`object` dtype, which hit the identical strict-upcast check even on a
+fully empty assignment).
+
+Verified in two layers: 7 new pure-logic unit tests in `tests/test_data.py`
+(zero/full/partial blend weight, missing-xG fallback on one or both
+sides, no mutation of the input frame, independent per-row blending), all
+34 tests across the suite passing; then a separate synthetic
+integration check exercising the real chain end to end -- built a team
+that creates good chances but doesn't convert them (high xG, low actual
+goals) across 10 matches, confirmed its Dixon-Coles attack rating comes
+out *higher* under xG blending than under goals-only fitting, and that
+the resulting `predict()` output reflects that higher rating -- proving
+the mechanism does what it's supposed to, not just that the blend
+function returns the right numbers in isolation.
+
+**Deliberately not done yet, and can't be done from here:** finding out
+whether xG blending actually improves the backtest against real 3-season
+data. That needs `python -m app.evaluate` run against production data
+with a few different `XG_BLEND_WEIGHT` values (0.25/0.5/0.75/1.0,
+compared against the 0.0 baseline) -- this sandbox has no database
+connection to run that for real. Next step is the user running that
+comparison and reporting back the Brier/log-loss numbers, the same way
+`HALF_LIFE_DAYS`'s value was chosen -- only once a value is shown to
+actually help does it get promoted from `app.evaluate`'s sandbox constant
+to `app.train`'s deployed one.
