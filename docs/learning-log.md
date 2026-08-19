@@ -4657,3 +4657,87 @@ comparison and reporting back the Brier/log-loss numbers, the same way
 `HALF_LIFE_DAYS`'s value was chosen -- only once a value is shown to
 actually help does it get promoted from `app.evaluate`'s sandbox constant
 to `app.train`'s deployed one.
+
+## 2026-08-19 -- xG doesn't exist here: pivoting to shots on target, and why the numbers looked identical
+
+Ran the xG-blend backtest for real, at `XG_BLEND_WEIGHT=0.5` against
+production data. The output was byte-for-byte identical to the
+`0.0` baseline, down to the fourth decimal, across every metric for
+every competition. That's not "xG made no difference" -- a real,
+non-degenerate blend essentially never produces *exactly* the same
+numbers as no blend at all. It's the signature of a no-op: the blend
+function was correctly falling back to the untouched real score on every
+single row, because `fixture_team_stats.xg` had no data to blend with at
+all.
+
+Confirmed why by reading the seed pipeline, not by guessing: migration
+1701000000014 (Phase 2) added the `xg` column with its own comment
+flagging it explicitly -- *"API-Football's fixture-statistics endpoint
+**may** [have it] (UNVERIFIED)... nullable and unpopulated until that's
+confirmed."* That confirmation never happened. The only code that writes
+to `fixture_team_stats` at all is `football-data-co-uk.ts`'s CSV importer
+(`upsertFixtureTeamStatsBatch`), and its own INSERT statement doesn't
+even have an `xg` column in the list -- CSVs never carried it, and
+nothing else was ever built to fetch it from anywhere. Every row's `xg`
+has been `null` since the column existed; the mechanism I built was
+correct, there was simply nothing behind it.
+
+Rather than guess whether the underlying endpoint even carries xG at a
+different tier or in a different field, checked for real: a live
+`GET /fixtures/statistics?fixture=...` response pasted back showed the
+full `statistics` type list API-Football actually returns -- Shots on
+Goal/off Goal/Total/Blocked/insidebox/outsidebox, Fouls, Corner Kicks,
+Offsides, Possession, cards, passes. No expected-goals field anywhere.
+That settles what migration 1701000000014 left open over a year of
+in-universe time ago: **xG is not available from this data source at
+all**, not "unconfirmed."
+
+**Pivoted to shots on target instead of abandoning the idea.** Same
+underlying reasoning still holds -- a team's shot volume/quality is a
+lower-variance read on its true attacking performance than the actual
+goal count, a team can rack up chances and still lose 0-1 to one save
+going the wrong way -- and unlike xG, shots on target is data that
+genuinely exists: `football-data.co.uk`'s `HST`/`AST` CSV columns,
+already parsed and written to `fixture_team_stats.shots_on_target` for
+every real Premier League and Championship match.
+
+**The real modeling wrinkle xG never would have had:** shots on target
+isn't on the same scale as goals -- a team typically registers several
+times as many shots on target as actual goals in a match, so blending it
+in raw the same way xG would have been blended would badly inflate the
+fitted attack/defense parameters (confirmed this mattered by reasoning
+through the magnitudes before writing any code, not after debugging a
+bad fit). Fixed by rescaling: `blend_shots_on_target_into_scores`
+computes the training set's own pooled goals-per-shot-on-target ratio
+(from whichever rows actually have both a real score and a real
+shots-on-target figure, home and away sides pooled together) and
+multiplies shots on target by that ratio before blending -- self-
+calibrating to whatever `matches` is passed in, rather than hardcoding an
+assumed conversion rate (real football analytics conventionally cites
+~30%, but assuming that holds for this exact dataset/competition without
+checking would be the same mistake as assuming xG existed without
+checking).
+
+Renamed the whole mechanism to match what it actually does now --
+`blend_xg_into_scores` → `blend_shots_on_target_into_scores`,
+`XG_BLEND_WEIGHT` → `SHOTS_ON_TARGET_BLEND_WEIGHT` -- rather than leaving
+xG-flavored names on a shots-on-target mechanism, the same "a name is a
+promise, keep it true" principle behind every rename earlier this
+session (`upsertPlayerForTeamRoster`, etc.).
+
+Verified the same two ways as the original xG version: rewrote
+`tests/test_data.py`'s 6 unit tests for the new function (added explicit
+coverage for the conversion-rate math itself -- hand-computed the pooled
+ratio across two matches and asserted the blended values matched exactly
+-- plus the zero-rows-with-data no-op guard, which the pure xG version
+never needed since it had no derived scale factor that could divide by
+zero), all 34 tests across the suite passing; then reran the same
+synthetic integration check (a team with high shots-on-target, low actual
+goals across 10 matches) confirming its fitted attack rating comes out
+higher under shots-on-target blending, and that `predict()` reflects it.
+
+Same next step as before, just pointed at a signal that actually has
+real data behind it now: run `python -m app.evaluate` against production
+at a few candidate `SHOTS_ON_TARGET_BLEND_WEIGHT` values and see if any
+of them genuinely improve the backtest over the 0.0 baseline already
+captured.
