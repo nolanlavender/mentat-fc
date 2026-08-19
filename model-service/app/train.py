@@ -13,10 +13,16 @@ from __future__ import annotations
 
 import sys
 
-from app.data import blend_shots_on_target_into_scores, load_finished_matches, load_player_squad_appearances, load_upcoming_fixtures
+from app.data import (
+    blend_shots_on_target_into_scores,
+    load_confirmed_lineups,
+    load_finished_matches,
+    load_player_squad_appearances,
+    load_upcoming_fixtures,
+)
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
-from app.goal_scorer import MIN_PLAYER_MATCHES, allocate_team_goals, compute_player_shares
+from app.goal_scorer import MIN_PLAYER_MATCHES, allocate_team_goals, compute_player_shares, compute_team_availability
 
 MODEL_VERSION = "dixon-coles-v1"
 GOAL_SCORER_MODEL_VERSION = "goal-scorer-poisson-v1"
@@ -133,12 +139,34 @@ def upsert_player_goal_prediction(conn, fixture_id: int, team_id: int, predictio
 
 def predict_for_competition(conn, model: DixonColesModel, competition_name: str, player_shares) -> None:
     upcoming = load_upcoming_fixtures(conn, competition_name)
+    # Bulk-loaded once per competition rather than per fixture -- most
+    # upcoming fixtures have no confirmed squad yet (typically only
+    # announced ~1 hour before kickoff, see matchday-lineups.yml), so this
+    # is usually a near-empty frame and one query beats N.
+    confirmed = load_confirmed_lineups(conn, upcoming["fixture_id"].tolist())
     predicted = 0
     skipped = 0
     goal_scorer_predictions = 0
+    availability_adjusted = 0
     for _, fixture in upcoming.iterrows():
+        fixture_lineup = confirmed[confirmed["fixture_id"] == fixture["fixture_id"]]
+        home_confirmed = set(fixture_lineup[fixture_lineup["team_id"] == fixture["home_team_id"]]["player_id"])
+        away_confirmed = set(fixture_lineup[fixture_lineup["team_id"] == fixture["away_team_id"]]["player_id"])
+        home_availability = compute_team_availability(fixture["home_team_id"], home_confirmed, player_shares)
+        away_availability = compute_team_availability(fixture["away_team_id"], away_confirmed, player_shares)
+
         try:
-            prediction = model.predict(fixture["home_team"], fixture["away_team"])
+            if home_availability == 1.0 and away_availability == 1.0:
+                # No confirmed squad yet (or a full-strength one) for
+                # either side -- identical to predict(), so just call it
+                # directly rather than going through the availability path
+                # for the common case.
+                prediction = model.predict(fixture["home_team"], fixture["away_team"])
+            else:
+                prediction = model.predict_with_availability(
+                    fixture["home_team"], fixture["away_team"], home_availability, away_availability
+                )
+                availability_adjusted += 1
         except ValueError:
             # A team with no finished matches yet in the joint fit (e.g. a
             # non-league FA Cup minnow with zero appearances) has no fitted
@@ -162,8 +190,8 @@ def predict_for_competition(conn, model: DixonColesModel, competition_name: str,
 
     conn.commit()
     print(
-        f"{competition_name}: wrote {predicted} predictions, skipped {skipped} (team not in training data), "
-        f"{goal_scorer_predictions} player goal-scorer predictions."
+        f"{competition_name}: wrote {predicted} predictions ({availability_adjusted} availability-adjusted), "
+        f"skipped {skipped} (team not in training data), {goal_scorer_predictions} player goal-scorer predictions."
     )
 
 

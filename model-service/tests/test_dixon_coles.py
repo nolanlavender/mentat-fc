@@ -94,3 +94,51 @@ class TestDixonColesModel:
 
         with pytest.raises(ValueError):
             model.predict("Strong", "NeverSeenBefore")
+
+
+class TestPredictWithAvailability:
+    def test_default_availability_of_one_matches_plain_predict(self):
+        model = DixonColesModel()
+        model.fit(_round_robin_matches(), half_life_days=180)
+
+        plain = model.predict("Strong", "Weak")
+        adjusted = model.predict_with_availability("Strong", "Weak")
+
+        assert adjusted == plain
+
+    def test_lowering_home_availability_lowers_home_expected_goals_and_win_probability(self):
+        model = DixonColesModel()
+        model.fit(_round_robin_matches(), half_life_days=180)
+
+        plain = model.predict("Strong", "Weak")
+        adjusted = model.predict_with_availability("Strong", "Weak", home_availability=0.5)
+
+        assert adjusted.predicted_home_goals == pytest.approx(plain.predicted_home_goals * 0.5)
+        assert adjusted.predicted_away_goals == pytest.approx(plain.predicted_away_goals)
+        assert adjusted.prob_home_win < plain.prob_home_win
+
+    def test_lowering_away_availability_lowers_away_expected_goals_and_win_probability(self):
+        model = DixonColesModel()
+        model.fit(_round_robin_matches(), half_life_days=180)
+
+        plain = model.predict("Strong", "Weak")
+        adjusted = model.predict_with_availability("Strong", "Weak", away_availability=0.5)
+
+        assert adjusted.predicted_away_goals == pytest.approx(plain.predicted_away_goals * 0.5)
+        assert adjusted.predicted_home_goals == pytest.approx(plain.predicted_home_goals)
+        assert adjusted.prob_away_win < plain.prob_away_win
+
+    def test_probabilities_still_form_a_valid_distribution_when_adjusted(self):
+        model = DixonColesModel()
+        model.fit(_round_robin_matches(), half_life_days=180)
+
+        adjusted = model.predict_with_availability("Strong", "Weak", home_availability=0.6, away_availability=0.8)
+        total = adjusted.prob_home_win + adjusted.prob_draw + adjusted.prob_away_win
+        assert total == pytest.approx(1.0, abs=1e-6)
+
+    def test_predicting_a_team_outside_the_training_data_raises(self):
+        model = DixonColesModel()
+        model.fit(_round_robin_matches(), half_life_days=180)
+
+        with pytest.raises(ValueError):
+            model.predict_with_availability("Strong", "NeverSeenBefore")

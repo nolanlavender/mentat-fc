@@ -4820,3 +4820,138 @@ land) is a reasonable thing to revisit, not a one-and-done tune.
 All 34 tests still pass (the blend function itself didn't change, only
 how its weight gets threaded through `main()` in both files); confirmed
 both files still import cleanly.
+
+## 2026-08-19 -- Team-level player-availability adjustment (track 2, part 1 of the model-improvement plan)
+
+Match-outcome predictions were treating a team's strength as fixed
+regardless of who's actually playing on a given matchday -- Man City's
+predicted goals were the same whether or not Haaland was confirmed out.
+This closes that gap for the team level (per-player scorer-odds
+suppression for a confirmed bench player is a related but separate piece,
+scoped as the deliberate next step, not built here -- see below).
+
+**The timing constraint that shaped the whole design.** `app.train` is a
+once-daily batch job, but a real confirmed starting lineup is typically
+only known about an hour before kickoff (see
+`backend/seed/sources/api-football.ts`'s `seedTodaysLineups`). A naive
+"retrain daily, read confirmed lineups" design would almost always be
+looking at no confirmed data yet. The fix wasn't a new schedule --
+`matchday-lineups.yml` already runs hourly, checking for exactly this
+data, and its own comment (written before this track even started)
+already flagged the gap: "Making today's confirmed lineup actually
+influence a fixture's own prediction is real future work... not something
+to fake with a no-op retrain here." `app.train` makes zero external API
+calls (pure DB read/compute/write), so rerunning it hourly from that same
+workflow costs nothing against the API-Football budget -- most hourly
+runs still find no new confirmed lineups and are a cheap no-op refit,
+identical to today's daily-refresh.yml run.
+
+**Rating-based compensation, not a flat "missing = pure loss."** The
+naive version of this (a team missing any reliable player takes an
+uncompensated hit to expected goals) undersells what actually happens: a
+team missing its first-choice striker for a rotation option isn't losing
+that striker's *entire* scoring share, since the replacement still scores
+some. `fixture_player_stats.rating` -- confirmed real, populated data
+(unlike `fixture_team_stats.xg`, see the earlier xG entry) -- gives a
+genuine per-appearance quality signal to compare against.
+`compute_team_availability` (new, `app/goal_scorer.py`) sums the
+`goal_share` of every reliable player NOT in the confirmed matchday squad
+(`missing_share`), then scales that loss down by a `compensation_factor`
+-- the ratio of the confirmed squad's own average historical rating to
+the team's normal reliable-pool average, clipped to [0, 1]. A team
+fielding its usual-quality players loses almost nothing even with
+personnel changes; a team missing its highest-rated players for genuinely
+weaker fill-ins loses close to the full share.  Falls back to
+`compensation_factor = 0.0` (the conservative, no-compensation case)
+whenever there isn't enough rating data on either side to compute a
+meaningful ratio -- consistent with every other missing-data case in this
+app defaulting to "don't guess."
+
+Deliberately keyed on `goal_share`, not `minutes_share` or a general
+"presence" signal -- this is specifically a *scoring threat* adjustment
+to the team's expected goals, so a squad player who's never scored
+contributes ~0 to `missing_share` even if they're a nailed-on 90-minute
+starter (confirmed with a synthetic check: swapping out a 0-goal-share
+fringe player left availability at exactly 1.0, while swapping out the
+team's top scorer for the same fringe player dropped it measurably). That
+asymmetry is intentional, not a bug -- a team's defensive solidity when a
+non-scoring player is missing isn't this adjustment's job; it's a fair
+scope boundary for "team-level availability," not a gap to fix here.
+
+**Mechanics, concretely (`app/goal_scorer.py`, `app/dixon_coles.py`):**
+- `compute_player_shares` now also returns `avg_rating` per (team,
+  player) -- a weighted mean of `rating` using the same time-decay weight
+  as `minutes_share`/`goal_share`, but with a *separate* rating-specific
+  weight denominator so appearances with no recorded rating are correctly
+  excluded from the average rather than silently treated as a rating of
+  0 (which would make an unrated player look terrible instead of just
+  unknown). Hit the same dtype gotcha `blend_shots_on_target_into_scores`
+  hit earlier this session: an all-null `rating` column infers as
+  `object` dtype, not `float64`, and object-dtype division by zero raises
+  a real `ZeroDivisionError` instead of producing `NaN` -- fixed with the
+  same `.astype(float)` fix, caught by a unit test before it ever ran
+  against real data.
+- `compute_team_availability(team_id, confirmed_player_ids, player_shares)`
+  is the new function implementing the mechanics above, returning a
+  `[0, 1]` scale factor (1.0 = no confirmed squad yet, or a full-strength
+  one -- both mean "no adjustment," not "penalize").
+- `DixonColesModel.predict()` got refactored (not behaviorally changed) to
+  split its Poisson-grid/tau/triangle-sum math into a shared private
+  helper, `_predict_from_expected_goals`, so a new
+  `predict_with_availability(home_team, away_team, home_availability=1.0,
+  away_availability=1.0)` method can scale `lambda_home`/`lambda_away`
+  before calling the same shared math, instead of duplicating it.
+  `home_availability=1.0, away_availability=1.0` (the defaults) is an
+  exact no-op, verified directly: `predict_with_availability(...)` with no
+  availability args returns an object equal to `predict(...)`.
+- `app/train.py`'s `predict_for_competition` bulk-loads
+  `load_confirmed_lineups` once per competition (not per fixture -- most
+  upcoming fixtures have no confirmed squad yet, so this is usually a
+  near-empty frame and one query beats N), computes each side's
+  availability, and only routes through `predict_with_availability`
+  when at least one side's availability differs from 1.0 -- the common
+  case (no confirmed lineup yet) still calls plain `predict()` directly.
+
+**Verification.** Extended `tests/test_goal_scorer.py` (new
+`avg_rating` coverage plus a new `TestComputeTeamAvailability` class: no
+adjustment with no confirmed squad, no adjustment with a full-strength
+confirmed squad, no adjustment for a team with no reliable-share players
+on record, a real drop when the missing player is high-share, missing a
+low-share player mattering less than missing a high-share one, and the
+factor never going negative) and `tests/test_dixon_coles.py` (new
+`TestPredictWithAvailability` class: default availability of 1.0 matches
+plain `predict()` exactly, lowering either side's availability scales
+only that side's expected goals and lowers that side's win probability,
+probabilities still sum to 1 when both sides are adjusted, and the
+missing-team `ValueError` still raises). Full suite: 48 passed.
+
+Also ran a synthetic end-to-end check (no production DB in this session's
+environment -- Postgres wasn't reachable here, unlike the local dev
+machine track 1's verification ran against) mirroring the same "does the
+mechanism behave sensibly" pattern: fit a tiny model where City clearly
+beats Rivals, build a 4-player City squad with a clear star (id 9, 2/3 of
+the team's goal_share, rating 8.7) plus two regulars and a weak fringe
+player (rating 5.8, never scored). A full-strength confirmed squad left
+predictions byte-identical to the baseline. Confirming the star OUT and
+the weak fringe player IN dropped predicted home goals from 2.463 to
+2.345 and home win probability from 0.747 to 0.727 (availability=0.952).
+Confirming the *fringe* player missing instead (star and both regulars
+still in) left availability at exactly 1.0, demonstrating the intentional
+goal_share-only scope described above.
+
+**Deliberately deferred, the agreed next piece:** `minutes_share` today
+is one blended season-long average across every squad appearance
+(including unused-sub appearances) -- it doesn't distinguish "confirmed
+starting today" from "confirmed benched today" for goal-scorer
+allocation, which matters for a different reason than team strength: a
+team's *biggest name* shouldn't top that fixture's scorer odds if he's
+confirmed on the bench for only ~20 minutes. The plan (agreed, not yet
+built) is splitting historical minutes into
+`avg_minutes_when_starting`/`avg_minutes_when_benched` (derived from real
+`fixture_lineups.is_starting` + `fixture_player_stats.minutes_played`
+data, not a guessed constant) and substituting the right one in
+per-fixture once a confirmed role is known. Scoped as a separate,
+closely-related follow-up to this team-level piece, not part of it --
+team strength (this entry) and individual scorer-odds suppression are
+two different signals that happen to share the same confirmed-lineup
+data source.
