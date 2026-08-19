@@ -4741,3 +4741,82 @@ real data behind it now: run `python -m app.evaluate` against production
 at a few candidate `SHOTS_ON_TARGET_BLEND_WEIGHT` values and see if any
 of them genuinely improve the backtest over the 0.0 baseline already
 captured.
+
+## 2026-08-19 -- The real backtest results disagreed by competition, so the config had to stop being shared
+
+Ran the full sweep against production: 0.0, 0.25, 0.5, 0.75, 1.0. Full
+table (Brier / log-loss, lower is better):
+
+| Weight | Premier League | Championship | FA Cup |
+|---|---|---|---|
+| 0.0 | 0.6399 / 1.0617 | 0.6520 / 1.0787 | 0.6494 / 1.0769 |
+| 0.25 | 0.6318 / 1.0487 | **0.6495 / 1.0739** | 0.6634 / 1.1007 |
+| 0.5 | 0.6273 / 1.0421 | 0.6504 / 1.0745 | 0.6538 / 1.0805 |
+| 0.75 | **0.6248 / 1.0383** | 0.6543 / 1.0799 | 0.6496 / 1.0721 |
+| 1.0 | 0.6267 / 1.0422 | 0.6605 / 1.0893 | **0.6464 / 1.0648** |
+
+Three competitions, three different real optima -- not close enough to
+call a coincidence: Premier League improves steadily and consistently up
+to 0.75 (a genuine ~2.4% Brier gain, not noise). Championship barely
+moves at all, and its own best (0.25) is marginal -- past that it gets
+measurably *worse* the more weight goes in. FA Cup is the strangest,
+dipping badly at 0.25 before recovering to its own best at full weight --
+the least trustworthy of the three, since the joint fit's 811 teams
+include a lot of sparse-data FA Cup entrants that make its own backtest
+naturally noisier.
+
+**The real question this forced: is one shared value (`HALF_LIFE_DAYS`'s
+pattern) still the right call, now that the evidence says the
+competitions genuinely disagree?** Talked through it directly rather than
+defaulting either way. A single compromise value (something like 0.5)
+would have meant deliberately leaving Premier League's real, consistent
+gain on the table just to avoid a small, likely-marginal Championship
+regression -- and there's good reason to expect *more* of this as more
+model pieces get added (the whole reason this got raised at all): three
+competitions with different squad depths, different data coverage
+(Championship's shots data is the same CSV source as Premier League's,
+but the leagues' actual playing styles/finishing rates genuinely differ),
+and different sample sizes are exactly the conditions where "what helps"
+won't line up by competition. Decided: make it per-competition now, while
+it's still one setting, rather than wait until there are three or four
+settings all secretly wanting to vary by competition and no established
+pattern for how to do that cleanly.
+
+**`SHOTS_ON_TARGET_BLEND_WEIGHT` is now `dict[str, float]`, keyed by
+competition name, in both `app.evaluate` and (newly, since this is the
+first real validated result) `app.train`.** `HALF_LIFE_DAYS` stays a
+single shared scalar, deliberately -- its own Phase 5 backtest found 180
+won cleanly in *both* leagues, monotonically, with no comparable
+disagreement, so there's no evidence yet that it needs the same
+treatment. Not generalizing to a shared "per-competition config" wrapper
+either -- a plain dict literal, the same idiom `app.train`'s own
+`models_by_competition` dict already uses elsewhere in this file, is the
+whole pattern. The next setting that turns out to want this same
+treatment can just reach for the same shape, when there's real evidence
+it needs it, rather than this becoming a speculative framework built
+before a second real case exists.
+
+One naming/scoping detail worth keeping straight: `"FA Cup"` in this dict
+is the weight applied to the *whole joint training set* (Premier League +
+Championship + FA Cup matches together) that the joint fit uses for FA
+Cup predictions -- not a per-row-competition split *within* that joint
+set. The joint fit already treats itself as one homogeneous training pool
+everywhere else (`HALF_LIFE_DAYS` applies uniformly across it too), so
+this stays consistent with that rather than inventing a second kind of
+split just for this one setting.
+
+Promoted directly to `app.train`'s deployed constant in the same pass,
+not held back for a second round -- these are the first genuinely
+validated values found (the earlier flat 0.0 was explicitly "not yet
+validated," this is the actual backtested result), the same "test, then
+promote" moment `HALF_LIFE_DAYS=180` went through originally. Worth
+flagging honestly, though: Championship's gain is small enough to be
+close to noise, and FA Cup's pattern is the least trustworthy of the
+three given how sparse its joint fit's data really is -- these are the
+best-tested values so far, not a closed question. Re-testing here as more
+data accumulates (or after any of the other model-improvement tracks
+land) is a reasonable thing to revisit, not a one-and-done tune.
+
+All 34 tests still pass (the blend function itself didn't change, only
+how its weight gets threaded through `main()` in both files); confirmed
+both files still import cleanly.

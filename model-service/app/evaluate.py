@@ -14,9 +14,9 @@ actually stands, which is the real point of this step.
 
 Also the sandbox for trying a candidate SHOTS_ON_TARGET_BLEND_WEIGHT (see
 that constant's own comment, and
-app.data.blend_shots_on_target_into_scores) -- edit the constant, rerun,
-compare the Brier/log-loss numbers against a 0.0 baseline run, same
-process HALF_LIFE_DAYS already went through.
+app.data.blend_shots_on_target_into_scores) -- edit a competition's entry
+in the dict, rerun, compare the Brier/log-loss numbers against the
+current values, same process HALF_LIFE_DAYS already went through.
 
 Usage: python -m app.evaluate
 """
@@ -55,13 +55,38 @@ HALF_LIFE_DAYS = 180
 # from any current data source (confirmed 2026-08-19 against a real
 # API-Football /fixtures/statistics response -- no expected-goals field
 # at all), so this is the closest real signal actually sitting in the DB.
-# 0.0 = today's deployed behavior, completely unchanged. Not yet
-# validated against real data (no blended value has been promoted to
-# app.train's deployed constant), so this starts at 0.0 rather than
-# guessing a plausible-sounding nonzero default -- try 0.25/0.5/0.75/1.0
-# here and compare the backtest, same process HALF_LIFE_DAYS went
-# through above.
-SHOTS_ON_TARGET_BLEND_WEIGHT = 0.0
+#
+# Per competition, deliberately NOT a single shared value the way
+# HALF_LIFE_DAYS still is -- a real 2026-08-19 backtest across
+# 0.0/0.25/0.5/0.75/1.0 found the three competitions genuinely disagree
+# on what helps, not just by a little:
+#   - Premier League improves steadily up to 0.75 (Brier 0.6399 -> 0.6248,
+#     a real, consistent ~2.4% gain, not noise).
+#   - Championship barely moves either direction -- its own best (0.25,
+#     Brier 0.6520 -> 0.6495) is marginal, and gets WORSE past that.
+#   - FA Cup dipped badly at 0.25 before recovering to its own best at
+#     1.0 -- the noisiest of the three (811 teams in the joint fit, many
+#     with very sparse data), so trust this one the least.
+# A single shared value would have meant picking a compromise that left
+# Premier League's real gain on the table just to avoid a small
+# Championship regression -- worth the added complexity here.
+#
+# "FA Cup" below is the weight applied to the WHOLE joint training set
+# (Premier League + Championship + FA Cup matches together, see the joint
+# fit further down) that FA Cup predictions come from -- not a per-row-
+# competition split within that joint set. The joint fit already treats
+# itself as one homogeneous training pool everywhere else (HALF_LIFE_DAYS
+# applies uniformly across it too), so this stays consistent with that
+# rather than inventing a new kind of split just for this one setting.
+#
+# See docs/learning-log.md's 2026-08-19 entry for the full backtest
+# table. If you're evaluating a new candidate for one competition, this
+# is the dict to edit -- change just that competition's entry and rerun.
+SHOTS_ON_TARGET_BLEND_WEIGHT: dict[str, float] = {
+    "Premier League": 0.75,
+    "Championship": 0.25,
+    "FA Cup": 1.0,
+}
 
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
@@ -168,7 +193,7 @@ def main() -> None:
         # untouched, or the backtest would be scoring the model against a
         # distorted version of what really happened instead of reality.
         pl_train = blend_shots_on_target_into_scores(
-            train_matches[train_matches["competition_name"] == "Premier League"], SHOTS_ON_TARGET_BLEND_WEIGHT
+            train_matches[train_matches["competition_name"] == "Premier League"], SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]
         )
         pl_model = DixonColesModel()
         pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS)
@@ -178,7 +203,7 @@ def main() -> None:
         )
 
         championship_train = blend_shots_on_target_into_scores(
-            train_matches[train_matches["competition_name"] == "Championship"], SHOTS_ON_TARGET_BLEND_WEIGHT
+            train_matches[train_matches["competition_name"] == "Championship"], SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]
         )
         championship_model = DixonColesModel()
         championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS)
@@ -195,7 +220,9 @@ def main() -> None:
         # only for FA Cup, the one competition that actually needs
         # cross-league comparability. See app.train's 2026-08-15 note.
         joint_model = DixonColesModel()
-        joint_model.fit(blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT), half_life_days=HALF_LIFE_DAYS)
+        joint_model.fit(
+            blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]), half_life_days=HALF_LIFE_DAYS
+        )
         print(
             f"Joint fit (for FA Cup) on {joint_model.fitted_on} matches across {', '.join(FIT_COMPETITIONS)}, "
             f"{len(joint_model.teams)} teams, cutoff {cutoff_date}"

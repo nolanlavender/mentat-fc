@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 
-from app.data import load_finished_matches, load_player_squad_appearances, load_upcoming_fixtures
+from app.data import blend_shots_on_target_into_scores, load_finished_matches, load_player_squad_appearances, load_upcoming_fixtures
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.goal_scorer import MIN_PLAYER_MATCHES, allocate_team_goals, compute_player_shares
@@ -60,6 +60,23 @@ MIN_MATCHES_TO_FIT = 50  # below this, per-team parameters are too noisy to trus
 # underlying team strength, which changes slowly, so discounting older
 # results costs more in sample size/noise than it gains from "freshness."
 HALF_LIFE_DAYS = 180
+
+# How much of the fit's "goals" for a match is that side's own goals-
+# scaled shots on target instead of the actual final score -- see
+# app.data.blend_shots_on_target_into_scores. Per competition, not a
+# single shared value: a real 2026-08-19 backtest (see
+# app.evaluate.SHOTS_ON_TARGET_BLEND_WEIGHT's own comment and
+# docs/learning-log.md's entry for the full table and reasoning) found
+# Premier League, Championship, and FA Cup genuinely disagree on what
+# helps, not just by a little -- a single compromise value would have
+# left Premier League's real ~2.4% Brier improvement on the table.
+# "FA Cup" here is the weight applied to the whole joint training set the
+# joint fit below uses, not a per-row-competition split within it.
+SHOTS_ON_TARGET_BLEND_WEIGHT: dict[str, float] = {
+    "Premier League": 0.75,
+    "Championship": 0.25,
+    "FA Cup": 1.0,
+}
 
 
 def upsert_prediction(conn, fixture_id: int, prediction) -> None:
@@ -174,12 +191,19 @@ def main() -> None:
         pl_matches = matches[matches["competition_name"] == "Premier League"]
         championship_matches = matches[matches["competition_name"] == "Championship"]
 
-        pl_model = fit_and_report(pl_matches, "Premier League")
-        championship_model = fit_and_report(championship_matches, "Championship")
+        pl_model = fit_and_report(
+            blend_shots_on_target_into_scores(pl_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]), "Premier League"
+        )
+        championship_model = fit_and_report(
+            blend_shots_on_target_into_scores(championship_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]), "Championship"
+        )
         # Joint fit reuses every competition's matches, including FA Cup's --
         # it's the only one of the three that needs the cross-league
         # connection, so it's the only one that gets predicted from this model.
-        joint_model = fit_and_report(matches, "Joint (Premier League + Championship + FA Cup, for FA Cup predictions)")
+        joint_model = fit_and_report(
+            blend_shots_on_target_into_scores(matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
+            "Joint (Premier League + Championship + FA Cup, for FA Cup predictions)",
+        )
 
         # Player shares use the full cross-competition appearance history
         # regardless of which team-strength model ends up allocating for a
