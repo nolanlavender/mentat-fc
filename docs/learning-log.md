@@ -4499,3 +4499,64 @@ player names do) -- but it's the same shape of risk, worth applying
 `claimTeamExternalId` (the obvious team-scoped sibling of today's
 `claimPlayerExternalId`) to if a real report ever surfaces here too,
 rather than rediscovering the same lesson a fifth time.
+
+## 2026-08-19 -- A Fixtures tab: a day browser, not another matchweek dropdown
+
+A new ask: a nav tab showing games (upcoming and recent both), toggled by
+date, defaulting to today. `PredictionsPage.tsx` already has date-based
+browsing (a 14-day window narrowed by a Monday-Sunday matchweek dropdown),
+but that's the wrong shape for this -- it's a fixed forward-looking window
+with no way to look backward, and it's tangled up with prediction
+probabilities and scorer picks a plain fixtures browser doesn't need. This
+is a genuinely different UI: one calendar day at a time, either direction,
+with a real date picker for jumping anywhere.
+
+**The "today" default needed a real decision, not an assumption.** Kickoff
+dates throughout this schema are already anchored to a Europe/London
+calendar day -- `fixtures.kickoff_date` is set explicitly by the seed
+scripts for exactly this reason (migration 1701000000006). A day-browser's
+"today" should mean the *same* calendar day the schedule itself uses, not
+whatever the viewer's browser reports -- otherwise a Saturday 3pm London
+kickoff could look like it happened "tomorrow" or "yesterday" depending on
+where in the US someone's browsing from, which matters for CLAUDE.md's own
+stated audience. New `frontend/src/lib/date.ts`: `londonToday()` via
+`Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' })` (en-CA
+formats as YYYY-MM-DD directly -- matches both `kickoff_date` and
+`&lt;input type="date"&gt;`'s value format with no parsing needed), and
+`shiftDate(isoDate, days)` for the prev/next-day buttons -- pure label
+arithmetic on the date string via UTC, not a real timestamp shift, since
+this only ever needs "what's the next date label," never "what time is
+it."
+
+**Backend got a new, deliberately narrow filter instead of reusing
+`from`/`to`.** `listFixtures` already supported a `kickoff_at` range, but
+computing "which fixtures happened on this one real calendar day" from a
+timestamp range means re-deriving timezone-aware day boundaries that
+`kickoff_date` already answers directly. Added `date?: string` to
+`ListFixturesFilters`, matched with a plain `f.kickoff_date = $date` --
+simpler and exactly matches the concept the schema already captures,
+rather than working around it.
+
+**Frontend reuses PredictionsPage's actual reusable pattern (parallel
+fetch across competitions, merge, sort) without reusing its layout.**
+`prediction-row`'s CSS grid is column-tuned for Home/Draw/Away probability
+numbers and a scorers line this page has neither of -- forcing the new
+page into it would've left three empty grid columns per row. New
+`.fixture-list`/`.fixture-list-row`/`.fixture-list-status` classes
+instead: a simple 3-column row (fixture · competition · time-or-score),
+plus a `.date-nav` bar (Prev/Next buttons, a native date input, and a
+"Today" shortcut that only renders once you've actually navigated away
+from today).
+
+Verified end-to-end with a real browser against a scratch-Postgres
+reproduction seeded across four fixtures spanning yesterday, today (one
+scheduled, one finished), and tomorrow: confirmed today's default view
+shows exactly the right two fixtures with the right status display each
+(a kickoff time for the scheduled one, a score for the finished one), Prev
+day correctly surfaces yesterday's recent finished result, Next day
+correctly surfaces tomorrow's upcoming fixture, the "Today" shortcut
+correctly hides itself only while already on today, clicking a fixture
+row navigates to its real detail page, and the manual date input jumps
+to an arbitrary date and matches the same fixture reached via the
+day-at-a-time buttons. Backend `tsc --noEmit`, frontend `tsc -b`, and all
+31 backend `vitest` tests pass clean.

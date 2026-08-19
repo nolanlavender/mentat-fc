@@ -4,6 +4,7 @@ import { HomePage } from './pages/HomePage';
 import { TeamDashboardPage } from './pages/TeamDashboardPage';
 import { PlayerPage } from './pages/PlayerPage';
 import { FixturePage } from './pages/FixturePage';
+import { FixturesPage } from './pages/FixturesPage';
 import { MyTeamPage } from './pages/MyTeamPage';
 import { BetsPage } from './pages/BetsPage';
 import { PredictionsPage } from './pages/PredictionsPage';
@@ -33,6 +34,7 @@ function Nav() {
         Mentat FC
       </Link>
       <TeamsNavDropdown />
+      <Link to="/fixtures">Fixtures</Link>
       <Link to="/predictions">Predictions</Link>
       <Link to="/bets">Bets</Link>
       <Link to="/my-team">My Team</Link>
@@ -59,6 +61,7 @@ function App() {
         <Route path="/" element={<HomePage />} />
         <Route path="/teams/:id" element={<TeamDashboardPage />} />
         <Route path="/players/:id" element={<PlayerPage />} />
+        <Route path="/fixtures" element={<FixturesPage />} />
         <Route path="/fixtures/:id" element={<FixturePage />} />
         <Route
           path="/my-team"

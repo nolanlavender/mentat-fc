@@ -516,6 +516,56 @@ a.fixture-teams:hover {
   text-decoration: underline;
 }
 
+.date-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.date-nav button {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  cursor: pointer;
+}
+
+.date-nav button:hover {
+  border-color: var(--accent);
+}
+
+.date-nav input[type='date'] {
+  font: inherit;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+.fixture-list {
+  list-style: none;
+  padding: 0;
+}
+
+.fixture-list-row {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) auto auto;
+  column-gap: 16px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.fixture-list-status {
+  font-weight: 600;
+  color: var(--accent);
+  text-align: right;
+}
+
 .squad-list li {
   display: flex;
   align-items: center;

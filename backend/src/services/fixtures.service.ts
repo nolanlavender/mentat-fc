@@ -49,6 +49,14 @@ export interface ListFixturesFilters {
   teamId?: number;
   from?: string;
   to?: string;
+  // Exact kickoff_date match (YYYY-MM-DD) -- the Europe/London calendar
+  // day the seed scripts already assign each fixture (see migration
+  // 1701000000006's comment), not a kickoff_at range. A day-browser needs
+  // "which fixtures happened on this real calendar day," which kickoff_date
+  // already answers directly -- computing that from a timezone-aware
+  // kickoff_at range at query time would just be re-deriving what this
+  // column already stores.
+  date?: string;
   limit?: number;
 }
 
@@ -96,9 +104,10 @@ export async function listFixtures(filters: ListFixturesFilters): Promise<Fixtur
        AND ($2::int IS NULL OR f.home_team_id = $2 OR f.away_team_id = $2)
        AND ($3::timestamptz IS NULL OR f.kickoff_at >= $3)
        AND ($4::timestamptz IS NULL OR f.kickoff_at <= $4)
+       AND ($6::date IS NULL OR f.kickoff_date = $6)
      ORDER BY f.kickoff_at ASC
      LIMIT $5`,
-    [filters.competitionName ?? null, filters.teamId ?? null, filters.from ?? null, filters.to ?? null, limit],
+    [filters.competitionName ?? null, filters.teamId ?? null, filters.from ?? null, filters.to ?? null, limit, filters.date ?? null],
   );
 
   return rows.map((r) => ({
