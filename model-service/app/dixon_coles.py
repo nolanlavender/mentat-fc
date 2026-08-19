@@ -138,14 +138,16 @@ class DixonColesModel:
         self.rho = rho
         self.fitted_on = len(matches)
 
-    def predict(self, home_team: str, away_team: str) -> MatchPrediction:
+    def _expected_goals(self, home_team: str, away_team: str) -> tuple[float, float]:
         if home_team not in self.attack or away_team not in self.attack:
             missing = home_team if home_team not in self.attack else away_team
             raise ValueError(f"'{missing}' has no fitted parameters -- not present in the training data")
 
         lambda_home = self.attack[home_team] * self.defense[away_team] * self.home_advantage
         lambda_away = self.attack[away_team] * self.defense[home_team]
+        return lambda_home, lambda_away
 
+    def _predict_from_expected_goals(self, lambda_home: float, lambda_away: float) -> MatchPrediction:
         home_range = np.arange(0, MAX_GOALS + 1)
         away_range = np.arange(0, MAX_GOALS + 1)
         home_probs = poisson.pmf(home_range, lambda_home)
@@ -171,3 +173,23 @@ class DixonColesModel:
             prob_draw=prob_draw,
             prob_away_win=prob_away_win,
         )
+
+    def predict(self, home_team: str, away_team: str) -> MatchPrediction:
+        lambda_home, lambda_away = self._expected_goals(home_team, away_team)
+        return self._predict_from_expected_goals(lambda_home, lambda_away)
+
+    def predict_with_availability(
+        self, home_team: str, away_team: str, home_availability: float = 1.0, away_availability: float = 1.0
+    ) -> MatchPrediction:
+        """
+        Same as predict(), except each side's expected goals is scaled by a
+        confirmed-lineup availability factor first -- see
+        app.goal_scorer.compute_team_availability for how that factor is
+        derived (missing reliable-share players, partially offset by a
+        rating-based compensation for their replacements). 1.0 (the
+        default) is a complete no-op, identical to predict() -- callers
+        without a confirmed lineup for a side should just leave its
+        availability at 1.0 rather than guessing.
+        """
+        lambda_home, lambda_away = self._expected_goals(home_team, away_team)
+        return self._predict_from_expected_goals(lambda_home * home_availability, lambda_away * away_availability)

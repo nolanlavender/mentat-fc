@@ -207,7 +207,8 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
         WITH appearances AS (
             SELECT fl.team_id, fl.player_id, f.kickoff_date,
                    COALESCE(fps.minutes_played, 0) AS minutes_played,
-                   COALESCE(fps.goals, 0) AS goals
+                   COALESCE(fps.goals, 0) AS goals,
+                   fps.rating
             FROM fixture_lineups fl
             JOIN fixtures f ON f.id = fl.fixture_id
             LEFT JOIN fixture_player_stats fps ON fps.fixture_id = fl.fixture_id AND fps.player_id = fl.player_id
@@ -226,12 +227,35 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
             FROM most_recent_club mrc
             JOIN players p ON p.id = mrc.player_id
         )
-        SELECT ec.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals
+        SELECT ec.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals, a.rating
         FROM appearances a
         JOIN effective_club ec ON ec.player_id = a.player_id
         ORDER BY a.kickoff_date
     """
     return _query_df(conn, query, {"competition_names": competition_names})
+
+
+def load_confirmed_lineups(conn: psycopg.Connection, fixture_ids: list[int]) -> pd.DataFrame:
+    """
+    One row per (fixture_id, team_id, player_id) for whichever of the
+    given fixtures already have a confirmed matchday squad in
+    fixture_lineups -- starting XI or bench, anyone actually named for
+    that squad, not just starters (see app.goal_scorer.compute_team_availability
+    for why bench presence still counts as "available"). A fixture with no
+    rows here simply has no confirmed squad yet -- the normal state for
+    anything more than roughly an hour before kickoff (see
+    backend/seed/sources/api-football.ts's seedTodaysLineups) -- callers
+    treat that as "no confident answer yet", not an error, same as every
+    other missing-data case in this app.
+    """
+    if not fixture_ids:
+        return pd.DataFrame(columns=["fixture_id", "team_id", "player_id"])
+    query = """
+        SELECT fixture_id, team_id, player_id
+        FROM fixture_lineups
+        WHERE fixture_id = ANY(%(fixture_ids)s)
+    """
+    return _query_df(conn, query, {"fixture_ids": fixture_ids})
 
 
 def load_closing_match_winner_probabilities(conn: psycopg.Connection, fixture_ids: list[int]) -> pd.DataFrame:

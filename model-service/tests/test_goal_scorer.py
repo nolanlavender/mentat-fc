@@ -3,18 +3,19 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from app.goal_scorer import MIN_PLAYER_MATCHES, allocate_team_goals, compute_player_shares
+from app.goal_scorer import MIN_PLAYER_MATCHES, allocate_team_goals, compute_player_shares, compute_team_availability
 
 AS_OF = date(2026, 8, 1)
 
 
-def _appearance(team_id, player_id, day, minutes, goals):
+def _appearance(team_id, player_id, day, minutes, goals, rating=None):
     return {
         "team_id": team_id,
         "player_id": player_id,
         "kickoff_date": date(2026, 1, 1 + day),
         "minutes_played": minutes,
         "goals": goals,
+        "rating": rating,
     }
 
 
@@ -79,9 +80,40 @@ class TestComputePlayerShares:
         assert shares["goal_share"].sum() == pytest.approx(1.0, abs=1e-9)
 
     def test_empty_input_returns_empty_frame_with_expected_columns(self):
-        shares = compute_player_shares(pd.DataFrame(columns=["team_id", "player_id", "kickoff_date", "minutes_played", "goals"]), AS_OF)
-        assert list(shares.columns) == ["team_id", "player_id", "matches", "minutes_share", "goal_share"]
+        shares = compute_player_shares(
+            pd.DataFrame(columns=["team_id", "player_id", "kickoff_date", "minutes_played", "goals", "rating"]), AS_OF
+        )
+        assert list(shares.columns) == ["team_id", "player_id", "matches", "minutes_share", "goal_share", "avg_rating"]
         assert shares.empty
+
+    def test_avg_rating_is_the_weighted_mean_of_rated_appearances(self):
+        appearances = pd.DataFrame(
+            [*[_appearance(1, 100, i, 90, 0, rating=7.0) for i in range(5)], *[_appearance(1, 100, i + 5, 90, 0, rating=8.0) for i in range(5)]]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        player = shares[shares["player_id"] == 100].iloc[0]
+        # Equal weight decay isn't quite equal across the two halves (more
+        # recent appearances count slightly more), but with only 5 days of
+        # spread and a 180-day half-life it should land very close to the
+        # simple average of 7.5.
+        assert player["avg_rating"] == pytest.approx(7.5, abs=0.05)
+
+    def test_avg_rating_is_nan_when_no_appearance_has_a_rating(self):
+        appearances = pd.DataFrame([_appearance(1, 100, i, 90, 0, rating=None) for i in range(MIN_PLAYER_MATCHES)])
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        player = shares[shares["player_id"] == 100].iloc[0]
+        assert pd.isna(player["avg_rating"])
+
+    def test_avg_rating_excludes_unrated_appearances_rather_than_treating_them_as_zero(self):
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 0, rating=8.0) for i in range(5)],
+                *[_appearance(1, 100, i + 5, 90, 0, rating=None) for i in range(5)],  # unrated -- should not drag the mean down
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        player = shares[shares["player_id"] == 100].iloc[0]
+        assert player["avg_rating"] == pytest.approx(8.0, abs=0.01)
 
 
 class TestAllocateTeamGoals:
@@ -123,3 +155,54 @@ class TestAllocateTeamGoals:
         shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
         predictions = allocate_team_goals(team_expected_goals=1.5, team_id=999, player_shares=shares)
         assert predictions == []
+
+
+class TestComputeTeamAvailability:
+    def _shares(self):
+        # A three-player reliable pool: a star (most of the scoring, highly
+        # rated), a regular, and a low-rated squad option -- enough shape
+        # to test "star missing, replaced by someone comparable" vs.
+        # "star missing, replaced by someone clearly worse."
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 2, rating=8.5) for i in range(10)],  # star
+                *[_appearance(1, 101, i, 90, 1, rating=7.0) for i in range(10)],  # regular
+                *[_appearance(1, 102, i, 90, 1, rating=6.8) for i in range(10)],  # comparable backup to the regular
+                *[_appearance(1, 103, i, 90, 0, rating=5.5) for i in range(10)],  # weak fill-in option
+            ]
+        )
+        return compute_player_shares(appearances, AS_OF, half_life_days=180)
+
+    def test_no_confirmed_squad_means_no_adjustment(self):
+        shares = self._shares()
+        assert compute_team_availability(1, set(), shares) == 1.0
+
+    def test_full_strength_confirmed_squad_means_no_adjustment(self):
+        shares = self._shares()
+        assert compute_team_availability(1, {100, 101, 102, 103}, shares) == 1.0
+
+    def test_team_with_no_reliable_players_on_record_defaults_to_no_adjustment(self):
+        shares = self._shares()
+        assert compute_team_availability(999, {1, 2, 3}, shares) == 1.0
+
+    def test_missing_star_with_only_weak_replacements_lowers_availability(self):
+        shares = self._shares()
+        # Star (100) missing; confirmed squad is the two weakest-rated players.
+        availability = compute_team_availability(1, {102, 103}, shares)
+        assert availability < 1.0
+
+    def test_missing_low_share_player_has_less_impact_than_missing_the_star(self):
+        shares = self._shares()
+        missing_weak_fill_in = compute_team_availability(1, {100, 101, 102}, shares)
+        missing_star = compute_team_availability(1, {101, 102, 103}, shares)
+        assert missing_weak_fill_in > missing_star
+
+    def test_availability_never_drops_below_zero(self):
+        # Every reliable player missing, confirmed squad is empty player
+        # IDs -- treated as "no confirmed squad" per the empty-set guard,
+        # so use a confirmed squad of players with no rating data instead
+        # to exercise the full-loss, zero-compensation path.
+        appearances = pd.DataFrame([_appearance(1, 100, i, 90, 5, rating=9.0) for i in range(10)])
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        availability = compute_team_availability(1, {999}, shares)
+        assert 0.0 <= availability <= 1.0
