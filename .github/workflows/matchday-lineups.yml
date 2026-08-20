@@ -9,24 +9,34 @@ name: Matchday lineup check
 # for why that's a genuinely different check from the post-match backfill,
 # not just a more-frequent version of it.
 #
-# Also reruns app.train right after the lineup check, so a newly-confirmed
-# matchday squad actually reaches that fixture's own prediction the same
-# hour it's announced -- not just at the next daily-refresh.yml cron.
-# app.train makes zero external API calls (pure DB read/compute/write via
-# app.dixon_coles.DixonColesModel.predict_with_availability and
-# app.goal_scorer.compute_team_availability), so an hourly rerun costs
-# nothing against the API-Football budget below -- it refits the same
-# models daily-refresh.yml already fits on the same finished-match data,
-# then, for each upcoming fixture, checks whether either side now has a
-# confirmed squad (fixture_lineups) different enough from its usual
-# reliable-share players to matter. Most hourly runs touch zero fixtures'
-# predictions -- a confirmed lineup is typically only ~1 hour from
-# kickoff, so most of the day this is a no-op refit. See
-# docs/learning-log.md's entry on player-availability adjustments for the
-# full design (rating-based compensation, why this reuses the existing
-# hourly job instead of a new schedule) and docs/CLAUDE.md's player/
-# injury/form-driven model note. The regular daily-refresh.yml retrain,
-# once a day on finished results, is unaffected by this workflow.
+# Does NOT rerun app.train after the lineup check -- reverted 2026-08-20
+# after a real production incident. It briefly did (2026-08-19's
+# player-availability PR): the reasoning at the time was "app.train makes
+# zero external API calls, so an hourly rerun costs nothing" -- true, but
+# wrong focus. It ignores that app.train refits three Dixon-Coles models
+# AND rewrites a player_goal_predictions row per reliable player per
+# upcoming fixture across all three competitions, via one
+# upsert_player_goal_prediction call (one DB round trip) per row, not
+# batched -- genuinely slow (tens of minutes), and fine to pay ONCE a
+# day, but multiplying that by 24 (this job's actual hourly cadence) is
+# not "free" just because it makes no external API calls. Within about a
+# day of that change shipping, this job's own runs had ballooned from a
+# few seconds to 46 minutes, then 1.5+ hours, and started failing outright
+# with no runner ever assigned -- consistent with the account's GitHub
+# Actions minutes running out from the cumulative overage, not a code bug
+# in the job itself. Check Settings > Billing > Actions usage/spending
+# limits before re-attempting anything on this schedule.
+#
+# Making a newly-confirmed matchday squad reach that fixture's own
+# prediction within the hour is still real, wanted future work (see
+# docs/learning-log.md's 2026-08-20/2026-08-19 entries for the full
+# design) -- it just needs a genuinely cheap version first: batching the
+# player_goal_predictions upserts, and/or only recomputing predictions for
+# fixtures whose confirmed lineup actually changed since the last check,
+# instead of a full refit + full rewrite every single hour regardless.
+# Until that exists, this job goes back to being just the lineup check
+# below, and the daily-refresh.yml retrain (once a day) is the only place
+# a confirmed lineup's effect on predictions lands.
 #
 # Hourly is comfortably inside budget -- confirmed via the account's
 # api-sports.io dashboard, the plan is 7500 calls/day (see api-football.ts's
@@ -65,14 +75,3 @@ jobs:
       - name: Check for newly-confirmed starting lineups
         working-directory: backend
         run: npm run db:seed:matchday-lineups
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install model-service dependencies
-        working-directory: model-service
-        run: pip install -r requirements.txt
-
-      - name: Refit and repredict, so a newly-confirmed lineup reaches its fixture's prediction this hour
-        working-directory: model-service
-        run: python -m app.train

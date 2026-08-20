@@ -5139,3 +5139,66 @@ real value is validated, not just nudge it slightly. The real strength
 needed against production (hundreds of Championship matches for
 established teams vs. West Ham's actual 1-2) is a real backtest to run,
 not something to guess from a small synthetic league.
+
+## 2026-08-20 -- Real incident: hourly retrain exhausted GitHub Actions minutes, broke the lineup check
+
+Reported live: "the lineup is failing" -- `matchday-lineups.yml` runs
+had gone from finishing in seconds to failing outright, no runner ever
+assigned. Root-caused via the GitHub Actions run history (couldn't fetch
+raw job logs directly from this session -- the log-download host is
+blocked by this environment's egress proxy -- so this leans on run
+timestamps/durations/conclusions instead, which turned out to be enough):
+
+- Before 2026-08-19's player-availability PR, `matchday-lineups.yml` was
+  just `npm run db:seed:matchday-lineups` -- a few seconds, hourly.
+- That PR added a `python -m app.train` step after it, reasoning "app.train
+  makes zero external API calls, so an hourly rerun costs nothing against
+  the API-Football budget." True, and completely beside the point --
+  `app.train` refits three Dixon-Coles models AND rewrites a
+  `player_goal_predictions` row per reliable player per upcoming fixture
+  across all three competitions, one `upsert_player_goal_prediction` call
+  (one DB round trip) per row, unbatched. That's a real cost, previously
+  paid once a day by `daily-refresh.yml`. Multiplying it by 24 (this job's
+  actual cadence) was never "free" just because no external API got
+  called.
+- Runs immediately after that PR: `matchday-lineups.yml`'s own duration
+  went from a few seconds to 46 minutes (run 58), then 1h31m (run 57).
+  `daily-refresh.yml`'s total runtime was independently trending up too
+  (55 -> 98 -> 121 minutes across three consecutive days) -- a real,
+  separate, worth-revisiting-later slowness in the whole daily pipeline as
+  three seasons of data accumulate, not something this incident fixes.
+- Runs 59/60/61 (starting a few hours after run 58) failed in 3-4 seconds
+  each, with `runner_id: 0` and `runner_name: ""` in the job data -- no
+  runner was ever assigned. That specific signature, arriving right after
+  a stretch of unusually long runs on an hourly cron, points at the
+  account's GitHub Actions minutes (or a configured spending limit)
+  running out from the cumulative overage, not a bug in the job's own
+  steps -- `daily-refresh.yml`'s prior run (2 hours, same day) had still
+  completed successfully, so this wasn't a blanket, from-the-start outage.
+
+**Fix:** reverted `matchday-lineups.yml` to exactly its pre-2026-08-19
+form -- just the lineup check, no retrain. The "make a confirmed lineup
+reach that fixture's prediction within the hour" goal from that PR is
+still real and still wanted, it just needs a genuinely cheap
+implementation before it belongs on an hourly cron: batch the
+`player_goal_predictions` upserts (a single multi-row statement instead
+of one round trip per player per fixture), and/or only recompute
+predictions for fixtures whose confirmed lineup actually changed since
+the last hourly check, instead of a full refit + full rewrite regardless
+of whether anything changed. Until then, the once-a-day
+`daily-refresh.yml` retrain is the only place a confirmed lineup's effect
+on predictions lands -- a real regression in freshness versus what
+2026-08-19's PR intended, but the right tradeoff until the retrain itself
+is actually cheap enough to run hourly.
+
+**What still needs a human:** whether the account actually hit a GitHub
+Actions spending limit (Settings > Billing > Actions usage) rather than
+just the free tier's included minutes, and if so, either raising it or
+waiting for the next billing cycle -- not something checkable or
+fixable from here.
+
+Worth remembering as a general lesson, not just for this one workflow:
+"makes no external API calls" and "cheap enough to run 24x more often
+than it currently does" are two completely different claims, and this PR
+conflated them without ever actually measuring how long the new step
+took before shipping it on an hourly schedule.
