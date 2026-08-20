@@ -88,6 +88,35 @@ SHOTS_ON_TARGET_BLEND_WEIGHT: dict[str, float] = {
     "FA Cup": 1.0,
 }
 
+# L2 shrinkage on every team's fitted attack/defense toward league average
+# -- see DixonColesModel.fit()'s own docstring for the full mechanism (why
+# a single fixed-size penalty naturally shrinks a sparse-data team more
+# than an established one, no per-team logic needed). Real production bug
+# this targets, found 2026-08-20: West Ham, relegated into the
+# Championship, had one single finished match in that competition's
+# fit -- and with zero regularization anywhere in the optimizer, that one
+# result alone pushed their fitted attack high enough to predict a 97.1%
+# win probability and a 6.62-1.13 scoreline for their very next match.
+# MIN_MATCHES_TO_FIT (app.train) only guards the competition's total
+# match count, never any individual team's own sample size within it, so
+# nothing else in the pipeline catches this.
+#
+# 0.05 here is an untested starting candidate, not a validated value --
+# unlike HALF_LIFE_DAYS/SHOTS_ON_TARGET_BLEND_WEIGHT above, this hasn't
+# been backtested against real data yet. This is the constant to edit and
+# rerun against production: too small and a newly-promoted/relegated
+# team's rating still swings on one or two results; too large and it
+# stops trusting real signal even for teams with plenty of matches on
+# record (watch established teams' attack/defense values and the overall
+# Brier/log-loss numbers both -- a good value shouldn't move the
+# established teams much while visibly reining in the sparse-data ones).
+# Once a real backtest finds a value that helps, promote it to
+# app.train the same way SHOTS_ON_TARGET_BLEND_WEIGHT was -- including
+# checking whether it wants to vary by competition the way that constant
+# ended up needing to (the FA Cup joint fit's ~800 sparse entrants are
+# the other place this exact mechanism should help).
+SHRINKAGE = 0.05
+
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
     """Mean squared error between predicted probability vectors and one-hot actual outcomes.
@@ -174,7 +203,7 @@ def main() -> None:
         if len(matches) < MIN_MATCHES_FOR_BACKTEST:
             print(f"Only {len(matches)} matches across {FIT_COMPETITIONS}, not enough for a meaningful backtest, skipping.")
             return
-        print(f"HALF_LIFE_DAYS={HALF_LIFE_DAYS}  SHOTS_ON_TARGET_BLEND_WEIGHT={SHOTS_ON_TARGET_BLEND_WEIGHT}")
+        print(f"HALF_LIFE_DAYS={HALF_LIFE_DAYS}  SHOTS_ON_TARGET_BLEND_WEIGHT={SHOTS_ON_TARGET_BLEND_WEIGHT}  SHRINKAGE={SHRINKAGE}")
 
         # One global date cutoff across the joint dataset, not a separate
         # per-competition split -- matches came back ordered by kickoff_date
@@ -196,7 +225,7 @@ def main() -> None:
             train_matches[train_matches["competition_name"] == "Premier League"], SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]
         )
         pl_model = DixonColesModel()
-        pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS)
+        pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE)
         print(f"Premier League fit on {pl_model.fitted_on} matches, {len(pl_model.teams)} teams, cutoff {cutoff_date}")
         _predict_and_score(
             pl_model, conn, "Premier League", test_matches[test_matches["competition_name"] == "Premier League"], len(pl_train)
@@ -206,7 +235,7 @@ def main() -> None:
             train_matches[train_matches["competition_name"] == "Championship"], SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]
         )
         championship_model = DixonColesModel()
-        championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS)
+        championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE)
         print(f"Championship fit on {championship_model.fitted_on} matches, {len(championship_model.teams)} teams, cutoff {cutoff_date}")
         _predict_and_score(
             championship_model,
@@ -221,7 +250,9 @@ def main() -> None:
         # cross-league comparability. See app.train's 2026-08-15 note.
         joint_model = DixonColesModel()
         joint_model.fit(
-            blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]), half_life_days=HALF_LIFE_DAYS
+            blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
+            half_life_days=HALF_LIFE_DAYS,
+            shrinkage=SHRINKAGE,
         )
         print(
             f"Joint fit (for FA Cup) on {joint_model.fitted_on} matches across {', '.join(FIT_COMPETITIONS)}, "

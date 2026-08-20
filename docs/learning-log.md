@@ -5038,3 +5038,104 @@ entirely removes him from the predictions altogether.
 Both pieces of track 2 (team-level availability, this per-player
 follow-up) are now shipped. Track 3 (penalty takers -- a separate,
 goal-scorer-only concern, not touching match-outcome predictions) is next.
+
+## 2026-08-20 -- Shrinkage for sparse-data teams (West Ham's 97.1% Championship prediction)
+
+Real production bug, reported directly ("the model LOVES West Ham,
+do you know why?") with a screenshot: West Ham, relegated into the
+Championship, predicted 97.1% to beat Charlton with a 6.62-1.13
+scoreline -- in just their 2nd Championship match of the season.
+
+**Root cause, confirmed by reading the code, not guessing.**
+`load_finished_matches` pulls a team's history by competition name across
+all 3 seasons of data -- West Ham has zero Championship rows from the
+prior two seasons (they were in the Premier League then), so they entered
+this fit with essentially one real data point. `MIN_MATCHES_TO_FIT = 50`
+(`app.train`) only checks that the *competition as a whole* has enough
+matches to bother fitting -- it says nothing about any individual team's
+own sample size within that fit. And `DixonColesModel.fit()` was pure
+maximum likelihood with **no regularization or prior anywhere** -- nothing
+pulled a team's attack/defense estimate back toward league average when
+its own evidence was thin. With one (likely lopsided) result and nothing
+constraining it, the optimizer was free to push West Ham's attack rating
+as high as it liked to explain that single match.
+
+This isn't West-Ham-specific -- it's the same underlying gap the FA Cup
+joint fit already got flagged for informally ("noisiest of the three,
+811 teams, many with very sparse data," see the 2026-08-19 entry) --
+except there it's diluted across hundreds of cup minnows nobody's
+watching closely; here it surfaced starkly on one high-profile team's own
+league predictions. Any newly-promoted or newly-relegated side hits this
+early in a season.
+
+**Fix: L2 shrinkage on attack/defense, toward league average.**
+`DixonColesModel.fit()` gained a `shrinkage: float = 0.0` parameter (0.0 is
+a complete no-op -- every existing caller's behavior is unchanged unless
+it opts in). When positive, it adds `shrinkage * (sum(log_attack**2) +
+sum(log_defense**2))` to the negative log-likelihood being minimized --
+a penalty pulling every team's log-space attack/defense back toward 0
+(1.0 in real space, exactly league-average).
+
+The reason a single fixed-size penalty term automatically shrinks a
+sparse-data team more than an established one, with zero per-team logic
+needed: a team backed by a full recency-weighted season of results has a
+likelihood gradient that dominates this fixed penalty at the optimum, so
+its fitted value barely moves. A team with one or two matches has a
+comparatively weak, underdetermined likelihood contribution, so the
+penalty proportionally dominates and holds its rating close to average
+until real results justify moving it -- standard ridge-regression/
+MAP-with-a-Gaussian-prior behavior, just applied to this fit's own
+log-space parameters. This is a genuinely new concept for this codebase
+(first real prior/regularization anywhere in the fit), worth naming
+plainly rather than just calling it "a tunable."
+
+One real numerical wrinkle surfaced while writing the tests, worth
+recording since it'll bite again: fitting a team off a single *shutout*
+match (0 goals conceded) is its own separate Poisson MLE degenerate case
+-- the away-goals likelihood term has no interior maximum at k=0, so
+without shrinkage the optimizer can drive that side's defense parameter
+toward an arbitrarily extreme value bounded only by convergence
+tolerance, not a true minimum (a form of the same quasi-separation
+pathology logistic regression hits with perfectly-separable data). Chose
+a 5-2 scoreline instead of a shutout for the test's "lopsided newcomer
+win" specifically to isolate the sparse-data shrinkage behavior from this
+different, adjacent pathology -- both are real, but conflating them in
+one test would have made a failure ambiguous about which one broke.
+
+**Not yet the deployed default.** `app.evaluate.SHRINKAGE = 0.05` is an
+untested starting candidate, wired into all three of that file's fits --
+the same "sandbox in evaluate.py, backtest against real data, only then
+promote to app.train" process `HALF_LIFE_DAYS` and
+`SHOTS_ON_TARGET_BLEND_WEIGHT` went through. `app.train` is deliberately
+untouched in this change -- production behavior is byte-identical to
+before, so this is safe to ship ahead of a real backtest, same as the
+very first `XG_BLEND_WEIGHT` sandbox-only PR. Also worth checking once
+real numbers come back: whether this wants to vary by competition the way
+`SHOTS_ON_TARGET_BLEND_WEIGHT` ended up needing to -- the FA Cup joint
+fit's sparse entrants are the other obvious place this same mechanism
+should help, and might want a different strength than the two clean
+single-competition fits.
+
+**Verification.** New `TestFitShrinkage` class in `test_dixon_coles.py`:
+`shrinkage=0.0` matches omitting the argument entirely (regression
+safety); a synthetic "established league + one newcomer with a single
+lopsided win" fit shows shrinkage measurably pulls the newcomer's attack
+toward 1.0 while barely moving an established team's (15 real matches);
+probabilities still form a valid distribution with shrinkage on. Full
+suite: 59 passed.
+
+Also ran a synthetic reproduction of the actual production shape (a
+6-team established league plus a "Newcomer" with one win) confirming the
+right qualitative behavior end to end: at `shrinkage=0.1`, Newcomer's
+fitted attack moved from 2.733 toward 2.584 while an established team
+with real history barely moved (0.634 -> 0.655), and Newcomer's very
+next predicted match dropped from 3.24 to 3.06 expected goals. A follow-up
+sweep (0.0 through 1.0, not part of the committed tests, just sanity-
+checking the mechanism scales as expected) showed a stronger candidate
+value pulls harder -- at 1.0, that same newcomer's attack came back to
+1.9 and predicted goals to 3.39 from an unshrunk 5.2 -- confirming the
+mechanism is strong enough to meaningfully fix this class of bug once a
+real value is validated, not just nudge it slightly. The real strength
+needed against production (hundreds of Championship matches for
+established teams vs. West Ham's actual 1-2) is a real backtest to run,
+not something to guess from a small synthetic league.
