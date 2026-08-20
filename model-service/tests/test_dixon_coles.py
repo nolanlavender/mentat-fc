@@ -96,6 +96,77 @@ class TestDixonColesModel:
             model.predict("Strong", "NeverSeenBefore")
 
 
+def _league_with_a_newcomer() -> pd.DataFrame:
+    """The established Strong/Weak round-robin, plus one extra team
+    (Newcomer) with a SINGLE match on record -- a lopsided win, mirroring
+    a newly-promoted/relegated side's real situation (see
+    docs/learning-log.md's 2026-08-20 West Ham entry: exactly one
+    Championship match on record, and that alone was enough to fit an
+    extreme attack rating with no shrinkage in place). 5-2, not a
+    shutout: a single match with 0 goals conceded is a genuine Poisson
+    MLE degenerate case of its own (the away-goals term has no interior
+    maximum, so the optimizer can drive that side's defense parameter
+    toward an arbitrarily extreme value bounded only by its convergence
+    tolerance) -- a real, separate pathology from the "sparse data lets a
+    lopsided result dominate" one this test is actually after, so it's
+    avoided here rather than conflating the two."""
+    matches = _round_robin_matches()
+    newcomer_row = pd.DataFrame(
+        [{"kickoff_date": date(2026, 1, 1), "home_team": "Newcomer", "away_team": "Weak", "home_score": 5, "away_score": 2}]
+    )
+    return pd.concat([matches, newcomer_row], ignore_index=True)
+
+
+class TestFitShrinkage:
+    def test_default_shrinkage_of_zero_matches_omitting_the_argument(self):
+        with_default = DixonColesModel()
+        with_default.fit(_round_robin_matches(), half_life_days=180)
+
+        with_explicit_zero = DixonColesModel()
+        with_explicit_zero.fit(_round_robin_matches(), half_life_days=180, shrinkage=0.0)
+
+        assert with_default.attack == pytest.approx(with_explicit_zero.attack)
+        assert with_default.defense == pytest.approx(with_explicit_zero.defense)
+
+    def test_shrinkage_pulls_a_sparse_data_team_toward_league_average(self):
+        matches = _league_with_a_newcomer()
+
+        unshrunk = DixonColesModel()
+        unshrunk.fit(matches, half_life_days=180, shrinkage=0.0)
+
+        shrunk = DixonColesModel()
+        shrunk.fit(matches, half_life_days=180, shrinkage=0.1)
+
+        # Newcomer's single 6-0 win pushes its unshrunk attack well above
+        # league average (1.0) -- shrinkage should pull it measurably
+        # closer to 1.0 without needing any per-team logic to know
+        # Newcomer only has one match.
+        assert abs(shrunk.attack["Newcomer"] - 1.0) < abs(unshrunk.attack["Newcomer"] - 1.0)
+
+    def test_shrinkage_barely_moves_a_team_with_plenty_of_real_evidence(self):
+        matches = _league_with_a_newcomer()
+
+        unshrunk = DixonColesModel()
+        unshrunk.fit(matches, half_life_days=180, shrinkage=0.0)
+
+        shrunk = DixonColesModel()
+        shrunk.fit(matches, half_life_days=180, shrinkage=0.1)
+
+        # Strong has 15 real matches backing its rating -- the same
+        # shrinkage strength that meaningfully pulls Newcomer's single-match
+        # rating toward average should barely touch Strong's, since its
+        # likelihood gradient dominates the fixed-size penalty.
+        assert unshrunk.attack["Strong"] == pytest.approx(shrunk.attack["Strong"], rel=0.1)
+
+    def test_probabilities_still_form_a_valid_distribution_with_shrinkage(self):
+        model = DixonColesModel()
+        model.fit(_league_with_a_newcomer(), half_life_days=180, shrinkage=0.1)
+
+        pred = model.predict("Newcomer", "Weak")
+        total = pred.prob_home_win + pred.prob_draw + pred.prob_away_win
+        assert total == pytest.approx(1.0, abs=1e-6)
+
+
 class TestPredictWithAvailability:
     def test_default_availability_of_one_matches_plain_predict(self):
         model = DixonColesModel()

@@ -68,10 +68,39 @@ class DixonColesModel:
     rho: float = 0.0
     fitted_on: int = 0  # match count, kept for reporting/sanity-checking, not used in the math
 
-    def fit(self, matches: pd.DataFrame, half_life_days: float = 180) -> None:
+    def fit(self, matches: pd.DataFrame, half_life_days: float = 180, shrinkage: float = 0.0) -> None:
         """
         matches needs columns: kickoff_date, home_team, away_team, home_score, away_score.
         Fits by maximizing the weighted Dixon-Coles log-likelihood via scipy.
+
+        shrinkage (0.0 by default -- a complete no-op, identical to every
+        fit before this parameter existed) adds an L2 penalty pulling every
+        team's log_attack/log_defense back toward 0 (i.e. attack/defense
+        toward 1.0, exactly league-average). This is real, deliberate bias
+        toward the mean -- the point is that a team with almost no real
+        evidence behind it shouldn't get a confident-looking, wildly
+        off-average rating just because nothing currently stops the
+        optimizer from chasing a perfect fit to one or two results.
+
+        Why a single fixed-size penalty naturally shrinks a sparse-data
+        team more than an established one, with no extra per-team logic
+        needed: a team backed by a full (recency-weighted) season of
+        results has a likelihood gradient that dominates this fixed
+        penalty at the optimum, so its fitted value barely moves. A team
+        with only one or two matches on record -- the real situation for
+        a newly-promoted or newly-relegated side, see docs/learning-log.md's
+        2026-08-20 entry on West Ham's Championship attack rating for the
+        production case that surfaced this -- has a comparatively weak,
+        underdetermined likelihood contribution, so the penalty
+        proportionally dominates and holds their rating close to average
+        until real results justify moving it. Standard ridge-regression/
+        MAP-with-a-Gaussian-prior behavior, just applied to this fit's own
+        log-space parameters instead of a linear model's coefficients.
+
+        Not yet the deployed default -- see SHRINKAGE's own comment in
+        app.evaluate for why this needs a real backtest before promoting
+        a candidate value to app.train, the same process
+        SHOTS_ON_TARGET_BLEND_WEIGHT went through.
         """
         self.teams = sorted(set(matches["home_team"]) | set(matches["away_team"]))
         n = len(self.teams)
@@ -116,7 +145,11 @@ class DixonColesModel:
             tau_values = np.clip(tau_values, 1e-10, None)  # guard against log(0) for pathological rho
 
             log_likelihood = poisson_ll + np.log(tau_values)
-            return -np.sum(weights * log_likelihood)
+            nll = -np.sum(weights * log_likelihood)
+
+            if shrinkage > 0:
+                nll += shrinkage * (np.sum(log_attack**2) + np.sum(log_defense**2))
+            return nll
 
         initial_guess = np.zeros(2 * n + 2)
         initial_guess[2 * n] = log(1.3)  # modest home-advantage starting point
