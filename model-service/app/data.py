@@ -157,6 +157,10 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
     One row per (team, player, fixture) where the player was named in the
     matchday squad -- starting XI or substitute -- for a finished match,
     including appearances with 0 minutes played (an unused substitute).
+    Also carries penalties_scored/penalties_missed (real, populated
+    API-Football data -- see app.goal_scorer's primary-penalty-taker
+    mechanism for why attempts, not just conversions, matter for
+    identifying who currently takes a team's penalties).
     That last part matters for app.goal_scorer's minutes-share calculation:
     averaging only over matches a player actually got on the pitch would
     make a rotated squad player look like a nailed-on starter. Deliberately
@@ -208,6 +212,8 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
             SELECT fl.team_id, fl.player_id, f.kickoff_date, fl.is_starting,
                    COALESCE(fps.minutes_played, 0) AS minutes_played,
                    COALESCE(fps.goals, 0) AS goals,
+                   COALESCE(fps.penalties_scored, 0) AS penalties_scored,
+                   COALESCE(fps.penalties_missed, 0) AS penalties_missed,
                    fps.rating
             FROM fixture_lineups fl
             JOIN fixtures f ON f.id = fl.fixture_id
@@ -227,7 +233,8 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
             FROM most_recent_club mrc
             JOIN players p ON p.id = mrc.player_id
         )
-        SELECT ec.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals, a.rating, a.is_starting
+        SELECT ec.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals,
+               a.penalties_scored, a.penalties_missed, a.rating, a.is_starting
         FROM appearances a
         JOIN effective_club ec ON ec.player_id = a.player_id
         ORDER BY a.kickoff_date

@@ -5202,3 +5202,111 @@ Worth remembering as a general lesson, not just for this one workflow:
 than it currently does" are two completely different claims, and this PR
 conflated them without ever actually measuring how long the new step
 took before shipping it on an hourly schedule.
+
+## 2026-08-20 -- Track 3: penalty-taker attribution in the goal-scorer allocation model
+
+Last of the three original model-improvement tracks (better baseline
+ratings, match-specific availability adjustments, penalty takers).
+Scoped from the start as goal-scorer-only, never touching match-outcome
+predictions -- `dixon_coles.py` and `train.py`'s match-outcome fitting
+are untouched here, only `goal_scorer.py`'s player-level allocation.
+
+**Verified before building, same discipline as the xG/shots-on-target
+story:** `fixture_player_stats.penalties_scored`/`penalties_missed` is
+real, populated data -- confirmed against the actual API-Football seed
+code (`stats.penalty.scored`/`stats.penalty.missed`, written on every
+`upsertFixturePlayerStats` call in `backend/seed/sources/api-football.ts`),
+not another `xg`-style column that turns out to be always null.
+`fixture_player_stats.goals` is API-Football's own `goals.total`, which
+already includes penalty goals -- `penalties_scored` is a breakdown of
+that total, not an addition to it.
+
+**The actual gap.** A designated penalty taker's scoring odds came from
+one blended per-90 goal rate (`goal_share`) that mixes penalty and
+open-play goals together. Two real misattribution problems follow: (1) a
+player's rate stays inflated by penalties he took for a PREVIOUS club (or
+an earlier spell at the same club where he, not the current taker, had
+the job) even after the role has moved on -- the existing "current
+effective club" transfer-handling in `load_player_squad_appearances`
+already lets recency-decay blend a moved player's old-club data
+automatically, but it does nothing to separate "his job" stats from
+"anyone's job" stats; (2) the actual current taker's odds were never
+boosted beyond what his open-play rate alone implies, even though a
+penalty is close to a guaranteed hand-off to one specific player, not
+something shared across the squad the way open-play chances are.
+
+**Mechanism, entirely in `app/goal_scorer.py`:**
+- `compute_player_shares` now also returns `non_penalty_goal_share`
+  (`goal_share` recomputed from `goals - penalties_scored`, so a
+  player's open-play share isn't inflated by penalty history),
+  `penalty_attempts` (recency-weighted `penalties_scored +
+  penalties_missed` -- attempts, not just conversions, since even a
+  missed penalty confirms who currently gets picked; zeroed out below a
+  new `MIN_PENALTY_ATTEMPTS = 2` raw-attempt reliability gate, mirroring
+  `MIN_PLAYER_MATCHES`'s existing pattern), and `penalty_goal_fraction`
+  -- what share of the TEAM's own weighted goals came from penalties, the
+  same value on every row for that team. This last one deliberately isn't
+  an absolute "expected penalties per match" rate (that would need a
+  fixture-count denominator `load_player_squad_appearances`'s output
+  doesn't carry, and predicting raw penalty *frequency* is a genuinely
+  noisy, low-signal problem of its own) -- a share, like `goal_share`
+  already is, sidesteps that entirely and fits the file's existing idiom.
+- New `compute_primary_penalty_taker(team_id, player_shares)` returns the
+  player with the highest `penalty_attempts` for that team, or `None` if
+  no one clears the reliability gate -- `None` means "no confident
+  answer," never "this team doesn't get penalties," the same convention
+  `compute_team_availability`'s 1.0 default already established.
+- `allocate_team_goals` carves `team_expected_goals * penalty_goal_fraction`
+  out as `penalty_expected_goals`, hands it (almost) entirely to the
+  identified taker on top of his own open-play share, and allocates the
+  remainder (`open_play_expected_goals`) via `non_penalty_goal_share *
+  minutes_share` for everyone, taker included -- so his own penalty
+  history no longer double-counts into his open-play odds. Only carves
+  anything out when there's both a confident taker AND he isn't himself
+  confirmed out of the matchday squad (reusing track 2's
+  `confirmed_squad` parameter) -- with no attribution possible either
+  way, `team_expected_goals` is left whole and allocated the old way,
+  rather than a real chunk of expected goals silently vanishing.
+
+**Verification.** 13 new tests across `TestComputePlayerShares` (the
+`non_penalty_goal_share`/`penalty_attempts`/`penalty_goal_fraction`
+mechanics, including the reliability gate and that misses count),
+`TestComputePrimaryPenaltyTaker` (correct identification, attempts
+outrank raw conversion rate, `None` for no reliable taker or no data),
+and a new `TestAllocateTeamGoalsPenalties` class (the taker gets a real
+boost, the team's total expected goals still roughly conserves, a
+non-taker teammate isn't inflated by the taker's penalties, a team with
+no reliable taker behaves exactly like before this track existed, and a
+taker confirmed OUT of the squad is omitted with his penalty share
+correctly NOT discarded). Every pre-existing test in the file (which
+never gave any player penalty data) still passes unchanged, confirming
+`penalty_goal_fraction=0`/no-confident-taker degrades to the exact
+pre-this-track behavior -- full suite: 72 passed.
+
+Also ran a synthetic end-to-end reproduction: a club's real mixed
+striker (4 penalty goals, 4 open-play goals, 1 missed penalty) versus a
+pure open-play teammate (10 goals, no penalties) and a rarely-used third
+player. `penalty_goal_fraction` came back at 0.220 (4 of the team's 18
+total goals were penalties, matching by hand). The mixed striker's
+`non_penalty_goal_share` (0.321) came in well below his plain
+`goal_share` (0.484), while the pure-open-play teammate's rose the other
+way (0.679 vs 0.516) -- exactly the intended de-inflation. A second
+scenario simulated a real transfer-window handover: the original
+taker's penalty-taking stint pushed far enough into the past (400 days,
+more than two full half-lives) relative to a new signing's few recent
+appearances, and `compute_primary_penalty_taker` correctly flipped
+attribution to the new signing -- confirming the same `HALF_LIFE_DAYS`-
+driven "role strength changes slowly, but it does change" property
+already relied on elsewhere resolves a real penalty-taker handover too,
+not just team-level form.
+
+All three original model-improvement tracks (baseline ratings,
+match-specific availability, penalty takers) are now shipped. No
+`app.evaluate`/`app.train` backtesting angle here the way the other two
+tracks needed -- there's no match-outcome probability to backtest
+against a market baseline for an individual player's scorer odds, so
+"is this actually better" for this track rests on the mechanism being
+sound (verified above) and, eventually, on how it looks against real
+scorer outcomes once enough matches accumulate under it -- worth
+revisiting if real predicted-scorer accuracy ever gets tracked as its
+own metric.
