@@ -229,16 +229,18 @@ export function PredictionsPage() {
           <h2>Top picks</h2>
           <ul className="top-picks-list">
             {topPicks.map((pick) => (
-              <li key={pick.fixture.id} className="fixture-teams">
-                <Crest src={pick.fixture.homeTeam.logoUrl} alt="" />
-                <span className="top-pick-fixture">
-                  {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name}
-                  <span className="prediction-meta">{new Date(pick.fixture.kickoffAt).toLocaleString()}</span>
-                </span>
-                <Crest src={pick.fixture.awayTeam.logoUrl} alt="" />
-                <span className="top-pick-call">
-                  {pick.label} {formatPercent(pick.probability)}
-                </span>
+              <li key={pick.fixture.id}>
+                <Link to={`/fixtures/${pick.fixture.id}`} className="fixture-teams">
+                  <Crest src={pick.fixture.homeTeam.logoUrl} alt="" />
+                  <span className="top-pick-fixture">
+                    {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name}
+                    <span className="prediction-meta">{new Date(pick.fixture.kickoffAt).toLocaleString()}</span>
+                  </span>
+                  <Crest src={pick.fixture.awayTeam.logoUrl} alt="" />
+                  <span className="top-pick-call">
+                    {pick.label} {formatPercent(pick.probability)}
+                  </span>
+                </Link>
               </li>
             ))}
           </ul>
@@ -256,10 +258,10 @@ export function PredictionsPage() {
                   <PlayerPhoto src={pick.playerPhotoUrl} alt="" />
                   {pick.playerName}
                 </Link>
-                <span className="prediction-meta">
+                <Link to={`/fixtures/${pick.fixture.id}`} className="prediction-meta">
                   {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name} ·{' '}
                   {new Date(pick.fixture.kickoffAt).toLocaleString()}
-                </span>
+                </Link>
                 <span className="top-pick-call">{formatPercent(pick.probScores)}</span>
               </li>
             ))}
