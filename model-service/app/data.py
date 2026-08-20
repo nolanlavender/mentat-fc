@@ -205,7 +205,7 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
     """
     query = """
         WITH appearances AS (
-            SELECT fl.team_id, fl.player_id, f.kickoff_date,
+            SELECT fl.team_id, fl.player_id, f.kickoff_date, fl.is_starting,
                    COALESCE(fps.minutes_played, 0) AS minutes_played,
                    COALESCE(fps.goals, 0) AS goals,
                    fps.rating
@@ -227,7 +227,7 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
             FROM most_recent_club mrc
             JOIN players p ON p.id = mrc.player_id
         )
-        SELECT ec.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals, a.rating
+        SELECT ec.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals, a.rating, a.is_starting
         FROM appearances a
         JOIN effective_club ec ON ec.player_id = a.player_id
         ORDER BY a.kickoff_date
@@ -237,21 +237,23 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
 
 def load_confirmed_lineups(conn: psycopg.Connection, fixture_ids: list[int]) -> pd.DataFrame:
     """
-    One row per (fixture_id, team_id, player_id) for whichever of the
-    given fixtures already have a confirmed matchday squad in
+    One row per (fixture_id, team_id, player_id, is_starting) for whichever
+    of the given fixtures already have a confirmed matchday squad in
     fixture_lineups -- starting XI or bench, anyone actually named for
     that squad, not just starters (see app.goal_scorer.compute_team_availability
-    for why bench presence still counts as "available"). A fixture with no
-    rows here simply has no confirmed squad yet -- the normal state for
-    anything more than roughly an hour before kickoff (see
-    backend/seed/sources/api-football.ts's seedTodaysLineups) -- callers
-    treat that as "no confident answer yet", not an error, same as every
-    other missing-data case in this app.
+    for why bench presence still counts as "available" at the TEAM level --
+    is_starting is what lets app.goal_scorer.allocate_team_goals tell a
+    confirmed starter from a confirmed bench player for that same
+    fixture's individual scorer odds). A fixture with no rows here simply
+    has no confirmed squad yet -- the normal state for anything more than
+    roughly an hour before kickoff (see backend/seed/sources/api-football.ts's
+    seedTodaysLineups) -- callers treat that as "no confident answer yet",
+    not an error, same as every other missing-data case in this app.
     """
     if not fixture_ids:
-        return pd.DataFrame(columns=["fixture_id", "team_id", "player_id"])
+        return pd.DataFrame(columns=["fixture_id", "team_id", "player_id", "is_starting"])
     query = """
-        SELECT fixture_id, team_id, player_id
+        SELECT fixture_id, team_id, player_id, is_starting
         FROM fixture_lineups
         WHERE fixture_id = ANY(%(fixture_ids)s)
     """

@@ -4955,3 +4955,86 @@ closely-related follow-up to this team-level piece, not part of it --
 team strength (this entry) and individual scorer-odds suppression are
 two different signals that happen to share the same confirmed-lineup
 data source.
+
+## 2026-08-20 -- Confirmed starting-vs-bench minutes for per-player scorer odds (track 2, part 2)
+
+The team-level availability adjustment (previous entry) fixed one half of
+the "we're predicting player odds without knowing who's actually
+playing" problem -- Man City's *team* expected goals now respond to a
+confirmed Haaland absence. This closes the other half, at the individual
+player level: a squad's biggest name shouldn't top that fixture's scorer
+odds on the strength of a season-long average if he's confirmed on the
+bench for a 15-minute cameo today.
+
+**The gap.** `minutes_share` was always one blended number across every
+squad appearance, starts and bench cameos both averaged together. That's
+the right number when there's no confirmed lineup yet (most of the week --
+the season-long blend is the best available estimate), but once a
+specific fixture's squad is confirmed, it's actively misleading: a
+usually-nailed-on starter who's confirmed on the bench today still carries
+his "usually plays 90" blended average into that fixture's `lambda_player`
+calculation.
+
+**Fix: split the average by the role the player actually had, not just
+average over all of them.** `compute_player_shares` (`app/goal_scorer.py`)
+now also computes `avg_minutes_when_starting` and `avg_minutes_when_benched`
+-- the exact same weighted-average machinery `minutes_share` already used,
+just conditioned on `fixture_lineups.is_starting` first. Both are `NaN`
+(not 0) wherever a player has zero appearances in that specific role --
+e.g., a player who has genuinely never started -- so a caller has to
+explicitly choose a fallback rather than this function silently guessing.
+
+`allocate_team_goals` gained two new parameters, `confirmed_squad` and
+`confirmed_starting` (both empty sets by default, mirroring
+`compute_team_availability`'s "empty means no confirmed data yet"
+convention from the previous entry -- one consistent idiom across both
+functions rather than two different ways of saying the same thing).
+Empty (the default) reproduces the exact old behavior: every reliable
+player gets predicted with his blended `minutes_share`, unchanged. Once a
+squad is confirmed:
+- A reliable player NOT in `confirmed_squad` is skipped entirely --
+  correct, since a player who isn't even named for the matchday squad has
+  zero real chance to score, and showing up in scorer odds just because
+  his season-long share still clears `MIN_PLAYER_MATCHES` would be wrong.
+- A player IN the squad gets `avg_minutes_when_starting` if he's in
+  `confirmed_starting`, otherwise `avg_minutes_when_benched` -- substituted
+  in place of `minutes_share` for that one fixture's `lambda_player`
+  calculation only. `goal_share` is untouched either way (it's a
+  per-90 rate, not a playing-time signal -- see this file's existing
+  goal_share/minutes_share note).
+- Falls back to the normal blended `minutes_share` when the role-specific
+  average is `NaN` (a player with no recorded appearances in that role
+  yet) -- there's nothing role-specific to use, so falling back is more
+  honest than guessing 0 and killing his odds outright.
+
+`load_player_squad_appearances` and `load_confirmed_lineups`
+(`app/data.py`) both now also carry `is_starting` (from
+`fixture_lineups.is_starting`) to feed this. `app/train.py`'s
+`predict_for_competition` reuses the same `home_confirmed`/`away_confirmed`
+sets and per-fixture `fixture_lineup` slice the team-level availability
+adjustment already loads -- no new query, just a `is_starting` filter on
+data already in hand -- to build each side's `confirmed_squad` and
+`confirmed_starting` sets and pass them into `allocate_team_goals`.
+
+**Verification.** New tests in `test_goal_scorer.py`: the role split
+itself (`avg_minutes_when_starting`/`avg_minutes_when_benched` diverge
+correctly and bracket the blended `minutes_share`; `NaN` for a role never
+recorded), and `allocate_team_goals`'s new behavior (no confirmed squad =
+unchanged; a confirmed-out player is omitted entirely; a confirmed starter
+uses the higher starting average; a confirmed bench player uses the lower
+bench average and drops relative to no-confirmation; the NaN-role fallback
+doesn't produce a NaN/broken prediction). Full suite: 55 passed.
+
+Also ran a synthetic end-to-end check (same no-DB-access constraint as the
+previous entry): a striker who starts 8/10 recorded matches at a full 90
+but has been benched (15 min) his last 2, versus a steady 10/10 starter
+teammate. With no confirmed lineup, the striker's blended `expected_goals`
+(1.071) clearly leads the teammate's. Confirming the striker on the bench
+today drops him to 0.215 -- now clearly behind the confirmed starter's
+0.672, exactly the "don't let the big name top scorer odds on a confirmed
+cameo" behavior this was built for. Confirming him out of the squad
+entirely removes him from the predictions altogether.
+
+Both pieces of track 2 (team-level availability, this per-player
+follow-up) are now shipped. Track 3 (penalty takers -- a separate,
+goal-scorer-only concern, not touching match-outcome predictions) is next.

@@ -179,12 +179,23 @@ def predict_for_competition(conn, model: DixonColesModel, competition_name: str,
 
         # Goal-scorer allocation reuses this same match-outcome prediction's
         # team-level expected goals -- see app.goal_scorer for why this is
-        # allocation, not a separate model trained from scratch.
-        for team_id, team_expected_goals in (
-            (fixture["home_team_id"], prediction.predicted_home_goals),
-            (fixture["away_team_id"], prediction.predicted_away_goals),
+        # allocation, not a separate model trained from scratch. Confirmed
+        # squad/starting-XI membership (home_confirmed/away_confirmed,
+        # already loaded above for the team-level availability adjustment)
+        # is reused here too, for the separate per-player question of
+        # whether a specific reliable player is even in the squad, and
+        # whether he's starting or on the bench for this one fixture --
+        # see allocate_team_goals for why that changes his own scorer odds.
+        for team_id, team_expected_goals, team_confirmed in (
+            (fixture["home_team_id"], prediction.predicted_home_goals, home_confirmed),
+            (fixture["away_team_id"], prediction.predicted_away_goals, away_confirmed),
         ):
-            for player_prediction in allocate_team_goals(team_expected_goals, team_id, player_shares):
+            team_starting = set(
+                fixture_lineup[(fixture_lineup["team_id"] == team_id) & fixture_lineup["is_starting"]]["player_id"]
+            )
+            for player_prediction in allocate_team_goals(
+                team_expected_goals, team_id, player_shares, confirmed_squad=team_confirmed, confirmed_starting=team_starting
+            ):
                 upsert_player_goal_prediction(conn, fixture["fixture_id"], team_id, player_prediction)
                 goal_scorer_predictions += 1
 

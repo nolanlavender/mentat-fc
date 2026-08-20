@@ -8,7 +8,7 @@ from app.goal_scorer import MIN_PLAYER_MATCHES, allocate_team_goals, compute_pla
 AS_OF = date(2026, 8, 1)
 
 
-def _appearance(team_id, player_id, day, minutes, goals, rating=None):
+def _appearance(team_id, player_id, day, minutes, goals, rating=None, is_starting=True):
     return {
         "team_id": team_id,
         "player_id": player_id,
@@ -16,6 +16,7 @@ def _appearance(team_id, player_id, day, minutes, goals, rating=None):
         "minutes_played": minutes,
         "goals": goals,
         "rating": rating,
+        "is_starting": is_starting,
     }
 
 
@@ -81,9 +82,18 @@ class TestComputePlayerShares:
 
     def test_empty_input_returns_empty_frame_with_expected_columns(self):
         shares = compute_player_shares(
-            pd.DataFrame(columns=["team_id", "player_id", "kickoff_date", "minutes_played", "goals", "rating"]), AS_OF
+            pd.DataFrame(columns=["team_id", "player_id", "kickoff_date", "minutes_played", "goals", "rating", "is_starting"]), AS_OF
         )
-        assert list(shares.columns) == ["team_id", "player_id", "matches", "minutes_share", "goal_share", "avg_rating"]
+        assert list(shares.columns) == [
+            "team_id",
+            "player_id",
+            "matches",
+            "minutes_share",
+            "goal_share",
+            "avg_rating",
+            "avg_minutes_when_starting",
+            "avg_minutes_when_benched",
+        ]
         assert shares.empty
 
     def test_avg_rating_is_the_weighted_mean_of_rated_appearances(self):
@@ -114,6 +124,31 @@ class TestComputePlayerShares:
         shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
         player = shares[shares["player_id"] == 100].iloc[0]
         assert player["avg_rating"] == pytest.approx(8.0, abs=0.01)
+
+    def test_avg_minutes_split_by_role_not_blended(self):
+        # A player who's a nailed-on 90 when he starts, but only ever a
+        # brief 15-minute cameo off the bench otherwise -- the single
+        # blended minutes_share should sit between those two, but the
+        # role-specific averages should each reflect their own role only.
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 0, is_starting=True) for i in range(5)],
+                *[_appearance(1, 100, i + 5, 15, 0, is_starting=False) for i in range(5)],
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        player = shares[shares["player_id"] == 100].iloc[0]
+
+        assert player["avg_minutes_when_starting"] == pytest.approx(1.0, abs=0.01)  # 90/90
+        assert player["avg_minutes_when_benched"] == pytest.approx(15 / 90, abs=0.01)
+        assert player["avg_minutes_when_benched"] < player["minutes_share"] < player["avg_minutes_when_starting"]
+
+    def test_avg_minutes_when_starting_is_nan_for_a_player_who_never_started(self):
+        appearances = pd.DataFrame([_appearance(1, 100, i, 10, 0, is_starting=False) for i in range(MIN_PLAYER_MATCHES)])
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        player = shares[shares["player_id"] == 100].iloc[0]
+        assert pd.isna(player["avg_minutes_when_starting"])
+        assert not pd.isna(player["avg_minutes_when_benched"])
 
 
 class TestAllocateTeamGoals:
@@ -155,6 +190,73 @@ class TestAllocateTeamGoals:
         shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
         predictions = allocate_team_goals(team_expected_goals=1.5, team_id=999, player_shares=shares)
         assert predictions == []
+
+    def _mixed_squad_shares(self):
+        # A team's top scorer (id 9), who's usually a nailed-on 90-minute
+        # starter but occasionally only a bench cameo, plus a rarely-used
+        # fringe player (id 77) who still clears MIN_PLAYER_MATCHES and has
+        # a small but nonzero goal_share of his own.
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 9, i, 90, 2, is_starting=True) for i in range(8)],
+                *[_appearance(1, 9, i + 8, 15, 0, is_starting=False) for i in range(2)],
+                *[_appearance(1, 77, i, 20, 1 if i == 0 else 0, is_starting=False) for i in range(10)],
+            ]
+        )
+        return compute_player_shares(appearances, AS_OF, half_life_days=180)
+
+    def test_no_confirmed_squad_uses_blended_minutes_share_for_everyone(self):
+        shares = self._mixed_squad_shares()
+        predictions = allocate_team_goals(team_expected_goals=2.0, team_id=1, player_shares=shares)
+        by_player = {p.player_id: p for p in predictions}
+        assert set(by_player) == {9, 77}
+
+    def test_player_confirmed_out_of_the_squad_is_omitted(self):
+        shares = self._mixed_squad_shares()
+        # Only 77 is confirmed in the squad -- 9 (the top scorer) is
+        # confirmed OUT entirely, and shouldn't appear at all.
+        predictions = allocate_team_goals(
+            team_expected_goals=2.0, team_id=1, player_shares=shares, confirmed_squad={77}, confirmed_starting=set()
+        )
+        assert {p.player_id for p in predictions} == {77}
+
+    def test_confirmed_starting_uses_the_higher_starting_minutes_average(self):
+        shares = self._mixed_squad_shares()
+        no_confirmation = {p.player_id: p for p in allocate_team_goals(2.0, 1, shares)}
+        confirmed_starting = {
+            p.player_id: p
+            for p in allocate_team_goals(2.0, 1, shares, confirmed_squad={9, 77}, confirmed_starting={9})
+        }
+        # Confirmed starting uses avg_minutes_when_starting (higher than the
+        # season-blended minutes_share, since he's usually a starter but
+        # this pulls in his occasional bench cameos too) -- expected_goals
+        # should go up relative to the no-confirmation baseline.
+        assert confirmed_starting[9].expected_goals > no_confirmation[9].expected_goals
+
+    def test_confirmed_benched_uses_the_lower_bench_minutes_average(self):
+        shares = self._mixed_squad_shares()
+        no_confirmation = {p.player_id: p for p in allocate_team_goals(2.0, 1, shares)}
+        confirmed_benched = {
+            p.player_id: p
+            for p in allocate_team_goals(2.0, 1, shares, confirmed_squad={9, 77}, confirmed_starting=set())
+        }
+        # Confirmed on the bench (not starting) uses the much lower
+        # avg_minutes_when_benched -- the whole point of this feature, so a
+        # team's biggest scorer doesn't top that fixture's odds on a
+        # confirmed 15-minute cameo.
+        assert confirmed_benched[9].expected_goals < no_confirmation[9].expected_goals
+
+    def test_falls_back_to_blended_minutes_share_when_role_has_no_data(self):
+        # 77 has never once started -- avg_minutes_when_starting is NaN for
+        # him, so confirming him as a (surprise) starter should fall back
+        # to his blended minutes_share rather than producing a NaN lambda.
+        shares = self._mixed_squad_shares()
+        predictions = {
+            p.player_id: p
+            for p in allocate_team_goals(2.0, 1, shares, confirmed_squad={9, 77}, confirmed_starting={9, 77})
+        }
+        assert predictions[77].expected_goals > 0
+        assert not pd.isna(predictions[77].expected_goals)
 
 
 class TestComputeTeamAvailability:
