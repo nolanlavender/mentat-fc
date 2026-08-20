@@ -451,6 +451,14 @@ section + section {
   opacity: 0.7;
 }
 
+a.prediction-meta {
+  text-decoration: none;
+}
+
+a.prediction-meta:hover {
+  text-decoration: underline;
+}
+
 /* display: contents -- its children (Home/Draw/Away/expected/scorers)
    become direct grid items of .prediction-row itself, so each one lands in
    its own fixed column instead of being squeezed into one flex box. */
