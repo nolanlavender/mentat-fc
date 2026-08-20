@@ -28,6 +28,17 @@ secretly encode "how much this player plays" would double-count it:
   match they were named in the squad for, not just ones they played in.
 
 See docs/learning-log.md's Phase 7 entry for the full reasoning.
+
+Penalty takers get their own carve-out in allocate_team_goals, separate
+from the goal_share/minutes_share math above, because a penalty isn't
+allocated by playing-time or finishing rate the way open-play goals
+are -- it's almost always one specific player's job. Folding penalty
+goals into the same blended per-90 rate goal_share already uses would
+misattribute them twice over: a player's rate stays inflated by
+penalties he took for a PREVIOUS club (or a spell where he, not the
+CURRENT taker, had the job), and the actual current taker doesn't get
+credited any more than his open-play scoring alone would suggest. See
+compute_primary_penalty_taker and allocate_team_goals for the mechanism.
 """
 
 from __future__ import annotations
@@ -42,6 +53,7 @@ import pandas as pd
 from app.dixon_coles import time_weight
 
 MIN_PLAYER_MATCHES = 5  # raw (unweighted) squad-appearance count -- below this, shares are too noisy to trust
+MIN_PENALTY_ATTEMPTS = 2  # raw (unweighted) penalty attempts (scored + missed) -- below this, don't trust anyone as "the taker"
 
 
 @dataclass
@@ -54,13 +66,14 @@ class PlayerGoalPrediction:
 def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days: float = 180) -> pd.DataFrame:
     """
     appearances: app.data.load_player_squad_appearances's output (team_id,
-    player_id, kickoff_date, minutes_played, goals, rating, is_starting --
-    one row per squad appearance). Returns one row per (team_id, player_id)
-    with matches (raw count, for the reliability threshold), minutes_share,
-    goal_share (normalized to sum to 1 within each team), avg_rating
-    (weighted mean of rating, NaN if this player has no rated appearances
-    -- see app.goal_scorer.compute_team_availability for why it exists),
-    and avg_minutes_when_starting / avg_minutes_when_benched -- minutes_share
+    player_id, kickoff_date, minutes_played, goals, penalties_scored,
+    penalties_missed, rating, is_starting -- one row per squad appearance).
+    Returns one row per (team_id, player_id) with matches (raw count, for
+    the reliability threshold), minutes_share, goal_share (normalized to
+    sum to 1 within each team), avg_rating (weighted mean of rating, NaN
+    if this player has no rated appearances -- see
+    app.goal_scorer.compute_team_availability for why it exists), and
+    avg_minutes_when_starting / avg_minutes_when_benched -- minutes_share
     split by the role the player actually had that match, instead of one
     number blending both. A squad player who's a nailed-on 90-minute
     starter when he starts but only ever a late substitute otherwise looks
@@ -71,6 +84,17 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
     -- e.g. a player who has never once started -- so a caller has to
     explicitly decide the fallback rather than this function silently
     picking 0.
+
+    Also returns non_penalty_goal_share (goal_share recomputed from
+    goals minus penalties_scored, so a player's OPEN-PLAY scoring share
+    isn't inflated by penalty history that belongs to a specific role, not
+    general ability), penalty_attempts (weighted count of penalties_scored
+    + penalties_missed -- attempts, not just conversions, since even a
+    missed penalty confirms who currently gets picked to take one), and
+    penalty_goal_fraction -- what fraction of the TEAM's own weighted
+    goals (not this player's) have come from penalties, the same value
+    repeated on every row for that team. See allocate_team_goals and
+    compute_primary_penalty_taker for how these combine.
     """
     columns = [
         "team_id",
@@ -81,6 +105,9 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
         "avg_rating",
         "avg_minutes_when_starting",
         "avg_minutes_when_benched",
+        "non_penalty_goal_share",
+        "penalty_attempts",
+        "penalty_goal_fraction",
     ]
     if appearances.empty:
         return pd.DataFrame(columns=columns)
@@ -95,10 +122,16 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
     rating = appearances["rating"].astype(float)
     has_rating = rating.notna()
     is_starting = appearances["is_starting"].astype(bool)
+    non_penalty_goals = appearances["goals"] - appearances["penalties_scored"]
+    penalty_attempts = appearances["penalties_scored"] + appearances["penalties_missed"]
     df = appearances.assign(
         weight=weight,
         weighted_minutes=appearances["minutes_played"] * weight,
         weighted_goals=appearances["goals"] * weight,
+        weighted_non_penalty_goals=non_penalty_goals * weight,
+        weighted_penalty_goals=appearances["penalties_scored"] * weight,
+        raw_penalty_attempts=penalty_attempts,
+        weighted_penalty_attempts=penalty_attempts * weight,
         rating_weight=np.where(has_rating, weight, 0.0),
         weighted_rating=np.where(has_rating, rating * weight, 0.0),
         starting_weight=np.where(is_starting, weight, 0.0),
@@ -114,6 +147,10 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
             weighted_squad_appearances=("weight", "sum"),
             weighted_minutes=("weighted_minutes", "sum"),
             weighted_goals=("weighted_goals", "sum"),
+            weighted_non_penalty_goals=("weighted_non_penalty_goals", "sum"),
+            weighted_penalty_goals=("weighted_penalty_goals", "sum"),
+            weighted_penalty_attempts=("weighted_penalty_attempts", "sum"),
+            penalty_attempts_raw=("raw_penalty_attempts", "sum"),
             weighted_rating=("weighted_rating", "sum"),
             rating_weight=("rating_weight", "sum"),
             starting_weight=("starting_weight", "sum"),
@@ -128,6 +165,11 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
     grouped["goals_per_90"] = np.where(
         grouped["weighted_minutes"] > 0,
         grouped["weighted_goals"] / (grouped["weighted_minutes"] / 90),
+        0.0,
+    )
+    grouped["non_penalty_goals_per_90"] = np.where(
+        grouped["weighted_minutes"] > 0,
+        grouped["weighted_non_penalty_goals"] / (grouped["weighted_minutes"] / 90),
         0.0,
     )
     grouped["avg_rating"] = np.where(
@@ -145,9 +187,28 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
         grouped["weighted_minutes_benched"] / (90 * grouped["benched_weight"]),
         np.nan,
     )
+    # Raw (unweighted) attempt count feeds MIN_PENALTY_ATTEMPTS's reliability
+    # gate; the recency-weighted count is what actually ranks "who's the
+    # current taker" once a player clears that gate -- an old, expired
+    # penalty-taking spell shouldn't outrank someone who's taken (or even
+    # missed) one more recently.
+    grouped["penalty_attempts"] = np.where(
+        grouped["penalty_attempts_raw"] >= MIN_PENALTY_ATTEMPTS, grouped["weighted_penalty_attempts"], 0.0
+    )
 
     team_totals = grouped.groupby("team_id")["goals_per_90"].transform("sum")
     grouped["goal_share"] = np.where(team_totals > 0, grouped["goals_per_90"] / team_totals, 0.0)
+
+    non_penalty_team_totals = grouped.groupby("team_id")["non_penalty_goals_per_90"].transform("sum")
+    grouped["non_penalty_goal_share"] = np.where(
+        non_penalty_team_totals > 0, grouped["non_penalty_goals_per_90"] / non_penalty_team_totals, 0.0
+    )
+
+    team_goal_totals = grouped.groupby("team_id")["weighted_goals"].transform("sum")
+    team_penalty_goal_totals = grouped.groupby("team_id")["weighted_penalty_goals"].transform("sum")
+    grouped["penalty_goal_fraction"] = np.where(
+        team_goal_totals > 0, np.clip(team_penalty_goal_totals / team_goal_totals, 0.0, 1.0), 0.0
+    )
 
     reliable = grouped[grouped["matches"] >= MIN_PLAYER_MATCHES]
     return reliable[columns].reset_index(drop=True)
@@ -159,6 +220,33 @@ def _mean_rating(shares: pd.DataFrame) -> float | None:
     if ratings.empty:
         return None
     return float(ratings.mean())
+
+
+def compute_primary_penalty_taker(team_id: int, player_shares: pd.DataFrame) -> int | None:
+    """
+    The team's current penalty taker, if there's a confident answer --
+    None otherwise, which callers should treat as "no attribution," not
+    "this team never gets penalties" (see allocate_team_goals).
+
+    Ranked by recency-weighted penalty_attempts (scored + missed), not
+    just conversions -- a missed penalty still confirms who currently
+    gets picked to take one, and using attempts rather than conversions
+    alone avoids quietly erasing a poor penalty-taker's record by
+    ignoring his misses. compute_player_shares already zeroed
+    penalty_attempts out for anyone below MIN_PENALTY_ATTEMPTS raw
+    attempts, so picking the max
+    here is safe -- a team with no one over that bar has every player's
+    penalty_attempts at 0, and this returns None rather than crowning
+    whichever reliable player happens to be first in the frame.
+    """
+    team_players = player_shares[player_shares["team_id"] == team_id]
+    if team_players.empty:
+        return None
+
+    top = team_players.loc[team_players["penalty_attempts"].idxmax()]
+    if top["penalty_attempts"] <= 0:
+        return None
+    return int(top["player_id"])
 
 
 def compute_team_availability(team_id: int, confirmed_player_ids: set[int], player_shares: pd.DataFrame) -> float:
@@ -240,8 +328,37 @@ def allocate_team_goals(
     recorded appearances in that specific role yet (e.g. a squad player
     who has never once started) -- there's nothing role-specific to use,
     so falling back is more honest than guessing 0.
+
+    Penalty goals are carved out of team_expected_goals before the
+    goal_share/minutes_share split runs, using the team's own
+    penalty_goal_fraction (see compute_player_shares), and handed
+    (almost) entirely to compute_primary_penalty_taker's pick instead of
+    being spread by playing time like open-play goals are -- penalties
+    are one specific player's job, not a shared rate. The remaining
+    open-play portion is allocated using non_penalty_goal_share, not
+    goal_share, so the primary taker's own penalty history doesn't also
+    inflate his open-play share and get counted twice. Only carved out
+    when a confident taker exists (compute_primary_penalty_taker doesn't
+    return None) AND he isn't himself confirmed out of the squad -- with
+    no confident taker at all, or the usual taker confirmed absent this
+    fixture and no reliable second-choice to fall back to,
+    team_expected_goals is left whole and allocated the old way (via
+    non_penalty_goal_share, which degrades to ordinary goal_share
+    whenever penalty_goal_fraction is 0), rather than quietly discarding
+    a real chunk of expected goals into thin air.
     """
     team_players = player_shares[player_shares["team_id"] == team_id]
+    primary_taker_id = compute_primary_penalty_taker(team_id, player_shares)
+    taker_confirmed_out = confirmed_squad and primary_taker_id is not None and primary_taker_id not in confirmed_squad
+
+    if primary_taker_id is not None and not taker_confirmed_out and not team_players.empty:
+        penalty_goal_fraction = float(team_players["penalty_goal_fraction"].iloc[0])
+        penalty_expected_goals = team_expected_goals * penalty_goal_fraction
+        open_play_expected_goals = team_expected_goals - penalty_expected_goals
+    else:
+        penalty_expected_goals = 0.0
+        open_play_expected_goals = team_expected_goals
+
     predictions = []
     for row in team_players.itertuples():
         if confirmed_squad and row.player_id not in confirmed_squad:
@@ -253,7 +370,10 @@ def allocate_team_goals(
             if not pd.isna(role_share):
                 minutes_share = role_share
 
-        lambda_player = team_expected_goals * row.goal_share * minutes_share
+        lambda_player = open_play_expected_goals * row.non_penalty_goal_share * minutes_share
+        if row.player_id == primary_taker_id:
+            lambda_player += penalty_expected_goals
+
         predictions.append(
             PlayerGoalPrediction(player_id=int(row.player_id), expected_goals=lambda_player, prob_scores=1 - exp(-lambda_player))
         )

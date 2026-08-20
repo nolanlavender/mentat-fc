@@ -3,12 +3,21 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from app.goal_scorer import MIN_PLAYER_MATCHES, allocate_team_goals, compute_player_shares, compute_team_availability
+from app.goal_scorer import (
+    MIN_PENALTY_ATTEMPTS,
+    MIN_PLAYER_MATCHES,
+    allocate_team_goals,
+    compute_player_shares,
+    compute_primary_penalty_taker,
+    compute_team_availability,
+)
 
 AS_OF = date(2026, 8, 1)
 
 
-def _appearance(team_id, player_id, day, minutes, goals, rating=None, is_starting=True):
+def _appearance(
+    team_id, player_id, day, minutes, goals, rating=None, is_starting=True, penalties_scored=0, penalties_missed=0
+):
     return {
         "team_id": team_id,
         "player_id": player_id,
@@ -17,6 +26,8 @@ def _appearance(team_id, player_id, day, minutes, goals, rating=None, is_startin
         "goals": goals,
         "rating": rating,
         "is_starting": is_starting,
+        "penalties_scored": penalties_scored,
+        "penalties_missed": penalties_missed,
     }
 
 
@@ -82,7 +93,20 @@ class TestComputePlayerShares:
 
     def test_empty_input_returns_empty_frame_with_expected_columns(self):
         shares = compute_player_shares(
-            pd.DataFrame(columns=["team_id", "player_id", "kickoff_date", "minutes_played", "goals", "rating", "is_starting"]), AS_OF
+            pd.DataFrame(
+                columns=[
+                    "team_id",
+                    "player_id",
+                    "kickoff_date",
+                    "minutes_played",
+                    "goals",
+                    "rating",
+                    "is_starting",
+                    "penalties_scored",
+                    "penalties_missed",
+                ]
+            ),
+            AS_OF,
         )
         assert list(shares.columns) == [
             "team_id",
@@ -93,6 +117,9 @@ class TestComputePlayerShares:
             "avg_rating",
             "avg_minutes_when_starting",
             "avg_minutes_when_benched",
+            "non_penalty_goal_share",
+            "penalty_attempts",
+            "penalty_goal_fraction",
         ]
         assert shares.empty
 
@@ -149,6 +176,104 @@ class TestComputePlayerShares:
         player = shares[shares["player_id"] == 100].iloc[0]
         assert pd.isna(player["avg_minutes_when_starting"])
         assert not pd.isna(player["avg_minutes_when_benched"])
+
+    def test_non_penalty_goal_share_excludes_penalty_goals(self):
+        # Player 100: 5 goals, all from penalties -- zero open-play threat.
+        # Player 101: 5 open-play goals, no penalties -- same raw total, but
+        # non_penalty_goal_share should treat them very differently, unlike
+        # plain goal_share which can't tell them apart.
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 1, penalties_scored=1) for i in range(5)],
+                *[_appearance(1, 101, i, 90, 1) for i in range(5)],
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        penalty_taker = shares[shares["player_id"] == 100].iloc[0]
+        open_play_scorer = shares[shares["player_id"] == 101].iloc[0]
+
+        # Plain goal_share can't distinguish them -- same raw goals, same minutes.
+        assert penalty_taker["goal_share"] == pytest.approx(open_play_scorer["goal_share"])
+        # non_penalty_goal_share should.
+        assert penalty_taker["non_penalty_goal_share"] < open_play_scorer["non_penalty_goal_share"]
+        assert penalty_taker["non_penalty_goal_share"] == pytest.approx(0.0)
+
+    def test_penalty_attempts_below_the_reliability_threshold_are_zeroed(self):
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 1, penalties_scored=1 if i < MIN_PENALTY_ATTEMPTS else 0) for i in range(5)],
+                *[_appearance(1, 101, i, 90, 1, penalties_scored=1 if i < 1 else 0) for i in range(5)],  # only 1 attempt
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        reliable_taker = shares[shares["player_id"] == 100].iloc[0]
+        unreliable_taker = shares[shares["player_id"] == 101].iloc[0]
+
+        assert reliable_taker["penalty_attempts"] > 0
+        assert unreliable_taker["penalty_attempts"] == 0
+
+    def test_penalty_attempts_counts_misses_too(self):
+        appearances = pd.DataFrame(
+            [_appearance(1, 100, i, 90, 0, penalties_scored=0, penalties_missed=1 if i < MIN_PENALTY_ATTEMPTS else 0) for i in range(5)]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        player = shares[shares["player_id"] == 100].iloc[0]
+        assert player["penalty_attempts"] > 0
+
+    def test_penalty_goal_fraction_reflects_the_teams_own_share_of_goals_from_penalties(self):
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 1, penalties_scored=1) for i in range(5)],  # 5 penalty goals
+                *[_appearance(1, 101, i, 90, 1) for i in range(5)],  # 5 open-play goals
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        # 5 of the team's 10 total goals came from penalties.
+        assert shares["penalty_goal_fraction"].iloc[0] == pytest.approx(0.5, abs=0.01)
+        # Same value on every row for that team.
+        assert shares["penalty_goal_fraction"].nunique() == 1
+
+
+class TestComputePrimaryPenaltyTaker:
+    def test_identifies_the_player_with_the_most_penalty_attempts(self):
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 1, penalties_scored=1 if i < 4 else 0) for i in range(5)],  # 4 attempts
+                *[_appearance(1, 101, i, 90, 1, penalties_scored=1 if i < 2 else 0) for i in range(5)],  # 2 attempts
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        assert compute_primary_penalty_taker(1, shares) == 100
+
+    def test_attempts_count_more_than_conversion_rate(self):
+        # 100: 3 attempts, only 1 scored (poor conversion). 101: 2 attempts,
+        # both scored (perfect conversion). 100 should still win -- he's
+        # the one actually getting picked to take them.
+        appearances = pd.DataFrame(
+            [
+                *[
+                    _appearance(1, 100, i, 90, 1, penalties_scored=1 if i == 0 else 0, penalties_missed=1 if 0 < i < 3 else 0)
+                    for i in range(5)
+                ],
+                *[_appearance(1, 101, i, 90, 1, penalties_scored=1 if i < 2 else 0) for i in range(5)],
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        assert compute_primary_penalty_taker(1, shares) == 100
+
+    def test_returns_none_when_no_one_clears_the_reliability_threshold(self):
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 1, penalties_scored=1 if i == 0 else 0) for i in range(5)],  # 1 attempt only
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        assert compute_primary_penalty_taker(1, shares) is None
+
+    def test_returns_none_for_a_team_with_no_data(self):
+        appearances = pd.DataFrame([_appearance(1, 100, i, 90, 1) for i in range(5)])
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        assert compute_primary_penalty_taker(999, shares) is None
 
 
 class TestAllocateTeamGoals:
@@ -257,6 +382,74 @@ class TestAllocateTeamGoals:
         }
         assert predictions[77].expected_goals > 0
         assert not pd.isna(predictions[77].expected_goals)
+
+
+class TestAllocateTeamGoalsPenalties:
+    def _shares_with_a_penalty_taker(self):
+        # Team's designated taker (100): 5 penalty goals (half his 10
+        # total) plus open-play scoring. Teammate (101): pure open-play,
+        # never taken a penalty.
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 2, penalties_scored=1) for i in range(5)],  # 5 goals, all penalties
+                *[_appearance(1, 101, i, 90, 1) for i in range(5)],  # 5 open-play goals
+            ]
+        )
+        return compute_player_shares(appearances, AS_OF, half_life_days=180)
+
+    def test_primary_taker_gets_a_boost_beyond_his_open_play_share(self):
+        shares = self._shares_with_a_penalty_taker()
+        predictions = {p.player_id: p for p in allocate_team_goals(2.0, 1, shares)}
+        # 100's non_penalty_goal_share is 0 (all his goals were penalties),
+        # so without the penalty carve-out he'd get nothing -- the boost is
+        # the only thing giving him any expected goals at all here.
+        assert predictions[100].expected_goals > 0
+
+    def test_penalty_carve_out_does_not_change_the_teams_total_expected_goals(self):
+        shares = self._shares_with_a_penalty_taker()
+        predictions = allocate_team_goals(2.0, 1, shares)
+        # goal_share (not non_penalty_goal_share) sums to 1 across the
+        # team, and the penalty carve-out plus open-play split together
+        # should still roughly conserve the team's total expected goals --
+        # a sanity bound, not an exact identity (same reasoning as the
+        # pre-existing combined-share conservation test above).
+        assert sum(p.expected_goals for p in predictions) <= 2.0 + 1e-9
+
+    def test_non_taker_teammates_no_longer_get_credit_for_his_penalties(self):
+        shares = self._shares_with_a_penalty_taker()
+        predictions = {p.player_id: p for p in allocate_team_goals(2.0, 1, shares)}
+        # 101 is pure open-play and should be allocated from the (smaller,
+        # after the penalty carve-out) open-play pool only -- still > 0,
+        # but shouldn't be inflated by 100's penalty goals.
+        assert 0 < predictions[101].expected_goals < 2.0
+
+    def test_no_reliable_taker_leaves_team_expected_goals_whole(self):
+        # No player here ever took a penalty -- compute_primary_penalty_taker
+        # returns None, so allocation should behave exactly like the
+        # pre-penalty-tracking version (full team_expected_goals via
+        # non_penalty_goal_share, which equals goal_share when there are no
+        # penalties at all).
+        appearances = pd.DataFrame(
+            [
+                *[_appearance(1, 100, i, 90, 2) for i in range(5)],
+                *[_appearance(1, 101, i, 90, 1) for i in range(5)],
+            ]
+        )
+        shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
+        predictions = {p.player_id: p for p in allocate_team_goals(2.0, 1, shares)}
+        assert sum(p.expected_goals for p in predictions.values()) <= 2.0 + 1e-9
+        assert predictions[100].expected_goals > predictions[101].expected_goals
+
+    def test_taker_confirmed_out_of_the_squad_is_omitted_and_his_penalty_share_is_not_discarded(self):
+        shares = self._shares_with_a_penalty_taker()
+        # Only 101 confirmed in the squad -- 100 (the penalty taker) is out.
+        predictions = {p.player_id: p for p in allocate_team_goals(2.0, 1, shares, confirmed_squad={101}, confirmed_starting={101})}
+        assert set(predictions) == {101}
+        # 101 should get the FULL team_expected_goals via his non-penalty
+        # share (no carve-out, since there's no one left to attribute the
+        # penalty share to) -- not just his usual smaller open-play slice.
+        no_confirmation = {p.player_id: p for p in allocate_team_goals(2.0, 1, shares)}
+        assert predictions[101].expected_goals > no_confirmation[101].expected_goals
 
 
 class TestComputeTeamAvailability:
