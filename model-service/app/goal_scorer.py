@@ -54,20 +54,34 @@ class PlayerGoalPrediction:
 def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days: float = 180) -> pd.DataFrame:
     """
     appearances: app.data.load_player_squad_appearances's output (team_id,
-    player_id, kickoff_date, minutes_played, goals, rating -- one row per
-    squad appearance). Returns one row per (team_id, player_id) with
-    matches (raw count, for the reliability threshold), minutes_share,
-    goal_share (normalized to sum to 1 within each team), and avg_rating
+    player_id, kickoff_date, minutes_played, goals, rating, is_starting --
+    one row per squad appearance). Returns one row per (team_id, player_id)
+    with matches (raw count, for the reliability threshold), minutes_share,
+    goal_share (normalized to sum to 1 within each team), avg_rating
     (weighted mean of rating, NaN if this player has no rated appearances
-    -- rating isn't recorded for every match, so this is deliberately not
-    coalesced to 0, which would understate a real player as unrated-bad
-    instead of just unknown). See app.goal_scorer.compute_team_availability
-    for why avg_rating exists: comparing a confirmed matchday squad's
-    average against this "normal" average is how a missing star gets
-    partially or fully compensated for by a comparably-rated replacement,
-    instead of always counting as pure lost share.
+    -- see app.goal_scorer.compute_team_availability for why it exists),
+    and avg_minutes_when_starting / avg_minutes_when_benched -- minutes_share
+    split by the role the player actually had that match, instead of one
+    number blending both. A squad player who's a nailed-on 90-minute
+    starter when he starts but only ever a late substitute otherwise looks
+    like a "rotation risk" under the single blended minutes_share; the
+    split lets a caller with a confirmed role for one specific fixture (see
+    allocate_team_goals) use the right number instead of the blend. Both
+    are NaN wherever a player has zero appearances in that role on record
+    -- e.g. a player who has never once started -- so a caller has to
+    explicitly decide the fallback rather than this function silently
+    picking 0.
     """
-    columns = ["team_id", "player_id", "matches", "minutes_share", "goal_share", "avg_rating"]
+    columns = [
+        "team_id",
+        "player_id",
+        "matches",
+        "minutes_share",
+        "goal_share",
+        "avg_rating",
+        "avg_minutes_when_starting",
+        "avg_minutes_when_benched",
+    ]
     if appearances.empty:
         return pd.DataFrame(columns=columns)
 
@@ -80,12 +94,17 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
     # blend_shots_on_target_into_scores hit with an all-null shots column.
     rating = appearances["rating"].astype(float)
     has_rating = rating.notna()
+    is_starting = appearances["is_starting"].astype(bool)
     df = appearances.assign(
         weight=weight,
         weighted_minutes=appearances["minutes_played"] * weight,
         weighted_goals=appearances["goals"] * weight,
         rating_weight=np.where(has_rating, weight, 0.0),
         weighted_rating=np.where(has_rating, rating * weight, 0.0),
+        starting_weight=np.where(is_starting, weight, 0.0),
+        weighted_minutes_starting=np.where(is_starting, appearances["minutes_played"] * weight, 0.0),
+        benched_weight=np.where(~is_starting, weight, 0.0),
+        weighted_minutes_benched=np.where(~is_starting, appearances["minutes_played"] * weight, 0.0),
     )
 
     grouped = (
@@ -97,6 +116,10 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
             weighted_goals=("weighted_goals", "sum"),
             weighted_rating=("weighted_rating", "sum"),
             rating_weight=("rating_weight", "sum"),
+            starting_weight=("starting_weight", "sum"),
+            weighted_minutes_starting=("weighted_minutes_starting", "sum"),
+            benched_weight=("benched_weight", "sum"),
+            weighted_minutes_benched=("weighted_minutes_benched", "sum"),
         )
         .reset_index()
     )
@@ -110,6 +133,16 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
     grouped["avg_rating"] = np.where(
         grouped["rating_weight"] > 0,
         grouped["weighted_rating"] / grouped["rating_weight"],
+        np.nan,
+    )
+    grouped["avg_minutes_when_starting"] = np.where(
+        grouped["starting_weight"] > 0,
+        grouped["weighted_minutes_starting"] / (90 * grouped["starting_weight"]),
+        np.nan,
+    )
+    grouped["avg_minutes_when_benched"] = np.where(
+        grouped["benched_weight"] > 0,
+        grouped["weighted_minutes_benched"] / (90 * grouped["benched_weight"]),
         np.nan,
     )
 
@@ -173,12 +206,54 @@ def compute_team_availability(team_id: int, confirmed_player_ids: set[int], play
     return max(0.0, 1 - uncompensated_loss)
 
 
-def allocate_team_goals(team_expected_goals: float, team_id: int, player_shares: pd.DataFrame) -> list[PlayerGoalPrediction]:
-    """player_shares: compute_player_shares's output. Returns one prediction per reliable player on this team."""
+def allocate_team_goals(
+    team_expected_goals: float,
+    team_id: int,
+    player_shares: pd.DataFrame,
+    confirmed_squad: set[int] = frozenset(),
+    confirmed_starting: set[int] = frozenset(),
+) -> list[PlayerGoalPrediction]:
+    """
+    player_shares: compute_player_shares's output. Returns one prediction
+    per reliable player on this team -- except when a confirmed matchday
+    squad is passed (see app.data.load_confirmed_lineups), in which case a
+    reliable player NOT in confirmed_squad is skipped entirely rather than
+    predicted: a player who isn't even named for the squad has no real
+    chance to score, and shouldn't show up in scorer odds just because his
+    season-long share still clears MIN_PLAYER_MATCHES.
+
+    confirmed_squad empty (the default) means "no confirmed lineup for
+    this fixture yet" -- every reliable player gets predicted using their
+    normal season-blended minutes_share, unchanged from before this
+    parameter existed. This is the common case (most fixtures, most of the
+    week), so the empty-set default keeps existing callers' behavior
+    identical.
+
+    Once a squad IS confirmed, each player's role-specific minutes average
+    (avg_minutes_when_starting or avg_minutes_when_benched, whichever
+    matches whether he's in confirmed_starting) replaces minutes_share for
+    that one fixture -- this is specifically why a squad player who's
+    confirmed on the bench shouldn't out-rank a nailed-on starter in that
+    fixture's scorer odds just because his season-long blended share
+    doesn't distinguish "usually starts" from "usually a late sub." Falls
+    back to the normal blended minutes_share when the player has no
+    recorded appearances in that specific role yet (e.g. a squad player
+    who has never once started) -- there's nothing role-specific to use,
+    so falling back is more honest than guessing 0.
+    """
     team_players = player_shares[player_shares["team_id"] == team_id]
     predictions = []
     for row in team_players.itertuples():
-        lambda_player = team_expected_goals * row.goal_share * row.minutes_share
+        if confirmed_squad and row.player_id not in confirmed_squad:
+            continue  # confirmed out of the matchday squad -- no real chance to score
+
+        minutes_share = row.minutes_share
+        if confirmed_squad:
+            role_share = row.avg_minutes_when_starting if row.player_id in confirmed_starting else row.avg_minutes_when_benched
+            if not pd.isna(role_share):
+                minutes_share = role_share
+
+        lambda_player = team_expected_goals * row.goal_share * minutes_share
         predictions.append(
             PlayerGoalPrediction(player_id=int(row.player_id), expected_goals=lambda_player, prob_scores=1 - exp(-lambda_player))
         )
