@@ -5726,3 +5726,69 @@ One structural change fell out of this: `app.evaluate` now fits the joint
 model FIRST rather than last, since the two single-competition fits may
 now depend on it as their prior. The joint fit itself never takes a prior
 -- there is nothing broader to pull it toward.
+
+## 2026-08-21 -- The shrinkage-prior A/B came back too close to call, so: paired testing
+
+Ran the prior-vs-league-average A/B against production. Result, Brier
+(and log-loss agreed with Brier in every case, which is at least
+internally consistent):
+
+| | off (current) | on (candidate) | |
+|---|---|---|---|
+| Premier League | 0.6226 | **0.6209** | better |
+| Championship | 0.6474 | 0.6484 | worse |
+| FA Cup | 0.6258 | 0.6258 | identical |
+
+FA Cup coming back byte-identical is a genuinely useful signal, not a
+boring one: the joint fit never takes a prior, so it MUST be unchanged.
+That it is confirms both that the runs are deterministic and that the
+flag is plumbed only where intended.
+
+**The problem: these differences are tiny.** Premier League gains 0.0017
+Brier -- 0.27%. For scale, the shots-on-target blend moved the same
+number 0.6399 -> 0.6248 *monotonically across five values*, which no
+amount of noise explains. This is a single A/B with a fraction of that
+effect, in opposite directions in two competitions.
+
+The tempting move was to do what `SHOTS_ON_TARGET_BLEND_WEIGHT` did when
+competitions disagreed -- go per-competition, Premier League on,
+Championship off -- and call it validated. That would have been wrong,
+or at least unjustified: picking per-competition winners off differences
+this small is precisely how you overfit a backtest to its own test set.
+The earlier per-competition decision was defensible because the trend was
+large and monotonic across a sweep; this one is two numbers.
+
+**So the real gap was in the measurement, not the model.** `app.evaluate`
+prints one aggregate number per competition per run, which cannot answer
+"would this hold up on a different sample of matches?" New `app.compare`
+scores both configurations on THE SAME held-out fixtures and compares
+them **per match, paired**, then bootstraps over fixtures for a
+confidence interval on the mean difference.
+
+Pairing is what makes small effects measurable at all here. Most of the
+variance in a Brier score is "some matches are just inherently harder to
+predict", and that component is *identical* for both configurations, so
+differencing per match cancels it. Comparing two independent aggregates
+throws that cancellation away and buries a 0.0017 effect under noise
+that was never relevant to the comparison.
+
+The bootstrap resamples whole fixtures rather than assuming normality --
+per-match Brier values are bounded and heavily skewed (most cluster in
+the middle, a few confident-and-wrong predictions score terribly), so a
+normal-approximation interval would be the wrong shape. Seeded, so the
+same data always yields the same verdict rather than a slightly different
+one each run.
+
+Sanity-checked the machinery against known answers before trusting it:
+fed it 400 samples of pure noise (true effect zero) and 400 with a real
+-0.05 effect. The noise case produced a sample mean of -0.0328 -- which a
+naive comparison would have happily called a win -- and the interval
+correctly spanned zero anyway. The real effect was correctly detected.
+That first case is the entire argument for building this.
+
+Verdict on the prior itself: **still unknown, deliberately.**
+`SHRINK_TOWARD_JOINT` stays default-False and production is unchanged
+until the paired comparison says the interval excludes zero. "The
+difference is not distinguishable from noise" is a completely legitimate
+outcome here, and much better than shipping a per-competition rule
+fitted to sampling error.
