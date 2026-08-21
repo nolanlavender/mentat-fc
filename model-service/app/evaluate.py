@@ -23,6 +23,7 @@ Usage: python -m app.evaluate
 
 from __future__ import annotations
 
+import os
 import sys
 
 import numpy as np
@@ -115,7 +116,15 @@ SHOTS_ON_TARGET_BLEND_WEIGHT: dict[str, float] = {
 # checking whether it wants to vary by competition the way that constant
 # ended up needing to (the FA Cup joint fit's ~800 sparse entrants are
 # the other place this exact mechanism should help).
-SHRINKAGE = 0.05
+#
+# SHRINKAGE_OVERRIDE (env var) beats this constant when set -- lets
+# .github/workflows/backtest-shrinkage-temp.yml sweep several candidate
+# values in one Actions run (one job per value, via a matrix) without
+# editing this file each time. Editing the constant above directly still
+# works exactly as before for a normal local run; the env var is purely
+# additive, for that one temporary workflow. Delete this override (and
+# the workflow) once a value has been chosen and promoted to app.train.
+SHRINKAGE = float(os.environ.get("SHRINKAGE_OVERRIDE", 0.05))
 
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
