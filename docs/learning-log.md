@@ -5856,3 +5856,64 @@ are both deleted, as their own comments said they should be once a
 verdict existed. `app.compare` stays -- it is now the standard way to
 judge a model change here, and its first real use was talking this
 project out of a change it would otherwise have shipped.
+
+## 2026-08-21 -- Shot location, wired into the model: learning the coefficient
+
+The shot-location backfill has real data now, so the column stopped being
+a no-op and the model work could actually begin.
+
+**The interesting problem.** The shots-on-target blend works by reading a
+single pooled ratio straight off the data: total goals divided by total
+shots on target. Shot location can't be done that way. The data records
+how many shots a team took from inside and outside the box, and how many
+goals it scored -- but never WHICH shots became goals. There is no
+per-location conversion rate sitting in a column waiting to be read.
+
+It can be *estimated*, though, and this is where the "add a coefficient"
+idea from earlier lands properly. Across many matches,
+`goals ~= inside * rate_inside + outside * rate_outside`, which is
+ordinary least squares with two unknowns and one row per team-match.
+The model learns the relative value of location instead of being told
+it. No intercept: a team taking zero shots scores zero goals, and a
+constant term would hand out goals for nothing, flattening exactly the
+between-team differences the fit needs to see.
+
+**Verified against known answers before trusting it**, which turned out
+to matter. Generated synthetic matches from known rates (0.130 inside,
+0.035 outside, Poisson noise) and checked what came back. The first
+single run recovered 0.1385 and 0.0179 -- the inside rate close, the
+outside rate off by half, which initially looked like bias in the
+estimator. Running 12 trials instead of one showed it wasn't: the means
+were 0.1291 and 0.0367, both essentially unbiased. The outside rate is
+simply about twice as noisy (sd 0.0123 vs 0.0065), because outside-box
+shots are fewer and, with no intercept, the two columns are somewhat
+collinear so the pair trades off run to run.
+
+The lesson worth keeping: one sample is not an estimate. A single draw
+1.4 standard deviations out looked exactly like a systematic flaw, and
+would have sent me rewriting a function that was already correct.
+
+**And the noisy coefficient turned out not to matter**, which is the
+part that decides whether this is usable. Callers never use either rate
+on its own -- they use the combination, which is precisely what least
+squares optimises. Across those same trials the resulting proxy
+correlated **0.997** with true expected goals and sat within **0.036
+goals** of it on average. The individual coefficients are interesting to
+look at; the proxy is what's reliable, and the docstring now says so
+rather than inviting someone to read a single run's "inside-box shots are
+worth 7.7x outside ones" as a fact about football.
+
+**Not promoted, deliberately.** `SHOT_LOCATION_BLEND_WEIGHT` ships at 0.0
+for every competition -- production behaviour unchanged -- because the
+hypothesis that location beats shot-count is genuinely untested on real
+data. `app.compare` is repointed at this question (its config block is
+now explicitly the thing to edit for a new comparison), so the verdict
+comes from a paired, bootstrapped test rather than from eyeballing two
+aggregate numbers, which is the mistake the previous change nearly
+caused.
+
+`app.evaluate` now also prints shot-location coverage and the learned
+rates up front. Partial coverage silently makes the blend a partial
+no-op, which is precisely how the `xg` column managed to look wired up
+while touching nothing -- printing it means that failure announces itself
+instead of hiding inside an unchanged Brier score.
