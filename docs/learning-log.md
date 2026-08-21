@@ -5310,3 +5310,61 @@ sound (verified above) and, eventually, on how it looks against real
 scorer outcomes once enough matches accumulate under it -- worth
 revisiting if real predicted-scorer accuracy ever gets tracked as its
 own metric.
+
+## 2026-08-20/21 -- GitHub Actions billing incident: self-inflicted, fixed, and the repo went public
+
+Reported live: `matchday-lineups.yml` started failing outright (runs
+completing in 3-4 seconds with no runner ever assigned), then spread to
+every workflow including `ci.yml` on unrelated PRs.
+
+**Root cause, self-inflicted:** the player-availability PR (#77, earlier
+2026-08-19/20) added a `python -m app.train` step to `matchday-lineups.yml`
+-- already-hourly -- reasoning that `app.train` makes zero external API
+calls, so rerunning it hourly "costs nothing against the API-Football
+budget." True, and beside the point: `app.train` refits three Dixon-Coles
+models and writes a `player_goal_predictions` row per reliable player per
+upcoming fixture across all three competitions via one unbatched
+`upsert_player_goal_prediction` DB round trip per row -- a real,
+non-trivial cost, previously paid once a day by `daily-refresh.yml`.
+Running it every hour instead multiplied that cost 24x. The run history
+made the damage visible before any log needed reading: `matchday-lineups.yml`
+went from a few seconds -> 46 minutes -> 1h31m -> outright failures with
+no runner assigned, the signature of the account's Actions minutes/
+spending limit running out.
+
+**Fix, in two parts:**
+1. Reverted `matchday-lineups.yml` to its exact pre-#77 form (PR #81) --
+   stop the bleeding immediately. The "confirmed lineup reaches its
+   fixture's prediction within the hour" goal is still real and wanted,
+   but needs a genuinely cheap implementation (batched upserts, and/or
+   only recomputing predictions for fixtures whose confirmed lineup
+   actually changed) before it belongs back on an hourly cron -- not
+   attempted yet.
+2. The account's Actions minutes were still exhausted even after the
+   revert (past usage doesn't retroactively free up) -- flipped the repo
+   from private to public, which moves it onto GitHub's free-and-
+   unlimited Actions minutes for public repos on standard runners.
+   Confirmed working: `matchday-lineups.yml` run #69, the first one after
+   going public, succeeded in seconds again.
+
+**Before recommending going public, checked what going public would
+actually expose** (see `docs/CLAUDE.md`'s new "Repo visibility" section
+for the durable version of this): grepped the full git history for
+hardcoded secrets/connection strings/API keys -- clean, only a harmless
+`postgres://test:test@localhost/test` placeholder in test setup. Confirmed
+`.env` was never committed (properly gitignored throughout). Confirmed
+`backend/seed/snapshot/mentat_fc_seed.dump` (the one real data snapshot
+committed to the repo) predates the `users`/`bets` tables entirely, so it
+carries zero real user data. Confirmed no workflow uses
+`pull_request_target` (the pattern that would hand a stranger's fork PR
+access to real secrets). Repo went public with a real, checked answer to
+"what's the worst that can happen," not a guess.
+
+**Going forward:** `docs/CLAUDE.md` now carries a standing "be extra
+careful about secrets while this repo is public" rule -- real credentials
+only ever live in Actions secrets or a local gitignored `.env`, never
+hardcoded in a script or scratch file that could get committed, and
+double-check `git status`/`git diff` before committing anything
+`.env`-adjacent, a seed dump, or a debug script written against a real
+key. Worth revisiting whether to flip back to private once the app is
+past needing free unlimited Actions minutes as urgently.
