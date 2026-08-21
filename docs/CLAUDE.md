@@ -85,6 +85,42 @@ reasoning."
   the next scaling step at each phase rather than over-provisioning early.
   Budget roughly $10–30/mo for paid data APIs if free tiers are too limited.
 
+## Repo visibility — public since 2026-08-21
+
+Flipped from private to public on 2026-08-21 specifically to fix a real
+GitHub Actions billing incident (see `docs/learning-log.md`'s 2026-08-20
+entry) — public repos get free, unlimited Actions minutes on standard
+runners, private ones don't. Might flip back to private later; this
+isn't a permanent decision, so don't let the caution below lapse just
+because it "used to be private."
+
+**Real, added caution while public — every session, not just this one:**
+
+- Real credentials live ONLY in GitHub Actions secrets (Settings >
+  Secrets) or a local, gitignored `.env` — never hardcoded in a script,
+  test, seed file, or scratch/debug file that might get committed. A
+  secret pasted into a public repo gets scraped by bots within minutes,
+  not "eventually" — there's no quiet window to catch and rotate it the
+  way a private repo gives you.
+- Before committing anything that touches `.env`-adjacent files, seed
+  dumps/snapshots, or a scratch script used to debug against a real
+  DB/API key, actually check `git status`/`git diff` for what's in it —
+  don't assume.
+- Confirmed clean as of going public (full git history checked): `.env`
+  has never been committed, and no real API key/DB connection
+  string/JWT secret has ever been hardcoded anywhere in history — only a
+  harmless `postgres://test:test@localhost/test` placeholder in test
+  setup. Keep it that way.
+- `backend/seed/snapshot/mentat_fc_seed.dump` predates the `users`/`bets`
+  tables and carries zero real user data. If it's ever regenerated
+  (`npm run db:dump`) after real users exist, check what's actually in it
+  before committing — don't assume it's still safe just because it was
+  before.
+- No workflow uses `pull_request_target` (the one CI pattern that would
+  hand a stranger's fork PR access to real secrets) — keep it that way
+  if adding new workflows; a plain `pull_request` trigger doesn't have
+  this problem.
+
 ## Data sources
 
 - **Fixtures / lineups / standings:** API-Football. Started on the free
