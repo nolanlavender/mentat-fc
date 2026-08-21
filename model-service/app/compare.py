@@ -30,7 +30,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from app.data import blend_shot_proxies_with_fallback, blend_shots_on_target_into_scores, load_finished_matches
+from app.data import blend_learned_shot_proxy_into_scores, blend_shot_proxies_with_fallback, load_finished_matches
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.evaluate import (
@@ -44,13 +44,18 @@ from app.evaluate import (
     _outcome_one_hot,
 )
 
-# --- What this run compares -------------------------------------------
-#
-# THIS is the block to edit to point the comparison at a different
-# question. A and B are just two configurations; everything below is
-# generic. Keep the labels honest -- they're what the verdict is
-# reported against.
-#
+BOOTSTRAP_SAMPLES = 5000
+CONFIDENCE = 95
+
+# Below this, a competition is skipped rather than fitted. Not just
+# defensive tidiness: without it, a database holding only some of the
+# three competitions (a partial local snapshot, say) crashes deep inside
+# the optimizer with an unhelpful IndexError, which makes it impossible
+# to smoke-test this module anywhere except production. That is precisely
+# how a NameError in _bootstrap_ci reached a real run once -- the module
+# imported fine and could not be executed locally to find out otherwise.
+MIN_MATCHES_PER_COMPETITION = 50
+
 # --- What this run compares -------------------------------------------
 #
 # One baseline, several candidates, all scored on the SAME held-out
@@ -80,7 +85,22 @@ def _blend(matches: pd.DataFrame, competition: str, location_weight: float | Non
     """location_weight None = the baseline, shots on target at its tuned weight."""
     sot_weight = SHOTS_ON_TARGET_BLEND_WEIGHT[competition]
     if location_weight is None:
-        return blend_shots_on_target_into_scores(matches, sot_weight)
+        # Deliberately blend_learned_shot_proxy_into_scores and NOT
+        # app.data.blend_shots_on_target_into_scores, even though the latter
+        # is what production runs. The two rescale shots on target to goals
+        # by different methods (pooled mean ratio vs least squares), so
+        # using one for the baseline and the other inside the candidate's
+        # fallback would make every comparison a mixture of two questions:
+        # "does location help?" and "which shots-on-target calibration is
+        # better?".
+        #
+        # Caught by running this against a snapshot with 0% location
+        # coverage, where the candidate MUST be identical to the baseline
+        # and instead differed by a small, perfectly constant +0.00065 at
+        # every weight. Holding the calibration fixed makes that difference
+        # exactly zero, which is now the self-check that the comparison is
+        # measuring only what it claims to.
+        return blend_learned_shot_proxy_into_scores(matches, sot_weight, FALLBACK_SIGNALS)
     # Location where it exists, shots on target everywhere else -- so a
     # candidate is never handicapped by partial coverage.
     return blend_shot_proxies_with_fallback(
@@ -100,9 +120,12 @@ def _fit_all(train_matches: pd.DataFrame, location_weight: float | None) -> dict
 
     models: dict[str, DixonColesModel] = {"FA Cup": joint}
     for competition in ("Premier League", "Championship"):
+        competition_matches = train_matches[train_matches["competition_name"] == competition]
+        if len(competition_matches) < MIN_MATCHES_PER_COMPETITION:
+            continue
         model = DixonColesModel()
         model.fit(
-            _blend(train_matches[train_matches["competition_name"] == competition], competition, location_weight),
+            _blend(competition_matches, competition, location_weight),
             half_life_days=HALF_LIFE_DAYS,
             shrinkage=SHRINKAGE[competition],
             prior_model=prior,
@@ -167,12 +190,16 @@ def main() -> None:
         baseline_scores = {
             competition: _per_match_brier(baseline[competition], test_matches[test_matches["competition_name"] == competition])
             for competition in FIT_COMPETITIONS
+            if competition in baseline
         }
+        skipped = [c for c in FIT_COMPETITIONS if c not in baseline]
+        if skipped:
+            print(f"Skipping (fewer than {MIN_MATCHES_PER_COMPETITION} training matches): {', '.join(skipped)}\n")
 
         for weight in CANDIDATE_WEIGHTS:
             candidate = _fit_all(train_matches, location_weight=weight)
             print(f"--- location weight {weight} ---")
-            for competition in FIT_COMPETITIONS:
+            for competition in baseline_scores:
                 competition_test = test_matches[test_matches["competition_name"] == competition]
                 a = baseline_scores[competition]
                 b = _per_match_brier(candidate[competition], competition_test)
