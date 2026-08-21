@@ -120,6 +120,7 @@ def _predict_fixtures(
     player_shares: pd.DataFrame,
     lineups: pd.DataFrame,
     use_confirmed_lineup: bool,
+    normalize_shares: bool,
 ) -> pd.DataFrame:
     """One row per (fixture, player) predicted, with the probability we'd have shown."""
     predictions = []
@@ -152,6 +153,7 @@ def _predict_fixtures(
                 player_shares,
                 confirmed_squad=confirmed_squad,
                 confirmed_starting=confirmed_starting,
+                normalize_shares=normalize_shares,
             ):
                 predictions.append(
                     {
@@ -233,32 +235,40 @@ def main() -> None:
         print(f"Confirmed lineup rows for held-out fixtures: {len(lineups)}\n")
 
         for use_confirmed_lineup, mode in ((False, "no lineup (days ahead)"), (True, "confirmed lineup (matchday)")):
-            predictions = _predict_fixtures(
-                test_matches, models, joint_model, player_shares, lineups, use_confirmed_lineup
-            )
-            if predictions.empty:
+            # Both allocation settings scored on the SAME held-out
+            # player-fixtures, so the shipped behaviour and the candidate
+            # fix are read off one run rather than two. See
+            # app.goal_scorer.NORMALIZE_ALLOCATION for what differs.
+            variants = {}
+            for normalize_shares, name in ((False, "model (shipped)"), (True, "model (normalized)")):
+                predictions = _predict_fixtures(
+                    test_matches, models, joint_model, player_shares, lineups, use_confirmed_lineup, normalize_shares
+                )
+                if not predictions.empty:
+                    variants[name] = _attach_outcomes(predictions, actual_goals)
+            if not variants:
                 print(f"--- {mode} --- no predictions produced.\n")
                 continue
-            scored = _attach_outcomes(predictions, actual_goals)
 
-            print(f"--- {mode} --- {len(scored)} player-fixtures")
+            reference = next(iter(variants.values()))
+            print(f"--- {mode} --- {len(reference)} player-fixtures")
             for competition in FIT_COMPETITIONS + ["ALL"]:
-                subset = scored if competition == "ALL" else scored[scored["competition_name"] == competition]
-                if len(subset) < MIN_PREDICTIONS_TO_REPORT:
+                mask = reference["competition_name"] == competition
+                if competition != "ALL" and int(mask.sum()) < MIN_PREDICTIONS_TO_REPORT:
                     continue
-                probabilities = subset["prob_scores"].to_numpy(dtype=float)
-                outcomes = subset["scored"].to_numpy(dtype=float)
+                rows = []
+                for name, scored in variants.items():
+                    subset = scored if competition == "ALL" else scored[scored["competition_name"] == competition]
+                    rows.append(
+                        _score(name, subset["prob_scores"].to_numpy(dtype=float), subset["scored"].to_numpy(dtype=float))
+                    )
                 # The baseline every number here has to beat: one constant
                 # probability for everybody, set to the observed rate. It is
                 # perfectly calibrated by construction and ranks nobody.
-                base_rate = float(outcomes.mean())
+                outcomes = (reference if competition == "ALL" else reference[mask])["scored"].to_numpy(dtype=float)
+                rows.append(_score("base rate (constant)", np.full(len(outcomes), float(outcomes.mean())), outcomes))
                 print(f"\n {competition}")
-                _print_scores(
-                    [
-                        _score("model", probabilities, outcomes),
-                        _score("base rate (constant)", np.full_like(probabilities, base_rate), outcomes),
-                    ]
-                )
+                _print_scores(rows)
             print()
     finally:
         conn.close()

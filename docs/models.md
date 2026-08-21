@@ -415,8 +415,10 @@ a penalty portion (handed entirely to the identified primary taker) and an
 open-play portion (allocated by *non-penalty* goal share, so the taker's
 penalty history doesn't get counted twice).
 
-> **This section is the least trustworthy part of the system.** It has
-> never been backtested — see section 10.
+> **Backtested as of 2026-08-21** — `app/evaluate_scorers.py`, run via the
+> "Backtest goal scorers" workflow. Read `calib` first (predicted scorers ÷
+> actual scorers, 1.0 is honest), then `AUC` (ranking, 0.5 is coin-flip),
+> and compare both against the base-rate row.
 
 ---
 
@@ -484,9 +486,21 @@ and several things we'd like to know sit right underneath it.
 
 ## 10. Known gaps, honestly stated
 
-**The goal-scorer model has never been backtested.** Every team-level
-change went through paired comparison; this one shipped on plausibility.
-It's the largest untested surface in the project.
+**The goal-scorer model now has a backtest** (`app/evaluate_scorers.py`),
+built 2026-08-21 — it previously had none, which made it the largest
+untested surface in the project. It reports calibration, ranking (AUC) and
+Brier/log-loss per competition, in both prediction modes, against a
+base-rate baseline, with the allocation fix below scored side by side on
+the same player-fixtures.
+
+Two things worth knowing about reading its output. **Brier is nearly
+useless here** — with a scoring base rate around 8%, a 20% error in the
+probability level barely moves it, and on synthetic data a fix that
+corrected calibration from 0.75 to 0.91 made Brier *slightly worse*. Judge
+on calibration and log loss. And **AUC cannot distinguish the two
+allocation settings at all**, by construction: normalising is a monotone
+rescale, so the ranking is identical and only the level changes. That
+separation is the point of reporting them apart.
 
 **The allocation leaks ~24% of every team's expected goals**, and it's a
 normalisation bug, not rounding. Summed over a team's players, the
@@ -504,16 +518,24 @@ through:
    $\sum_i \text{goal\_share}_i \cdot \text{minutes\_share}_i$, which is a
    weighted average of numbers below 1 and therefore always below 1.
 
-The fix for (2) is to normalise by the minutes-weighted total,
-$\sum_j (\text{goals per 90})_j \cdot \text{minutes\_share}_j$, rather
-than the raw per-90 total — which by construction makes the allocation sum
-to exactly 1. (1) is fixed by filtering before normalising.
+**Both are fixed by one change**, now implemented behind
+`NORMALIZE_ALLOCATION` in `app/goal_scorer.py`: divide each player's weight
+by the sum of the weights *actually being allocated for that fixture*.
+Normalising over the real set handles the filter, and normalising the
+minutes-weighted product handles the double discount.
 
-**Fix and measure together, not separately:** correcting this raises every
-scorer probability by roughly 1/0.76 ≈ 1.3×, and we have no backtest to
-say whether our current numbers are too low or too high. Shipping a 30%
-uplift to a model nobody has ever scored would be moving fast in an
-unknown direction.
+It also fixes a third thing that was never the point. Today, when a player
+is confirmed out, his share simply vanishes into nothing. Under
+normalisation the remaining players absorb it — which is correct, because
+`compute_team_availability` has *already* reduced the team's expected goals
+for his absence, so whatever is left really is going to be scored by
+whoever is on the pitch.
+
+**Defaults to off**, so production is unchanged until measured. The fix
+raises every scorer probability by roughly 1/0.76 ≈ 1.3×, and before the
+backtest existed there was no way to know whether that moves us toward the
+truth or straight past it. The backtest scores both settings on the same
+held-out player-fixtures in one run; flip the flag when it says to.
 
 **Player position is loaded from the database and used nowhere.** A
 defender and a striker with identically thin histories get identical

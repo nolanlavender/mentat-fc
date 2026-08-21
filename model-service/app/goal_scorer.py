@@ -52,6 +52,35 @@ import pandas as pd
 
 from app.dixon_coles import time_weight
 
+# Whether allocate_team_goals normalises its open-play weights so the
+# allocated expected goals actually sum back to the team's expected goals.
+#
+# False is the shipped behaviour, and it leaks. Two separate causes, both
+# arithmetic rather than data:
+#
+#   1. goal_share is normalised across ALL of a team's players and the
+#      MIN_PLAYER_MATCHES filter is applied afterwards, so the shares that
+#      survive sum to less than 1 by construction.
+#   2. goal_share is a share of the team's per-90 RATE. Multiplying it by
+#      minutes_share (always < 1) discounts a second time, so the total is
+#      a weighted average of numbers below 1 -- always short. Measured at
+#      roughly 0.76 of the team's expected goals.
+#
+# True fixes both at once by dividing each weight by the sum of the
+# weights actually being allocated. It also fixes a third thing that was
+# never the point: when a player is confirmed out, his share currently
+# vanishes into nothing, and under normalisation the remaining players
+# absorb it -- which is correct, because compute_team_availability has
+# already reduced the team's expected goals for his absence, so whatever
+# is left really is going to be scored by whoever is playing.
+#
+# Defaults False so production behaviour is unchanged until measured.
+# app.evaluate_scorers reports both settings side by side; flip this only
+# once that run says to. The fix raises every scorer probability by
+# roughly 1/0.76, and until the backtest existed there was no way to know
+# whether that moves us toward the truth or past it.
+NORMALIZE_ALLOCATION = False
+
 MIN_PLAYER_MATCHES = 5  # raw (unweighted) squad-appearance count -- below this, shares are too noisy to trust
 MIN_PENALTY_ATTEMPTS = 2  # raw (unweighted) penalty attempts (scored + missed) -- below this, don't trust anyone as "the taker"
 
@@ -300,6 +329,7 @@ def allocate_team_goals(
     player_shares: pd.DataFrame,
     confirmed_squad: set[int] = frozenset(),
     confirmed_starting: set[int] = frozenset(),
+    normalize_shares: bool = NORMALIZE_ALLOCATION,
 ) -> list[PlayerGoalPrediction]:
     """
     player_shares: compute_player_shares's output. Returns one prediction
@@ -359,7 +389,12 @@ def allocate_team_goals(
         penalty_expected_goals = 0.0
         open_play_expected_goals = team_expected_goals
 
-    predictions = []
+    # Two passes: the open-play weights have to all exist before any of
+    # them can be normalised, since the divisor is their own sum over
+    # exactly the players being allocated for THIS fixture. That set
+    # depends on the confirmed squad, so it can't be precomputed once in
+    # compute_player_shares.
+    weights: list[tuple[int, float]] = []
     for row in team_players.itertuples():
         if confirmed_squad and row.player_id not in confirmed_squad:
             continue  # confirmed out of the matchday squad -- no real chance to score
@@ -370,11 +405,25 @@ def allocate_team_goals(
             if not pd.isna(role_share):
                 minutes_share = role_share
 
-        lambda_player = open_play_expected_goals * row.non_penalty_goal_share * minutes_share
-        if row.player_id == primary_taker_id:
+        weights.append((int(row.player_id), row.non_penalty_goal_share * minutes_share))
+
+    divisor = 1.0
+    if normalize_shares:
+        total = sum(weight for _, weight in weights)
+        if total > 0:
+            divisor = total
+        # total == 0 means nobody being allocated has any scoring history.
+        # Dividing would be 0/0; leaving the divisor at 1 gives every
+        # player a lambda of 0, which is the honest answer rather than an
+        # invented one.
+
+    predictions = []
+    for player_id, weight in weights:
+        lambda_player = open_play_expected_goals * weight / divisor
+        if player_id == primary_taker_id:
             lambda_player += penalty_expected_goals
 
         predictions.append(
-            PlayerGoalPrediction(player_id=int(row.player_id), expected_goals=lambda_player, prob_scores=1 - exp(-lambda_player))
+            PlayerGoalPrediction(player_id=player_id, expected_goals=lambda_player, prob_scores=1 - exp(-lambda_player))
         )
     return predictions

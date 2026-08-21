@@ -6239,3 +6239,96 @@ on the same frame and asserts they agree, plus one asserting the two
 modules' hand-synced weight dicts are actually in sync. Hand-syncing is
 deliberate -- the sandbox has to be editable without touching production
 -- but "deliberate" and "unverified" are different things.
+
+## 2026-08-21 -- The goal-scorer model finally gets measured
+
+Every team-level change in this project went through a held-out
+comparison. The goal-scorer model -- the thing the app puts most
+prominently on screen -- shipped on plausibility and was never scored
+against what actually happened. `app/evaluate_scorers.py` fixes that.
+
+### Three numbers, deliberately kept apart
+
+The instinct is to report one score. That would have hidden the actual
+problem, because **calibration and ranking fail independently**:
+
+- **calibration** = predicted scorers ÷ actual scorers. If we say 0.20 to
+  a hundred player-fixtures, about twenty should score. This is the
+  headline, because a scorer probability is read directly as a price.
+- **AUC** = do we rank the right players higher? Invariant to any monotone
+  rescale, so it says *nothing* about the level.
+- **Brier / log loss** = the two mixed.
+
+Both are scored against a base-rate baseline: one constant probability for
+everybody. It is perfectly calibrated by construction and ranks nobody, so
+it is exactly the right thing to beat -- if the per-player machinery can't,
+it earns nothing over "someone scores sometimes."
+
+Two findings from the synthetic run, both about *reading* the output:
+
+**Brier is nearly useless for this question.** With a base rate around 8%,
+a 20% error in the probability level barely moves it. The allocation fix
+below took calibration from 0.75 to 0.91 and made Brier *slightly worse*.
+Log loss moved the right way. A metric being proper doesn't make it
+sensitive to the failure you're chasing.
+
+**AUC cannot distinguish the two allocation settings at all**, and that's
+not a limitation, it's the proof the diagnosis is right: normalising is a
+monotone rescale, so by construction the ranking is identical and only the
+level changes.
+
+### The leakage that would have flattered it most
+
+`load_player_squad_appearances` derives a player's club partly from
+`players.current_team_id`, which is live -- FPL reflects a transfer the
+instant it happens. In a backtest at cutoff date T, that column is
+reporting club moves from the future. Left in, it would have flattered the
+result **most for the players who moved**, i.e. the hardest cases. So the
+`as_of` cutoff applies inside the appearances CTE and, when set, stops
+trusting `current_team_id` in favour of what the appearance history itself
+said at the time.
+
+The join to ground truth is a LEFT join with goals filled to zero. The
+tempting version is an inner join, which quietly deletes every predicted
+player who wasn't in the squad -- i.e. deletes *only* confident predictions
+that turned out wrong. That is the single most flattering thing a backtest
+can do to itself, and it looks completely innocent in code.
+
+### The leak, now with a fix
+
+Two causes, both arithmetic, both confirmed:
+
+1. `goal_share` is normalised across all of a team's players and
+   `MIN_PLAYER_MATCHES` is applied *afterwards*, so surviving shares sum
+   to under 1 by construction.
+2. A per-90 **rate** share is multiplied by `minutes_share` (< 1),
+   discounting a second time.
+
+One change fixes both: divide each weight by the sum of the weights
+actually being allocated for that fixture. And it fixes a third thing that
+was never the point -- today a confirmed-out player's share vanishes into
+nothing, and under normalisation his team-mates absorb it, which is right
+because `compute_team_availability` has already reduced the team's expected
+goals for his absence.
+
+Shipped as `NORMALIZE_ALLOCATION = False`. The fix raises every scorer
+probability by ~1/0.76, and before the backtest existed there was no way to
+know whether that moves toward the truth or straight past it. The backtest
+scores both settings on the same held-out player-fixtures in one run.
+
+### The test that runs the whole pipeline with no database
+
+`app.compare`'s NameError reached production because the only way to
+execute that module was against the production database. The same was true
+of this one on the day it was written. So `TestMainEndToEnd` fakes the four
+loaders and runs `main()` top to bottom on synthetic data.
+
+It earned its keep immediately, catching two real bugs in itself before a
+single real row was read: the synthetic fixtures were dated in generation
+order, so the held-out tail contained exactly one competition and the
+per-competition reporting was never exercised; and with a fixed starting
+XI the two prediction modes produced byte-identical output, so the mode
+split was silently measuring nothing. Both are now asserted against.
+
+Neither would have been visible from reading the code, and both would have
+made the first production run quietly wrong rather than loudly broken.
