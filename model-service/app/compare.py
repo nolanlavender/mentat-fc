@@ -30,7 +30,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from app.data import blend_shots_on_target_into_scores, load_finished_matches
+from app.data import blend_shot_proxies_with_fallback, blend_shots_on_target_into_scores, load_finished_matches
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.evaluate import (
@@ -51,27 +51,48 @@ from app.evaluate import (
 # generic. Keep the labels honest -- they're what the verdict is
 # reported against.
 #
-# No comparison is currently live. The last one (shot location vs shots
-# on target) is settled and recorded in docs/learning-log.md.
+# --- What this run compares -------------------------------------------
 #
-# To run a new one: give A and B honest labels and make _blend return the
-# two configurations. Everything below is generic -- pairing, bootstrap
-# and verdict don't care what changed.
-A_LABEL = "current"
-B_LABEL = "candidate"
+# One baseline, several candidates, all scored on the SAME held-out
+# fixtures so every candidate is paired against the baseline match by
+# match. Edit CANDIDATES and _blend to ask a different question;
+# everything below is generic.
+#
+# Current question (2026-08-21): shot location was rejected on a test
+# that compared shots-on-target at its TUNED weight (0.75 / 0.25 / 1.0,
+# picked from a five-value sweep) against location at a flat 1.0, which
+# was never tuned at all. That was not a fair fight, and the Premier
+# League -- the one competition at 97% coverage -- leaned positive. This
+# sweeps the location weight properly before the rejection stands.
+#
+# Note this reports a confidence interval per weight, which the original
+# shots-on-target sweep never had: those values were chosen from point
+# estimates alone, so "0.75 is the Premier League optimum" has never
+# actually been shown to be distinguishable from 0.5 or 1.0.
+LOCATION_SIGNALS = ["inside_box", "outside_box"]
+FALLBACK_SIGNALS = ["shots_on_target"]
+
+BASELINE_LABEL = "shots on target only (current)"
+CANDIDATE_WEIGHTS = [0.25, 0.5, 0.75, 1.0]
 
 
-def _blend(matches: pd.DataFrame, competition: str, is_candidate: bool) -> pd.DataFrame:
-    """Edit this to define what a run compares. Currently A == B, so a run
-    is a self-check: every interval should collapse to exactly zero."""
-    return blend_shots_on_target_into_scores(matches, SHOTS_ON_TARGET_BLEND_WEIGHT[competition])
+def _blend(matches: pd.DataFrame, competition: str, location_weight: float | None) -> pd.DataFrame:
+    """location_weight None = the baseline, shots on target at its tuned weight."""
+    sot_weight = SHOTS_ON_TARGET_BLEND_WEIGHT[competition]
+    if location_weight is None:
+        return blend_shots_on_target_into_scores(matches, sot_weight)
+    # Location where it exists, shots on target everywhere else -- so a
+    # candidate is never handicapped by partial coverage.
+    return blend_shot_proxies_with_fallback(
+        matches, LOCATION_SIGNALS, location_weight, FALLBACK_SIGNALS, sot_weight
+    )
 
 
-def _fit_all(train_matches: pd.DataFrame, is_candidate: bool) -> dict[str, DixonColesModel]:
+def _fit_all(train_matches: pd.DataFrame, location_weight: float | None) -> dict[str, DixonColesModel]:
     """The same three fits app.evaluate builds, under one configuration."""
     joint = DixonColesModel()
     joint.fit(
-        _blend(train_matches, "FA Cup", is_candidate),
+        _blend(train_matches, "FA Cup", location_weight),
         half_life_days=HALF_LIFE_DAYS,
         shrinkage=SHRINKAGE["FA Cup"],
     )
@@ -81,7 +102,7 @@ def _fit_all(train_matches: pd.DataFrame, is_candidate: bool) -> dict[str, Dixon
     for competition in ("Premier League", "Championship"):
         model = DixonColesModel()
         model.fit(
-            _blend(train_matches[train_matches["competition_name"] == competition], competition, is_candidate),
+            _blend(train_matches[train_matches["competition_name"] == competition], competition, location_weight),
             half_life_days=HALF_LIFE_DAYS,
             shrinkage=SHRINKAGE[competition],
             prior_model=prior,
@@ -131,12 +152,9 @@ def main() -> None:
         train_matches = matches[matches["kickoff_date"] < cutoff_date]
         test_matches = matches[matches["kickoff_date"] >= cutoff_date]
 
-        print(f"Paired A/B on held-out matches after {cutoff_date}")
-        print(f"  A = {A_LABEL}")
-        print(f"  B = {B_LABEL}")
-        # Per competition, not just overall: coverage is the most likely
-        # confounder for any per-competition difference in the verdict, so
-        # it belongs next to the verdict rather than as one global number.
+        print(f"Paired sweep on held-out matches after {cutoff_date}")
+        print(f"  baseline = {BASELINE_LABEL}")
+        print(f"  candidates = shot location at weight {CANDIDATE_WEIGHTS}, shots on target where uncovered")
         for competition in FIT_COMPETITIONS:
             rows = matches[matches["competition_name"] == competition]
             if rows.empty:
@@ -145,48 +163,44 @@ def main() -> None:
             print(f"  shot-location coverage, {competition}: {covered}/{len(rows)} ({covered / len(rows):.0%})")
         print()
 
-        baseline = _fit_all(train_matches, is_candidate=False)
-        candidate = _fit_all(train_matches, is_candidate=True)
+        baseline = _fit_all(train_matches, location_weight=None)
+        baseline_scores = {
+            competition: _per_match_brier(baseline[competition], test_matches[test_matches["competition_name"] == competition])
+            for competition in FIT_COMPETITIONS
+        }
 
-        for competition in FIT_COMPETITIONS:
-            competition_test = test_matches[test_matches["competition_name"] == competition]
-            a = _per_match_brier(baseline[competition], competition_test)
-            b = _per_match_brier(candidate[competition], competition_test)
+        for weight in CANDIDATE_WEIGHTS:
+            candidate = _fit_all(train_matches, location_weight=weight)
+            print(f"--- location weight {weight} ---")
+            for competition in FIT_COMPETITIONS:
+                competition_test = test_matches[test_matches["competition_name"] == competition]
+                a = baseline_scores[competition]
+                b = _per_match_brier(candidate[competition], competition_test)
 
-            # Only fixtures BOTH configurations could predict -- otherwise
-            # the two samples aren't the same matches and pairing is void.
-            shared = sorted(set(a) & set(b))
-            if not shared:
-                print(f"{competition}: no comparable held-out matches.\n")
-                continue
+                shared = sorted(set(a) & set(b))
+                if not shared:
+                    print(f"  {competition}: no comparable held-out matches.")
+                    continue
 
-            diffs = np.array([b[f] - a[f] for f in shared])  # negative = candidate better
-            mean_diff = float(diffs.mean())
-            low, high = _bootstrap_ci(diffs)
-            changed = int(np.sum(diffs != 0))
+                diffs = np.array([b[f] - a[f] for f in shared])
+                changed = int(np.sum(diffs != 0))
+                mean_diff = float(diffs.mean())
+                low, high = _bootstrap_ci(diffs)
 
-            print(f"{competition}: {len(shared)} paired matches ({changed} scored differently)")
-            print(f"  A Brier {np.mean([a[f] for f in shared]):.4f}   B Brier {np.mean([b[f] for f in shared]):.4f}")
-            print(f"  mean difference (B - A): {mean_diff:+.5f}   {CONFIDENCE}% CI [{low:+.5f}, {high:+.5f}]")
-
-            # The whole point: does the interval actually exclude zero?
-            if changed == 0:
-                # Not "inconclusive" -- this configuration provably does not
-                # touch this fit at all, which makes it a control rather than
-                # a result. Calling an untouched fit "not distinguishable from
-                # noise" would be technically true and actively misleading.
-                verdict = "UNCHANGED -- this configuration does not affect this fit (a control, not a null result)"
-            elif low > 0:
-                verdict = "A is better -- the interval excludes zero"
-            elif high < 0:
-                verdict = "B is better -- the interval excludes zero"
-            else:
-                verdict = (
-                    "INCONCLUSIVE -- the interval spans zero, this difference is not distinguishable from noise. "
-                    f"Anything smaller than about {max(abs(low), abs(high)):.4f} Brier is below what "
-                    f"{len(shared)} held-out matches can resolve."
+                if changed == 0:
+                    verdict = "unchanged (control)"
+                elif high < 0:
+                    verdict = "BETTER than baseline"
+                elif low > 0:
+                    verdict = "WORSE than baseline"
+                else:
+                    verdict = "inconclusive"
+                print(
+                    f"  {competition:<15} Brier {np.mean([b[f] for f in shared]):.4f} "
+                    f"(baseline {np.mean([a[f] for f in shared]):.4f})  "
+                    f"diff {mean_diff:+.5f} CI [{low:+.5f}, {high:+.5f}]  -> {verdict}"
                 )
-            print(f"  -> {verdict}\n")
+            print()
     finally:
         conn.close()
 

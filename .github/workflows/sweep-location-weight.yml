@@ -1,0 +1,37 @@
+name: Sweep shot-location weight (temporary)
+
+# Temporary, delete once there's a verdict.
+#
+# Shot location was rejected on 2026-08-21, but that test compared
+# shots-on-target at its TUNED weight (0.75 / 0.25 / 1.0, chosen from a
+# five-value sweep) against location at a flat 1.0, which was never tuned
+# at all. Not a fair fight -- and the Premier League, the one competition
+# at 97% coverage, leaned positive. This sweeps the location weight
+# properly before the rejection is allowed to stand.
+#
+# Every candidate is paired against the SAME baseline on the SAME held-out
+# fixtures, with a bootstrapped confidence interval per weight. Read the
+# intervals, not the raw Brier numbers: the noise floor is roughly 0.003
+# in the Premier League and a weight is only worth promoting if its
+# interval clears zero.
+#
+# Read-only. Actions > "Sweep shot-location weight (temporary)" > Run workflow.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+      - name: Sweep
+        working-directory: model-service
+        run: python -m app.compare

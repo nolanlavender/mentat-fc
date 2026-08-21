@@ -161,6 +161,50 @@ def blend_learned_shot_proxy_into_scores(matches: pd.DataFrame, blend_weight: fl
     return blended
 
 
+def blend_shot_proxies_with_fallback(
+    matches: pd.DataFrame,
+    primary_signals: list[str],
+    primary_weight: float,
+    fallback_signals: list[str],
+    fallback_weight: float,
+) -> pd.DataFrame:
+    """
+    Blends a preferred proxy where its signals exist, and a fallback proxy
+    everywhere else, so partial coverage of the preferred one never leaves
+    a match with LESS smoothing than the fallback alone would have given.
+
+    Exists because getting this wrong produced a confident, wrong verdict
+    once already (2026-08-21): running a 48%-coverage proxy at full weight
+    left the other half of the matches on raw unsmoothed goals, while the
+    configuration it was compared against had smoothing everywhere. Any
+    comparison between two proxies with different coverage has to go
+    through something like this to be a fair fight.
+
+    Both proxies' weights are estimated from the ORIGINAL scores, and the
+    primary blends against the original score rather than compounding on
+    top of the fallback's output -- chaining them would fit a
+    goals-per-shot rate against a number that is no longer a goal count.
+    """
+    blended = blend_learned_shot_proxy_into_scores(matches, fallback_weight, fallback_signals)
+    if primary_weight == 0:
+        # Nothing to prefer. Returning early matters rather than being tidy:
+        # blend_learned_shot_proxy_into_scores at weight 0 hands back the
+        # ORIGINAL scores, so overriding covered rows with it would strip
+        # the fallback's smoothing from exactly the rows with the best data
+        # -- the same "silently drops smoothing" failure this function
+        # exists to prevent, reintroduced at the boundary.
+        return blended
+
+    primary = blend_learned_shot_proxy_into_scores(matches, primary_weight, primary_signals)
+    for side, score_column in (("home", "home_score"), ("away", "away_score")):
+        available = pd.Series(True, index=matches.index)
+        for name in primary_signals:
+            available &= matches[SHOT_SIGNALS[name][0 if side == "home" else 1]].notna()
+        if available.any():
+            blended.loc[available, score_column] = primary.loc[available, score_column]
+    return blended
+
+
 def blend_shots_on_target_into_scores(matches: pd.DataFrame, blend_weight: float) -> pd.DataFrame:
     """
     Returns a copy of `matches` with home_score/away_score replaced by a

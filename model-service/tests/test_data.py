@@ -6,6 +6,7 @@ import pytest
 
 from app.data import (
     blend_learned_shot_proxy_into_scores,
+    blend_shot_proxies_with_fallback,
     blend_shots_on_target_into_scores,
     estimate_goal_weights,
 )
@@ -133,3 +134,55 @@ class TestLearnedShotProxy:
         blended = blend_learned_shot_proxy_into_scores(matches, 1.0, ["shots_on_target"])
         assert np.allclose(blended.loc[:9, "home_score"], matches.loc[:9, "home_score"].astype(float))
         assert not np.allclose(blended.loc[10:, "home_score"], matches.loc[10:, "home_score"].astype(float))
+
+
+class TestProxyFallback:
+    """
+    Preferred proxy where its signals exist, fallback proxy everywhere
+    else. Pinned because both failure modes here are silent and have both
+    actually happened: a partial-coverage proxy leaving half the matches
+    unsmoothed (which produced a confident wrong verdict on 2026-08-21),
+    and the primary-weight-zero boundary stripping smoothing from exactly
+    the best-covered rows.
+    """
+
+    @staticmethod
+    def _partial(n: int = 800, seed: int = 5):
+        rng = np.random.default_rng(seed)
+        inside = rng.integers(2, 15, n)
+        outside = rng.integers(1, 11, n)
+        sot = rng.binomial(inside, 0.40) + rng.binomial(outside, 0.25)
+        goals = rng.poisson(sot * 0.22)
+        half = n // 2
+        frame = pd.DataFrame({
+            "home_score": goals[:half], "away_score": goals[half:],
+            "home_shots_inside_box": inside[:half].astype(float), "away_shots_inside_box": inside[half:].astype(float),
+            "home_shots_outside_box": outside[:half].astype(float), "away_shots_outside_box": outside[half:].astype(float),
+            "home_shots_on_target": sot[:half].astype(float), "away_shots_on_target": sot[half:].astype(float),
+        })
+        frame.loc[: half * 2 // 5, ["home_shots_inside_box", "home_shots_outside_box"]] = None
+        return frame
+
+    def test_uncovered_rows_get_the_fallback_not_raw_goals(self):
+        matches = self._partial()
+        blended = blend_shot_proxies_with_fallback(matches, ["inside_box", "outside_box"], 0.5, ["shots_on_target"], 0.75)
+        fallback_only = blend_learned_shot_proxy_into_scores(matches, 0.75, ["shots_on_target"])
+        uncovered = matches["home_shots_inside_box"].isna()
+        assert np.allclose(blended.loc[uncovered, "home_score"], fallback_only.loc[uncovered, "home_score"])
+        assert not np.allclose(blended.loc[uncovered, "home_score"], matches.loc[uncovered, "home_score"].astype(float))
+
+    def test_covered_rows_prefer_the_primary_proxy(self):
+        matches = self._partial()
+        blended = blend_shot_proxies_with_fallback(matches, ["inside_box", "outside_box"], 0.5, ["shots_on_target"], 0.75)
+        fallback_only = blend_learned_shot_proxy_into_scores(matches, 0.75, ["shots_on_target"])
+        covered = matches["home_shots_inside_box"].notna()
+        assert not np.allclose(blended.loc[covered, "home_score"], fallback_only.loc[covered, "home_score"])
+
+    def test_primary_weight_zero_equals_pure_fallback(self):
+        # The boundary that broke: at weight 0 the primary blend returns the
+        # ORIGINAL scores, so overriding covered rows with it would strip
+        # the fallback's smoothing from the best-covered matches.
+        matches = self._partial()
+        blended = blend_shot_proxies_with_fallback(matches, ["inside_box", "outside_box"], 0.0, ["shots_on_target"], 0.75)
+        fallback_only = blend_learned_shot_proxy_into_scores(matches, 0.75, ["shots_on_target"])
+        assert np.allclose(blended["home_score"], fallback_only["home_score"])
