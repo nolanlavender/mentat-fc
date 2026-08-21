@@ -1,0 +1,43 @@
+name: Check statistics endpoint (one-off)
+
+# One-off verification, meant to be deleted once the question is answered:
+# does GET /fixtures/statistics return shot-LOCATION counts ("Shots
+# insidebox" / "Shots outsidebox"), and does it return them for OLD
+# fixtures rather than only recent ones?
+#
+# This is the gate on building a shots-inside/outside-box model feature --
+# fixture_team_stats is populated only from football-data.co.uk's CSV
+# today, which has no shot-location columns, so that feature needs a whole
+# new API-Football seed path plus a ~2,000-fixture backfill. Worth
+# confirming the data actually exists across all 3 seasons first, exactly
+# like the xG column that turned out to be permanently null (see
+# docs/learning-log.md's 2026-08-19 entry).
+#
+# Costs 3 API calls against the 7500/day budget. Writes nothing.
+#
+# Actions > "Check statistics endpoint (one-off)" > Run workflow.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Sample /fixtures/statistics across the data's date range
+        working-directory: backend
+        run: npm run check:statistics-endpoint
