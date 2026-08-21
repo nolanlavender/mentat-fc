@@ -205,6 +205,33 @@ def blend_shot_proxies_with_fallback(
     return blended
 
 
+LOCATION_SIGNALS = ["inside_box", "outside_box"]
+SHOTS_ON_TARGET_SIGNALS = ["shots_on_target"]
+
+
+def blend_fitting_signals(matches: pd.DataFrame, location_weight: float, shots_on_target_weight: float) -> pd.DataFrame:
+    """
+    The one place that turns a competition's two blend weights into the
+    frame a fit actually trains on. Shared by app.train and app.evaluate so
+    the deployed configuration and the sandbox can't silently diverge in
+    HOW they blend while looking identical in WHAT they blend.
+
+    At location_weight 0 this is deliberately not just
+    blend_shot_proxies_with_fallback(..., 0, ...). Both paths would use
+    shots on target alone, but they rescale it to goals by different
+    methods -- pooled mean ratio here, least squares there -- and only the
+    pooled-mean-ratio version has ever been backtested for the
+    competitions that sit at 0 (Championship, FA Cup). Routing them through
+    the other calibration would be shipping an unmeasured change disguised
+    as a no-op.
+    """
+    if location_weight == 0:
+        return blend_shots_on_target_into_scores(matches, shots_on_target_weight)
+    return blend_shot_proxies_with_fallback(
+        matches, LOCATION_SIGNALS, location_weight, SHOTS_ON_TARGET_SIGNALS, shots_on_target_weight
+    )
+
+
 def blend_shots_on_target_into_scores(matches: pd.DataFrame, blend_weight: float) -> pd.DataFrame:
     """
     Returns a copy of `matches` with home_score/away_score replaced by a

@@ -12,11 +12,18 @@ docs/learning-log.md's Phase 5 entry for why "beat the market" isn't
 really the bar here; this is about finding out honestly where the model
 actually stands, which is the real point of this step.
 
-Also the sandbox for trying a candidate SHOTS_ON_TARGET_BLEND_WEIGHT (see
-that constant's own comment, and
-app.data.blend_shots_on_target_into_scores) -- edit a competition's entry
-in the dict, rerun, compare the Brier/log-loss numbers against the
-current values, same process HALF_LIFE_DAYS already went through.
+Also the sandbox for trying a candidate SHOTS_ON_TARGET_BLEND_WEIGHT or
+SHOT_LOCATION_BLEND_WEIGHT (see those constants' own comments, and
+app.data.blend_fitting_signals) -- edit a competition's entry in the dict,
+rerun, compare the Brier/log-loss numbers against the current values, same
+process HALF_LIFE_DAYS already went through.
+
+One caveat on that process, learned the hard way: two Brier numbers from
+two runs of this file only settle a question when the gap is large. Below
+roughly 0.003 they are indistinguishable from which matches happened to
+land in the held-out set. Use app.compare for anything smaller -- it
+scores both configurations on the same fixtures and puts a confidence
+interval on the difference.
 
 Usage: python -m app.evaluate
 """
@@ -29,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from app.data import (
-    blend_shots_on_target_into_scores,
+    blend_fitting_signals,
     estimate_goal_weights,
     load_closing_match_winner_probabilities,
     load_finished_matches,
@@ -176,15 +183,34 @@ SHRINKAGE: dict[str, float] = {
 # the constant to edit" convention as HALF_LIFE_DAYS.
 SHRINK_TOWARD_JOINT: bool = False
 
-# Shot location (inside vs outside the box) was tested as an alternative
-# fitting signal on 2026-08-21 and REJECTED -- see docs/learning-log.md.
-# Short version: inside + outside sums to TOTAL shots, so using location
-# means discarding the on-target quality filter, and every goal is by
-# definition an on-target shot. A paired comparison found it measurably
-# WORSE in the Championship and FA Cup and inconclusive in the Premier
-# League, and regressing on all three signals at once drove the location
-# weights to ~0. The columns stay populated; they're just not a better
-# input than shots on target for this.
+# Shot location (inside vs outside the box) as a fitting signal, per
+# competition. Kept in sync with app.train.SHOT_LOCATION_BLEND_WEIGHT by
+# hand -- see that constant's comment for the full sweep table and for why
+# Premier League ships at 0.75 while the other two ship at 0.
+#
+# Worth knowing how close this came to being thrown away: the first test,
+# on 2026-08-21, compared shots on target at its TUNED per-competition
+# weight against location at a flat 1.0 that had never been tuned at all,
+# and rejected location on the result. That was not a fair fight. Sweeping
+# the weight properly found the Premier League's best value nowhere near
+# 1.0. The lesson is a general one -- when a new signal loses to an
+# incumbent that has been tuned and the challenger has not, the comparison
+# is measuring tuning, not signal.
+#
+# Edit these to try a candidate; app.compare is the tool that answers
+# whether the difference is real.
+SHOT_LOCATION_BLEND_WEIGHT: dict[str, float] = {
+    "Premier League": 0.75,
+    "Championship": 0.0,
+    "FA Cup": 0.0,
+}
+
+
+def _blend(matches: pd.DataFrame, competition_name: str) -> pd.DataFrame:
+    """This competition's two blend weights, applied. Mirrors app.train._blend."""
+    return blend_fitting_signals(
+        matches, SHOT_LOCATION_BLEND_WEIGHT[competition_name], SHOTS_ON_TARGET_BLEND_WEIGHT[competition_name]
+    )
 
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
@@ -274,6 +300,7 @@ def main() -> None:
             return
         print(
             f"HALF_LIFE_DAYS={HALF_LIFE_DAYS}  SHOTS_ON_TARGET_BLEND_WEIGHT={SHOTS_ON_TARGET_BLEND_WEIGHT}  "
+            f"SHOT_LOCATION_BLEND_WEIGHT={SHOT_LOCATION_BLEND_WEIGHT}  "
             f"SHRINKAGE={SHRINKAGE}  SHRINK_TOWARD_JOINT={SHRINK_TOWARD_JOINT}"
         )
 
@@ -310,15 +337,13 @@ def main() -> None:
         # there is nothing broader to pull it toward.
         joint_model = DixonColesModel()
         joint_model.fit(
-            blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
+            _blend(train_matches, "FA Cup"),
             half_life_days=HALF_LIFE_DAYS,
             shrinkage=SHRINKAGE["FA Cup"],
         )
         prior = joint_model if SHRINK_TOWARD_JOINT else None
 
-        pl_train = blend_shots_on_target_into_scores(
-            train_matches[train_matches["competition_name"] == "Premier League"], SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]
-        )
+        pl_train = _blend(train_matches[train_matches["competition_name"] == "Premier League"], "Premier League")
         pl_model = DixonColesModel()
         pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Premier League"], prior_model=prior)
         print(f"Premier League fit on {pl_model.fitted_on} matches, {len(pl_model.teams)} teams, cutoff {cutoff_date}")
@@ -326,9 +351,7 @@ def main() -> None:
             pl_model, conn, "Premier League", test_matches[test_matches["competition_name"] == "Premier League"], len(pl_train)
         )
 
-        championship_train = blend_shots_on_target_into_scores(
-            train_matches[train_matches["competition_name"] == "Championship"], SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]
-        )
+        championship_train = _blend(train_matches[train_matches["competition_name"] == "Championship"], "Championship")
         championship_model = DixonColesModel()
         championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Championship"], prior_model=prior)
         print(f"Championship fit on {championship_model.fitted_on} matches, {len(championship_model.teams)} teams, cutoff {cutoff_date}")

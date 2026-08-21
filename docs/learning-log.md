@@ -6149,3 +6149,93 @@ running the code instead of reading it. The pattern across this whole
 session is consistent enough to state plainly: every serious error here
 has been in how something was measured, not in the modelling idea, and
 none of them were visible without execution.
+
+## 2026-08-21 -- Shot location, promoted (and what nearly buried it)
+
+The sweep ran clean and answered the question:
+
+| location weight | Premier League (97% cov.) | Championship (83%) | FA Cup (4%) |
+|---|---|---|---|
+| 0.25 | +0.00104 `[-0.00708, +0.00954]` | **+0.00138** `[+0.00022, +0.00257]` | +0.00041 `[-0.00355, +0.00429]` |
+| 0.50 | -0.00303 `[-0.00918, +0.00339]` | **+0.00308** `[+0.00060, +0.00559]` | +0.00027 `[-0.00282, +0.00332]` |
+| 0.75 | **-0.00693** `[-0.01384, +0.00001]` | **+0.00588** `[+0.00117, +0.01049]` | +0.00137 `[-0.00152, +0.00428]` |
+| 1.00 | -0.00615 `[-0.01471, +0.00219]` | **+0.00915** `[+0.00245, +0.01572]` | **+0.00447** `[+0.00096, +0.00802]` |
+
+(Mean per-match Brier difference vs. the shots-on-target baseline, 95%
+bootstrap CI. Negative is better. Bold = interval excludes zero.)
+
+Shipped as `SHOT_LOCATION_BLEND_WEIGHT` = Premier League 0.75,
+Championship 0, FA Cup 0.
+
+**The Championship and FA Cup zeros are the strong part of this result,
+which is the opposite of how it feels.** A zero usually means "we found
+nothing." Here it means the opposite: the Championship is significantly
+worse at all four weights, monotonically, with the interval excluding
+zero every time. That is a detected effect pointing the wrong way -- a
+far firmer reason to leave a feature off than never having measured it.
+Distinguishing "measured, and it hurts" from "unmeasured, so off by
+default" matters, because only one of them is worth revisiting.
+
+**The Premier League 0.75 is the weak part, and it got promoted anyway.**
+Its interval touches zero (`+0.00001`), so it fails a strict 95%
+significance test by the narrowest possible margin. I promoted it because
+significance is the wrong decision rule here. Significance answers "can I
+publish this?"; the question in front of me is "which of two values do I
+deploy tomorrow?", where the loss is symmetric and there is no privileged
+null. About 97.5% of the bootstrap mass sits below zero, and the point
+estimate is the largest effect anything has produced this season. Under
+symmetric loss you take the better expected value; refusing to move
+because a threshold wasn't cleared is itself a choice, and a worse one.
+
+Recorded rather than buried, because I would want to know it later: the
+Premier League curve is *not* clean. A smooth real effect should show
+about a third of 0.75's gain at 0.25, and instead 0.25 came back slightly
+**positive**. And the sweep's baseline used least-squares shots-on-target
+calibration while production ships the pooled-mean-ratio one, so a small
+unmeasured delta separates the tested baseline from the live one. Neither
+is enough to overturn the decision; both are enough that this gets re-run
+when the season adds held-out matches.
+
+### The mistake this corrects, which is the actually reusable part
+
+Location was **rejected** four days of commits ago, on a comparison
+between shots on target at its tuned per-competition weight
+(0.75/0.25/1.0, chosen from a five-value sweep) and location at a flat
+1.0 that had never been tuned at all. Both numbers were real. The
+comparison was still meaningless, and the Premier League optimum turned
+out to be nowhere near the value location had been tested at.
+
+Generalised: **when a new signal loses to an incumbent that has been
+tuned and the challenger has not, the experiment measured tuning, not
+signal.** This is easy to miss precisely because the incumbent's tuning
+was legitimate work -- it doesn't feel like stacking the deck, it feels
+like comparing against your best current setup, which is the right
+instinct applied at the wrong level.
+
+The thing that actually saved it was Nolan pushing back on the rejection
+rather than accepting a confidently-worded negative result. Worth
+remembering that the write-up quality of a wrong conclusion is completely
+uncorrelated with whether it's right.
+
+### The `location_weight == 0` branch that looks redundant
+
+`blend_fitting_signals` special-cases zero instead of just passing 0
+through to `blend_shot_proxies_with_fallback`, which already handles it.
+Both paths use shots on target alone, so the branch reads like clutter.
+
+It isn't. The two paths rescale shots on target to goals by *different*
+methods -- pooled mean ratio vs. least squares -- and only the
+pooled-mean-ratio version has ever been backtested for the two
+competitions now shipping at 0. Collapsing the branch would ship an
+unmeasured change to the Championship and FA Cup disguised as a no-op,
+which is the same shape as the confound that corrupted the sweep itself
+two entries ago. There's a test pinning both halves: that zero-weight
+matches the backtested calibration, *and* that the two paths genuinely
+differ (if they ever coincided, the branch would be dead code and its
+comment would be a lie).
+
+Also added: a test that runs `app.train._blend` and `app.evaluate._blend`
+on the same frame and asserts they agree, plus one asserting the two
+modules' hand-synced weight dicts are actually in sync. Hand-syncing is
+deliberate -- the sandbox has to be editable without touching production
+-- but "deliberate" and "unverified" are different things.

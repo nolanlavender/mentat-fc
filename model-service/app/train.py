@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 
 from app.data import (
-    blend_shots_on_target_into_scores,
+    blend_fitting_signals,
     load_confirmed_lineups,
     load_finished_matches,
     load_player_squad_appearances,
@@ -82,6 +82,44 @@ SHOTS_ON_TARGET_BLEND_WEIGHT: dict[str, float] = {
     "Premier League": 0.75,
     "Championship": 0.25,
     "FA Cup": 1.0,
+}
+
+# Same idea, but the proxy is built from shots INSIDE and OUTSIDE the box
+# regressed separately, so the fit can learn that a shot from six yards is
+# worth several from thirty. Where these columns exist this replaces the
+# shots-on-target proxy for that match; where they don't, that match keeps
+# the shots-on-target blend above (see app.data.blend_fitting_signals).
+#
+# Zero for two of three competitions, and that split is measured, not a
+# guess. A paired sweep over 0.25/0.5/0.75/1.0 (app.compare, 2026-08-21 --
+# both configurations scored on the SAME held-out fixtures, bootstrapped
+# over matches) found:
+#
+#   Premier League (97% coverage)  0.75 -> Brier -0.00693, CI [-0.01384, +0.00001]
+#   Championship   (83% coverage)  WORSE at all four weights, monotonically,
+#                                  CI excluding zero every time (+0.0014 -> +0.0092)
+#   FA Cup          (4% coverage)  no resolvable effect until 1.0, where it is WORSE
+#
+# Championship and FA Cup are therefore not "unproven, left off" -- they
+# are a detected effect in the wrong direction, which is a much firmer
+# reason for a 0 than an absent one.
+#
+# Premier League at 0.75 is the honest weak spot: its interval still
+# touches zero, so this is not significant at 95% in the strict sense.
+# Promoted anyway because the deployment question is not "is it
+# significant" but "which value has the better expected loss", and ~97.5%
+# of the bootstrap mass sits below zero with the largest effect of
+# anything tested this season. Caveat recorded rather than buried: the
+# curve is not clean (0.25 came back slightly positive, +0.00104, when a
+# smooth real effect should have shown about a third of 0.75's gain), and
+# the whole sweep's baseline used least-squares shots-on-target
+# calibration rather than the pooled-mean-ratio one this file actually
+# ships, so a small unmeasured delta separates the tested baseline from
+# the live one. Re-run app.compare once the season adds held-out matches.
+SHOT_LOCATION_BLEND_WEIGHT: dict[str, float] = {
+    "Premier League": 0.75,
+    "Championship": 0.0,
+    "FA Cup": 0.0,
 }
 
 # L2 shrinkage on every team's fitted attack/defense toward league
@@ -267,6 +305,13 @@ def predict_for_competition(
     )
 
 
+def _blend(matches, competition_name: str):
+    """This competition's two blend weights, applied. Mirrors app.evaluate._blend."""
+    return blend_fitting_signals(
+        matches, SHOT_LOCATION_BLEND_WEIGHT[competition_name], SHOTS_ON_TARGET_BLEND_WEIGHT[competition_name]
+    )
+
+
 def fit_and_report(matches, label: str, shrinkage: float) -> DixonColesModel | None:
     if len(matches) < MIN_MATCHES_TO_FIT:
         print(f"Only {len(matches)} finished matches for {label}, skipping (need {MIN_MATCHES_TO_FIT}+).")
@@ -292,12 +337,12 @@ def main() -> None:
         championship_matches = matches[matches["competition_name"] == "Championship"]
 
         pl_model = fit_and_report(
-            blend_shots_on_target_into_scores(pl_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]),
+            _blend(pl_matches, "Premier League"),
             "Premier League",
             shrinkage=SHRINKAGE["Premier League"],
         )
         championship_model = fit_and_report(
-            blend_shots_on_target_into_scores(championship_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]),
+            _blend(championship_matches, "Championship"),
             "Championship",
             shrinkage=SHRINKAGE["Championship"],
         )
@@ -305,7 +350,7 @@ def main() -> None:
         # it's the only one of the three that needs the cross-league
         # connection, so it's the only one that gets predicted from this model.
         joint_model = fit_and_report(
-            blend_shots_on_target_into_scores(matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
+            _blend(matches, "FA Cup"),
             "Joint (Premier League + Championship + FA Cup, for FA Cup predictions)",
             shrinkage=SHRINKAGE["FA Cup"],
         )
