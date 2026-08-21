@@ -6093,3 +6093,59 @@ Also worth noting what didn't change: `blend_shot_proxies_with_fallback`
 is a general replacement for the function removed in the previous entry,
 not a revival of it. It takes any two signal sets rather than hardcoding
 location-versus-shots-on-target, so the next proxy comparison reuses it.
+
+## 2026-08-21 -- Three bugs found by actually running the thing
+
+The sweep crashed in production on `NameError: BOOTSTRAP_SAMPLES`. My
+pre-ship check had been `python -c "from app import compare"`, which
+passed, because the name is only referenced inside a function body.
+**Importing a module proves almost nothing about whether it runs.** The
+constant had been deleted by an earlier refactor that sliced out a block
+of the file, and nothing caught it because `app.compare` had no tests at
+all -- the one module whose entire job is deciding what gets shipped.
+
+It has tests now, including one that fails if the constant goes missing
+again (verified by deleting it and watching collection fail, rather than
+assuming). But the more useful outcome was fixing *why* it couldn't be
+caught locally, which turned up two further problems.
+
+**Second: the module couldn't be run outside production.** A database
+holding only some of the three competitions -- the local snapshot is
+Premier League only -- crashed deep inside scipy with
+`IndexError: arrays used as indices must be of integer type`, because an
+empty competition frame was being fitted. So the only place `main()`
+could execute was against real data, which is exactly how a NameError
+survived to a real run. Competitions below a match floor are now skipped
+with a printed note. This is the actual lesson: an unhelpful crash on
+partial data isn't a cosmetic problem, it's what removes your ability to
+test anything cheaply.
+
+**Third, and the one that would have quietly corrupted the result:**
+with `main()` finally runnable locally, the 0%-coverage snapshot produced
+a difference of exactly `+0.00065` at every single weight. With no
+location data the candidate must be *identical* to the baseline, so a
+nonzero constant meant something other than location was varying.
+
+It was. The baseline used `blend_shots_on_target_into_scores` (pooled
+mean-ratio calibration) while the candidate's fallback used
+`blend_learned_shot_proxy_into_scores` (least squares). Both rescale
+shots on target to goals, by different methods. Every "does location
+help?" verdict would have been a mixture of that question and "which
+shots-on-target calibration is better?" -- a small, systematic, entirely
+invisible confound, on the same order as the effects being measured.
+
+Holding the calibration fixed makes the zero-coverage difference exactly
+`+0.00000` at every weight, which is now a genuine self-check: run the
+comparison against data with no coverage and it must report a control.
+A test that can't detect its own null case can't be trusted on a real one.
+
+(Incidental finding worth keeping: least squares came out very slightly
+worse than the pooled mean ratio for shots on target. Not chased -- it's
+a different question, and this file now has the machinery to ask it
+properly whenever it's worth asking.)
+
+Three bugs, all in the measurement rather than the model, all found by
+running the code instead of reading it. The pattern across this whole
+session is consistent enough to state plainly: every serious error here
+has been in how something was measured, not in the modelling idea, and
+none of them were visible without execution.
