@@ -5368,3 +5368,29 @@ double-check `git status`/`git diff` before committing anything
 `.env`-adjacent, a seed dump, or a debug script written against a real
 key. Worth revisiting whether to flip back to private once the app is
 past needing free unlimited Actions minutes as urgently.
+
+## 2026-08-21 -- Temporary Actions workflow to backtest SHRINKAGE from a phone
+
+No laptop available to run `app.evaluate` locally against production, so
+built `.github/workflows/backtest-shrinkage-temp.yml`: `workflow_dispatch`
+only (never scheduled, no cron), takes a comma-separated list of
+candidate `SHRINKAGE` values as an input (defaulting to
+`0.0,0.02,0.05,0.1,0.2,0.5`), and runs one matrix job per value -- each
+shows up as its own collapsible section in the Actions run, easy to
+scan on mobile instead of one long concatenated log. Safe to run several
+at once against the same real `DATABASE_URL`: `app.evaluate` only ever
+reads (confirmed -- no `conn.commit()`/writes anywhere in it), so
+concurrent jobs can't step on each other or on production data.
+
+Needed one small, permanent addition to make this possible:
+`app.evaluate.SHRINKAGE` now reads an optional `SHRINKAGE_OVERRIDE`
+environment variable first, falling back to the existing `0.05` constant
+when unset -- a normal local run (`python -m app.evaluate`, no env var
+set) is completely unaffected, this is purely additive for the temporary
+workflow to set per matrix job.
+
+Explicitly temporary and labeled as such in the workflow's own header
+comment: delete this file (and the `SHRINKAGE_OVERRIDE` support) once a
+value has been chosen from a real backtest and promoted to `app.train`,
+the same "sandbox, backtest, promote" arc `HALF_LIFE_DAYS` and
+`SHOTS_ON_TARGET_BLEND_WEIGHT` already went through.
