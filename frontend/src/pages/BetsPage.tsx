@@ -4,6 +4,7 @@ import type { Bet, BetLeg, BetResult, BetsRoiSummary, SquadPlayer, Team } from '
 import { positionGroup } from '../lib/positions';
 import { americanToDecimal, isValidAmericanOdds } from '../lib/odds';
 import { currentSeasonLabel } from '../lib/season';
+import { useOddsFormat } from '../odds/OddsFormatContext';
 
 const COMPETITIONS = ['Premier League', 'Championship'] as const;
 
@@ -58,6 +59,7 @@ function parseOdds(raw: string, format: OddsFormat): number | null {
 // list + summary. Simpler to own the fetch/refetch cycle directly than to
 // force a read-only hook to do something it wasn't built for.
 export function BetsPage() {
+  const { formatProbability, formatPrice: formatBookPrice } = useOddsFormat();
   const [bets, setBets] = useState<Bet[] | null>(null);
   const [summary, setSummary] = useState<BetsRoiSummary | null>(null);
   const [fixtures, setFixtures] = useState<UpcomingFixture[] | null>(null);
@@ -521,9 +523,10 @@ export function BetsPage() {
             <div className="bet-card-header">
               <strong>{bet.isParlay ? `Parlay (${bet.legs.length} legs)` : 'Single bet'}</strong>
               <span>
-                ${bet.stake.toFixed(2)} @ {bet.combinedOdds.toFixed(2)}
+                ${bet.stake.toFixed(2)} @ {formatBookPrice(bet.combinedOdds)}
                 {bet.oddsOverrideDecimal !== null ? ' (book price)' : ''} · your {formatProb(bet.yourImpliedProbability)} ·
-                model {formatProb(bet.modelProbability)} · edge {bet.edge === null ? '—' : formatPercent(bet.edge * 100)}
+                model {bet.modelProbability === null ? '—' : formatProbability(bet.modelProbability)} · edge{' '}
+                {bet.edge === null ? '—' : formatPercent(bet.edge * 100)}
               </span>
               <span className={`bet-result bet-result-${bet.result}`}>{bet.result}</span>
               {bet.payout !== null && <span>payout ${bet.payout.toFixed(2)}</span>}

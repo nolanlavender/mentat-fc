@@ -4,6 +4,7 @@ import { apiUrl } from '../api/client';
 import type { FixtureSummary, ScorerPrediction } from '../api/types';
 import { Crest, PlayerPhoto } from '../components/Crest';
 import { shortCode } from '../lib/teamDisplay';
+import { useOddsFormat } from '../odds/OddsFormatContext';
 
 const COMPETITIONS = ['Premier League', 'Championship'] as const;
 type CompetitionFilter = (typeof COMPETITIONS)[number] | 'all';
@@ -16,10 +17,6 @@ type CompetitionFilter = (typeof COMPETITIONS)[number] | 'all';
 // client-side narrowing of whatever calendar weeks land inside this
 // window, not the primary windowing mechanism.
 const DAYS_AHEAD = 14;
-
-function formatPercent(value: number): string {
-  return `${(value * 100).toFixed(2)}%`;
-}
 
 // Top 3 only, even though the API can return up to 5 -- this is a compact
 // list view, not a fixture detail page; showing all 5 tips over into
@@ -75,6 +72,7 @@ function inWeek(kickoffAt: string, monday: Date): boolean {
 }
 
 function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
+  const { formatProbability } = useOddsFormat();
   const { prediction, topScorers } = fixture;
   const homeCode = shortCode(fixture.homeTeam);
   const awayCode = shortCode(fixture.awayTeam);
@@ -93,11 +91,11 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
       {prediction ? (
         <div className="prediction-probs">
           <span>
-            {homeCode} {formatPercent(prediction.probHomeWin)}
+            {homeCode} {formatProbability(prediction.probHomeWin)}
           </span>
-          <span>Draw {formatPercent(prediction.probDraw)}</span>
+          <span>Draw {formatProbability(prediction.probDraw)}</span>
           <span>
-            {awayCode} {formatPercent(prediction.probAwayWin)}
+            {awayCode} {formatProbability(prediction.probAwayWin)}
           </span>
           {prediction.predictedHomeGoals !== null && prediction.predictedAwayGoals !== null && (
             <span className="prediction-expected-goals">
@@ -110,7 +108,7 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
               {topScorers.slice(0, SCORERS_SHOWN).map((s, i) => (
                 <span key={s.playerId} className="scorer-chip">
                   <PlayerPhoto src={s.playerPhotoUrl} alt="" size={18} />
-                  {s.playerName} ({formatPercent(s.probScores)})
+                  {s.playerName} ({formatProbability(s.probScores)})
                   {i < Math.min(topScorers.length, SCORERS_SHOWN) - 1 ? ', ' : ''}
                 </span>
               ))}
@@ -128,6 +126,7 @@ function PredictionRow({ fixture }: { fixture: FixtureSummary }) {
 // list, which is simpler as an owned fetch than forcing a single-URL hook
 // to combine two responses.
 export function PredictionsPage() {
+  const { formatProbability } = useOddsFormat();
   const [fixtures, setFixtures] = useState<FixtureSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [competition, setCompetition] = useState<CompetitionFilter>('all');
@@ -238,7 +237,7 @@ export function PredictionsPage() {
                   </span>
                   <Crest src={pick.fixture.awayTeam.logoUrl} alt="" />
                   <span className="top-pick-call">
-                    {pick.label} {formatPercent(pick.probability)}
+                    {pick.label} {formatProbability(pick.probability)}
                   </span>
                 </Link>
               </li>
@@ -262,7 +261,7 @@ export function PredictionsPage() {
                   {pick.fixture.homeTeam.name} vs {pick.fixture.awayTeam.name} ·{' '}
                   {new Date(pick.fixture.kickoffAt).toLocaleString()}
                 </Link>
-                <span className="top-pick-call">{formatPercent(pick.probScores)}</span>
+                <span className="top-pick-call">{formatProbability(pick.probScores)}</span>
               </li>
             ))}
           </ol>

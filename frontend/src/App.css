@@ -968,3 +968,42 @@ a.fixture-teams:hover {
   padding: 4px 0;
   border-bottom: 1px solid var(--border);
 }
+
+/* Odds-format toggle (nav). Sits on the brand-coloured bar, so it needs
+   its own light-on-dark treatment rather than inheriting the page's
+   default form styling. Deliberately compact: the nav already scrolls
+   horizontally on a phone. */
+.odds-format-toggle select {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.odds-format-toggle select:hover {
+  border-color: var(--gold);
+}
+
+/* The <option>s render in the OS menu, not on the brand bar -- they need
+   readable colours of their own or they inherit white-on-white. */
+.odds-format-toggle option {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Visually hidden but still announced by screen readers. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
