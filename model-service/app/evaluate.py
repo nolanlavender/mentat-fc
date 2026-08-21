@@ -23,7 +23,6 @@ Usage: python -m app.evaluate
 
 from __future__ import annotations
 
-import os
 import sys
 
 import numpy as np
@@ -148,18 +147,29 @@ SHRINKAGE: dict[str, float] = {
 # hierarchical partial pooling: the shrinkage target becomes
 # team-specific rather than global.
 #
-# Synthetic check of the three options on a relegated-club shape gave
-# P(beat a mid-table side in the new division) of 98.2% unshrunk, 63.4%
-# shrunk to league average, 84.3% shrunk to the joint fit -- i.e. the
-# prior keeps real pedigree that shrinking to the mean throws away. That
-# is a plausible ordering, NOT evidence it predicts better; only a real
-# backtest against held-out matches can say that, which is what this
-# constant exists to run.
+# TESTED 2026-08-21, and the answer was "no measurable difference".
+# A paired comparison (app.compare -- both configurations scored on the
+# same held-out fixtures, bootstrapped over matches) came back:
 #
-# SHRINK_TOWARD_JOINT_OVERRIDE (env var, "1"/"0") lets the backtest
-# workflow A/B this without editing the file. Temporary, same as the
-# SHRINKAGE sweep's override was -- delete both once a verdict is in.
-SHRINK_TOWARD_JOINT: bool = os.environ.get("SHRINK_TOWARD_JOINT_OVERRIDE", "0") == "1"
+#   Premier League: mean Brier difference -0.00171, 95% CI [-0.00468, +0.00141]
+#   Championship:   mean Brier difference +0.00108, 95% CI [-0.00165, +0.00394]
+#
+# Both intervals span zero, so neither direction is distinguishable from
+# noise. The raw aggregates did look like a Premier League win (0.6226 ->
+# 0.6209) and a Championship loss, and going per-competition on that basis
+# -- the way SHOTS_ON_TARGET_BLEND_WEIGHT legitimately did -- would have
+# been fitting sampling error. That earlier split was backed by a large,
+# monotonic trend across five values; this was two numbers a third the
+# size.
+#
+# Left False and left in place rather than deleted: the mechanism is
+# sound, well-tested, and the most likely reason it doesn't show up is
+# that the held-out window contains very few newly-promoted/relegated
+# clubs, which is exactly the case it helps. Worth re-running via
+# app.compare after a season with more division changes in the test set,
+# or with a better prior. Flip this to True to re-test -- same "this is
+# the constant to edit" convention as HALF_LIFE_DAYS.
+SHRINK_TOWARD_JOINT: bool = False
 
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
