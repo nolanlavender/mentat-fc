@@ -5394,3 +5394,68 @@ comment: delete this file (and the `SHRINKAGE_OVERRIDE` support) once a
 value has been chosen from a real backtest and promoted to `app.train`,
 the same "sandbox, backtest, promote" arc `HALF_LIFE_DAYS` and
 `SHOTS_ON_TARGET_BLEND_WEIGHT` already went through.
+
+## 2026-08-21 -- SHRINKAGE backtest results: per-competition, like the shots-on-target weight before it
+
+Ran the temporary Actions workflow twice from a phone (no laptop available),
+first sweeping 0.0/0.02/0.05/0.1/0.2/0.5, then a follow-up sweep of
+0.5/1.0/2.0/3.0/5.0/10.0 once the first round showed every competition
+still improving at its largest tested value. Full 11-value table (Brier
+score, lower is better):
+
+| SHRINKAGE | Premier League | Championship | FA Cup |
+|---|---|---|---|
+| 0.0 | 0.6248 | 0.6495 | 0.6464 |
+| 0.02 | 0.6246 | 0.6495 | 0.6463 |
+| 0.05 | 0.6244 | 0.6494 | 0.6462 |
+| 0.1 | 0.6241 | 0.6492 | 0.6459 |
+| 0.2 | 0.6237 | 0.6490 | 0.6454 |
+| 0.5 | 0.6230 | 0.6483 | 0.6440 |
+| **1.0** | **0.6226** | 0.6475 | 0.6421 |
+| 2.0 | 0.6228 | 0.6464 | 0.6397 |
+| 3.0 | 0.6235 | 0.6458 | 0.6389 |
+| **5.0** | 0.6253 | **0.6456** | 0.6358 |
+| 10.0 | 0.6303 | 0.6466 | **0.6258** |
+
+**Genuinely surprising, worth naming honestly:** shrinkage didn't just
+help the sparse-data cases (a newly-relegated West Ham, FA Cup's ~800
+minnows) the way the original hypothesis expected -- it improved ALL
+THREE competitions monotonically well past the untested 0.05 starting
+guess, including Premier League and Championship's own well-established
+teams. Makes sense in hindsight: every team's fitted parameters are
+estimated from a finite, noisy sample (even a full PL season is only
+~30-ish matches per team), so mild regularization toward the mean is a
+genuine bias-variance win broadly, not just a fix for the one-match
+extreme case it was built for.
+
+**Real per-competition divergence, not noise -- same shape of finding as
+`SHOTS_ON_TARGET_BLEND_WEIGHT`'s own backtest:** Premier League peaks
+cleanly at 1.0 and gets measurably worse on both sides of it (0.6248 at
+0.0, 0.6226 at 1.0, 0.6303 at 10.0 -- a real U-shape, not a plateau).
+Championship follows the same shape but its optimum sits much further
+out, at 5.0 (worse again by 10.0). FA Cup never turned in the tested
+range at all -- still improving at 10.0, the largest value tried, with
+the biggest gain of the three (0.6464 -> 0.6258). That's consistent with
+FA Cup's joint fit being the sparsest of the three (811 teams, many
+with almost no data) -- it can absorb far more shrinkage before losing
+real signal than a clean two-division fit can.
+
+**Promoted `SHRINKAGE: dict[str, float] = {"Premier League": 1.0,
+"Championship": 5.0, "FA Cup": 10.0}` to both `app.evaluate` and
+`app.train`` in the same pass** (both files' constants, plus threading
+`shrinkage` through `fit_and_report`/the three `DixonColesModel.fit()`
+calls). FA Cup's value is explicitly flagged in both files' comments as
+"best-tested-so-far," not converged -- worth another sweep (20/50/100) if
+FA Cup predictions ever get surfaced in the app; not chasing it further
+right now since nothing user-facing depends on that number today, and
+the backtest itself is cheap to rerun later.
+
+**Deleted `.github/workflows/backtest-shrinkage-temp.yml` and its
+`SHRINKAGE_OVERRIDE` env var support** now that a value has been chosen
+and promoted -- exactly as both were labeled to do when built. If FA
+Cup's number needs revisiting later, recreate the workflow from this
+commit's git history rather than reinventing it.
+
+All 72 tests still pass (the shrinkage mechanism itself, `TestFitShrinkage`,
+was already covered by #80 and is unchanged -- only the promoted values
+and how they're threaded through changed here).

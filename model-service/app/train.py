@@ -84,6 +84,29 @@ SHOTS_ON_TARGET_BLEND_WEIGHT: dict[str, float] = {
     "FA Cup": 1.0,
 }
 
+# L2 shrinkage on every team's fitted attack/defense toward league
+# average -- see DixonColesModel.fit()'s own docstring for the mechanism.
+# Real bug this fixes: West Ham, relegated into the Championship, had one
+# single finished match in that competition's fit, and with zero
+# regularization anywhere in the optimizer that one result alone pushed
+# their fitted attack high enough to predict a 97.1% win probability and
+# a 6.62-1.13 scoreline for their very next match.
+#
+# Validated 2026-08-21 (see app.evaluate.SHRINKAGE's own comment and
+# docs/learning-log.md's entry for the full 11-value table): per
+# competition, not a single shared value -- Premier League peaks at 1.0
+# and gets worse past it, Championship peaks much further out at 5.0.
+# FA Cup was still improving at the top of what got tested (10.0) with
+# no peak found yet -- promoted as the best-tested-so-far value rather
+# than a converged one, since FA Cup predictions aren't surfaced in the
+# app yet (low stakes to be exactly right immediately) and the 3-season
+# backtest sweep is cheap to rerun and refine later.
+SHRINKAGE: dict[str, float] = {
+    "Premier League": 1.0,
+    "Championship": 5.0,
+    "FA Cup": 10.0,
+}
+
 
 def upsert_prediction(conn, fixture_id: int, prediction) -> None:
     with conn.cursor() as cur:
@@ -206,12 +229,12 @@ def predict_for_competition(conn, model: DixonColesModel, competition_name: str,
     )
 
 
-def fit_and_report(matches, label: str) -> DixonColesModel | None:
+def fit_and_report(matches, label: str, shrinkage: float) -> DixonColesModel | None:
     if len(matches) < MIN_MATCHES_TO_FIT:
         print(f"Only {len(matches)} finished matches for {label}, skipping (need {MIN_MATCHES_TO_FIT}+).")
         return None
     model = DixonColesModel()
-    model.fit(matches, half_life_days=HALF_LIFE_DAYS)
+    model.fit(matches, half_life_days=HALF_LIFE_DAYS, shrinkage=shrinkage)
     print(
         f"{label} fit on {model.fitted_on} matches, {len(model.teams)} teams, "
         f"home_advantage={model.home_advantage:.3f}, rho={model.rho:.4f}"
@@ -231,10 +254,14 @@ def main() -> None:
         championship_matches = matches[matches["competition_name"] == "Championship"]
 
         pl_model = fit_and_report(
-            blend_shots_on_target_into_scores(pl_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]), "Premier League"
+            blend_shots_on_target_into_scores(pl_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]),
+            "Premier League",
+            shrinkage=SHRINKAGE["Premier League"],
         )
         championship_model = fit_and_report(
-            blend_shots_on_target_into_scores(championship_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]), "Championship"
+            blend_shots_on_target_into_scores(championship_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]),
+            "Championship",
+            shrinkage=SHRINKAGE["Championship"],
         )
         # Joint fit reuses every competition's matches, including FA Cup's --
         # it's the only one of the three that needs the cross-league
@@ -242,6 +269,7 @@ def main() -> None:
         joint_model = fit_and_report(
             blend_shots_on_target_into_scores(matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
             "Joint (Premier League + Championship + FA Cup, for FA Cup predictions)",
+            shrinkage=SHRINKAGE["FA Cup"],
         )
 
         # Player shares use the full cross-competition appearance history

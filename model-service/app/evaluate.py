@@ -23,7 +23,6 @@ Usage: python -m app.evaluate
 
 from __future__ import annotations
 
-import os
 import sys
 
 import numpy as np
@@ -102,29 +101,32 @@ SHOTS_ON_TARGET_BLEND_WEIGHT: dict[str, float] = {
 # match count, never any individual team's own sample size within it, so
 # nothing else in the pipeline catches this.
 #
-# 0.05 here is an untested starting candidate, not a validated value --
-# unlike HALF_LIFE_DAYS/SHOTS_ON_TARGET_BLEND_WEIGHT above, this hasn't
-# been backtested against real data yet. This is the constant to edit and
-# rerun against production: too small and a newly-promoted/relegated
-# team's rating still swings on one or two results; too large and it
-# stops trusting real signal even for teams with plenty of matches on
-# record (watch established teams' attack/defense values and the overall
-# Brier/log-loss numbers both -- a good value shouldn't move the
-# established teams much while visibly reining in the sparse-data ones).
-# Once a real backtest finds a value that helps, promote it to
-# app.train the same way SHOTS_ON_TARGET_BLEND_WEIGHT was -- including
-# checking whether it wants to vary by competition the way that constant
-# ended up needing to (the FA Cup joint fit's ~800 sparse entrants are
-# the other place this exact mechanism should help).
+# Validated 2026-08-21 via .github/workflows/backtest-shrinkage-temp.yml
+# (run from a phone, no laptop available) across 0.0/0.02/0.05/0.1/0.2/
+# 0.5/1.0/2.0/3.0/5.0/10.0. Per competition, like
+# SHOTS_ON_TARGET_BLEND_WEIGHT above -- real, not noise: Premier League's
+# Brier score improves steadily up to 1.0 (0.6248 -> 0.6226) then gets
+# worse past it (0.6253 at 5.0, 0.6303 at 10.0). Championship follows the
+# same shape but peaks much further out, at 5.0 (0.6495 -> 0.6456, worse
+# again at 10.0's 0.6466). FA Cup was STILL improving at 10.0 (0.6464 ->
+# 0.6258, the largest gain of the three) with no peak found yet -- the
+# real optimum is higher than what's been tested. Not chasing it further
+# right now: FA Cup predictions aren't surfaced in the app yet (see
+# docs/CLAUDE.md's "Data scope vs. app scope"), so 10.0 is promoted as
+# the best-tested-so-far value, honestly flagged as under-tested rather
+# than converged -- same spirit as SHOTS_ON_TARGET_BLEND_WEIGHT's FA Cup
+# entry being "the least trustworthy of the three" when it was promoted.
+# Worth another sweep (20/50/100) if FA Cup predictions ever ship.
 #
-# SHRINKAGE_OVERRIDE (env var) beats this constant when set -- lets
-# .github/workflows/backtest-shrinkage-temp.yml sweep several candidate
-# values in one Actions run (one job per value, via a matrix) without
-# editing this file each time. Editing the constant above directly still
-# works exactly as before for a normal local run; the env var is purely
-# additive, for that one temporary workflow. Delete this override (and
-# the workflow) once a value has been chosen and promoted to app.train.
-SHRINKAGE = float(os.environ.get("SHRINKAGE_OVERRIDE", 0.05))
+# See docs/learning-log.md's 2026-08-21 entry for the full 11-value
+# table. If retesting, this is the dict to edit -- change just one
+# competition's entry and rerun via the temp workflow (recreate it from
+# git history if it's been deleted per its own note).
+SHRINKAGE: dict[str, float] = {
+    "Premier League": 1.0,
+    "Championship": 5.0,
+    "FA Cup": 10.0,
+}
 
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
@@ -234,7 +236,7 @@ def main() -> None:
             train_matches[train_matches["competition_name"] == "Premier League"], SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]
         )
         pl_model = DixonColesModel()
-        pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE)
+        pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Premier League"])
         print(f"Premier League fit on {pl_model.fitted_on} matches, {len(pl_model.teams)} teams, cutoff {cutoff_date}")
         _predict_and_score(
             pl_model, conn, "Premier League", test_matches[test_matches["competition_name"] == "Premier League"], len(pl_train)
@@ -244,7 +246,7 @@ def main() -> None:
             train_matches[train_matches["competition_name"] == "Championship"], SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]
         )
         championship_model = DixonColesModel()
-        championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE)
+        championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Championship"])
         print(f"Championship fit on {championship_model.fitted_on} matches, {len(championship_model.teams)} teams, cutoff {cutoff_date}")
         _predict_and_score(
             championship_model,
@@ -261,7 +263,7 @@ def main() -> None:
         joint_model.fit(
             blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
             half_life_days=HALF_LIFE_DAYS,
-            shrinkage=SHRINKAGE,
+            shrinkage=SHRINKAGE["FA Cup"],
         )
         print(
             f"Joint fit (for FA Cup) on {joint_model.fitted_on} matches across {', '.join(FIT_COMPETITIONS)}, "
