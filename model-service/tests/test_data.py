@@ -5,10 +5,9 @@ import pandas as pd
 import pytest
 
 from app.data import (
-    blend_goal_proxies_into_scores,
-    blend_shot_location_into_scores,
+    blend_learned_shot_proxy_into_scores,
     blend_shots_on_target_into_scores,
-    estimate_shot_location_conversion,
+    estimate_goal_weights,
 )
 
 
@@ -78,124 +77,59 @@ class TestBlendShotsOnTargetIntoScores:
         assert matches["away_score"].iloc[0] == 1
 
 
-class TestShotLocationBlend:
+class TestLearnedShotProxy:
     """
-    The shot-location proxy learns per-location conversion rates from the
-    data rather than being told them (see
-    app.data.estimate_shot_location_conversion). These pin the properties
-    that actually matter: the rates are recovered from known data, the
-    combination is what's reliable, and partial coverage never invents a
-    value for a match that has none.
+    The proxy learns goals-per-shot weights by regression rather than being
+    told them, because the data never records WHICH shots became goals.
+    These pin the properties that matter; the question of WHICH signals to
+    use is settled in docs/learning-log.md (shots on target wins).
     """
 
     @staticmethod
-    def _synthetic(rate_inside: float, rate_outside: float, seed: int = 7, n: int = 600):
+    def _synthetic(n: int = 1200, seed: int = 11):
         rng = np.random.default_rng(seed)
-        inside = rng.integers(2, 14, n)
-        outside = rng.integers(1, 10, n)
-        goals = rng.poisson(inside * rate_inside + outside * rate_outside)
+        inside = rng.integers(2, 15, n)
+        outside = rng.integers(1, 11, n)
+        # On target is a SUBSET of total shots -- the structural fact that
+        # makes shots-on-target strictly more informative than location.
+        sot = rng.binomial(inside, 0.40) + rng.binomial(outside, 0.25)
+        goals = rng.poisson(sot * 0.22)
         half = n // 2
         return pd.DataFrame({
-            "kickoff_date": [date(2026, 1, 1)] * half,
             "home_score": goals[:half], "away_score": goals[half:],
-            "home_shots_inside_box": inside[:half], "away_shots_inside_box": inside[half:],
-            "home_shots_outside_box": outside[:half], "away_shots_outside_box": outside[half:],
+            "home_shots_inside_box": inside[:half].astype(float), "away_shots_inside_box": inside[half:].astype(float),
+            "home_shots_outside_box": outside[:half].astype(float), "away_shots_outside_box": outside[half:].astype(float),
+            "home_shots_on_target": sot[:half].astype(float), "away_shots_on_target": sot[half:].astype(float),
         })
 
-    def test_recovers_known_conversion_rates(self):
-        matches = self._synthetic(0.13, 0.035)
-        rate_inside, rate_outside = estimate_shot_location_conversion(matches)
-        # Generous tolerances on purpose: the point is that it lands in the
-        # right region and gets the ORDERING right, not that a noisy
-        # coefficient hits a decimal place (see the function's own note).
-        assert 0.09 < rate_inside < 0.17
-        assert 0.0 <= rate_outside < 0.08
-        assert rate_inside > rate_outside, "an inside-box shot must be worth more than one from distance"
+    def test_learns_a_positive_weight_for_a_real_signal(self):
+        weights = estimate_goal_weights(self._synthetic(), ["shots_on_target"])
+        # Truth is 0.22 goals per shot on target.
+        assert 0.15 < weights["shots_on_target"] < 0.30
 
     def test_returns_none_without_enough_data(self):
-        assert estimate_shot_location_conversion(self._synthetic(0.13, 0.035, n=20)) is None
+        assert estimate_goal_weights(self._synthetic(n=20), ["shots_on_target"]) is None
 
-    def test_returns_none_when_the_design_is_degenerate(self):
-        # Every shot from inside, none from outside -- the second rate is
-        # simply not estimable, and inventing one would be worse than
-        # declining to blend.
-        matches = self._synthetic(0.13, 0.035)
-        matches["home_shots_outside_box"] = 0
-        matches["away_shots_outside_box"] = 0
-        assert estimate_shot_location_conversion(matches) is None
+    def test_returns_none_on_a_degenerate_design(self):
+        matches = self._synthetic()
+        # Two identical signals leave the system rank-deficient.
+        matches["home_shots_outside_box"] = matches["home_shots_inside_box"]
+        matches["away_shots_outside_box"] = matches["away_shots_inside_box"]
+        assert estimate_goal_weights(matches, ["inside_box", "outside_box"]) is None
 
     def test_zero_weight_is_a_no_op(self):
-        matches = self._synthetic(0.13, 0.035)
-        blended = blend_shot_location_into_scores(matches, 0.0)
-        assert (blended["home_score"] == matches["home_score"].astype(float)).all()
-
-    def test_full_weight_is_smoother_than_real_goals(self):
-        # The entire reason to blend a proxy in: it should carry the same
-        # average signal with less match-to-match noise than the goal count.
-        matches = self._synthetic(0.13, 0.035)
-        blended = blend_shot_location_into_scores(matches, 1.0)
-        assert blended["home_score"].var() < matches["home_score"].astype(float).var()
-        assert blended["home_score"].mean() == pytest.approx(matches["home_score"].mean(), abs=0.15)
-
-    def test_missing_location_keeps_the_real_score(self):
-        matches = self._synthetic(0.13, 0.035)
-        matches.loc[:9, "home_shots_inside_box"] = None
-        blended = blend_shot_location_into_scores(matches, 1.0)
-        assert (blended.loc[:9, "home_score"] == matches.loc[:9, "home_score"].astype(float)).all()
-        # ...while rows that DO have coverage still get blended.
-        assert not (blended.loc[10:, "home_score"] == matches.loc[10:, "home_score"].astype(float)).all()
-
-
-class TestCombinedGoalProxies:
-    """
-    Precedence: shot location where available, shots on target where not,
-    real score where neither. Pinned because getting this wrong is silent
-    -- a real 2026-08-21 comparison ran the location blend over a frame
-    with ~48% coverage and left the other half on raw unsmoothed goals,
-    then reported a confident verdict that was partly measuring coverage.
-    """
-
-    @staticmethod
-    def _partial_coverage(n: int = 400):
-        rng = np.random.default_rng(3)
-        inside = rng.integers(2, 14, n).astype(float)
-        outside = rng.integers(1, 10, n).astype(float)
-        sot = rng.integers(1, 12, n)
-        goals = rng.poisson(inside * 0.13 + outside * 0.035)
-        half = n // 2
-        frame = pd.DataFrame({
-            "home_score": goals[:half], "away_score": goals[half:],
-            "home_shots_on_target": sot[:half], "away_shots_on_target": sot[half:],
-            "home_shots_inside_box": inside[:half], "away_shots_inside_box": inside[half:],
-            "home_shots_outside_box": outside[:half], "away_shots_outside_box": outside[half:],
-        })
-        # Half the rows have no location data at all.
-        frame.loc[: half // 2, ["home_shots_inside_box", "home_shots_outside_box"]] = None
-        return frame
-
-    def test_rows_without_location_still_get_shots_on_target(self):
-        # THE regression test: uncovered rows must not silently fall back
-        # to raw goals when the location weight is on.
-        matches = self._partial_coverage()
-        blended = blend_goal_proxies_into_scores(matches, shots_on_target_weight=0.75, shot_location_weight=1.0)
-        uncovered = matches["home_shots_inside_box"].isna()
-        assert not np.allclose(blended.loc[uncovered, "home_score"], matches.loc[uncovered, "home_score"].astype(float))
-
-    def test_rows_with_location_use_the_location_proxy(self):
-        matches = self._partial_coverage()
-        both = blend_goal_proxies_into_scores(matches, shots_on_target_weight=0.75, shot_location_weight=1.0)
-        sot_only = blend_goal_proxies_into_scores(matches, shots_on_target_weight=0.75, shot_location_weight=0.0)
-        covered = matches["home_shots_inside_box"].notna()
-        # Location takes precedence, so covered rows must differ from the
-        # shots-on-target-only result.
-        assert not np.allclose(both.loc[covered, "home_score"], sot_only.loc[covered, "home_score"])
-
-    def test_both_weights_zero_is_an_exact_no_op(self):
-        matches = self._partial_coverage()
-        blended = blend_goal_proxies_into_scores(matches, 0.0, 0.0)
+        matches = self._synthetic()
+        blended = blend_learned_shot_proxy_into_scores(matches, 0.0, ["shots_on_target"])
         assert np.allclose(blended["home_score"], matches["home_score"].astype(float))
 
     def test_blending_reduces_variance(self):
-        matches = self._partial_coverage()
-        blended = blend_goal_proxies_into_scores(matches, 0.75, 1.0)
+        matches = self._synthetic()
+        blended = blend_learned_shot_proxy_into_scores(matches, 1.0, ["shots_on_target"])
         assert blended["home_score"].var() < matches["home_score"].astype(float).var()
+
+    def test_missing_a_signal_keeps_the_real_score(self):
+        matches = self._synthetic()
+        matches.loc[:9, "home_shots_on_target"] = None
+        blended = blend_learned_shot_proxy_into_scores(matches, 1.0, ["shots_on_target"])
+        assert np.allclose(blended.loc[:9, "home_score"], matches.loc[:9, "home_score"].astype(float))
+        assert not np.allclose(blended.loc[10:, "home_score"], matches.loc[10:, "home_score"].astype(float))

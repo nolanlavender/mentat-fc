@@ -30,7 +30,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from app.data import blend_goal_proxies_into_scores, load_finished_matches
+from app.data import blend_shots_on_target_into_scores, load_finished_matches
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.evaluate import (
@@ -51,39 +51,27 @@ from app.evaluate import (
 # generic. Keep the labels honest -- they're what the verdict is
 # reported against.
 #
-# Current question (2026-08-21): the shot-location proxy has been
-# backfilled. Where it exists, is weighting shots by WHERE they were
-# taken better than counting shots on target?
+# No comparison is currently live. The last one (shot location vs shots
+# on target) is settled and recorded in docs/learning-log.md.
 #
-# Note what B is, because the first version of this comparison got it
-# wrong and produced a confident, misleading verdict. B is NOT "location
-# instead of shots on target" -- location coverage is only ~48%, so that
-# configuration left half the matches with raw unsmoothed goals while A
-# had shots-on-target smoothing everywhere, handicapping B on half the
-# sample. B is "A, upgraded to location on the rows that have it", which
-# is both the fair comparison and the only sane production design.
-A_LABEL = "shots on target everywhere (current)"
-B_LABEL = "shot location where available, shots on target elsewhere"
+# To run a new one: give A and B honest labels and make _blend return the
+# two configurations. Everything below is generic -- pairing, bootstrap
+# and verdict don't care what changed.
+A_LABEL = "current"
+B_LABEL = "candidate"
 
 
-def _config(competition: str, use_shot_location: bool) -> tuple[float, float]:
-    """Returns (shots_on_target_weight, shot_location_weight)."""
-    return SHOTS_ON_TARGET_BLEND_WEIGHT[competition], 1.0 if use_shot_location else 0.0
-
-BOOTSTRAP_SAMPLES = 5000
-CONFIDENCE = 95
+def _blend(matches: pd.DataFrame, competition: str, is_candidate: bool) -> pd.DataFrame:
+    """Edit this to define what a run compares. Currently A == B, so a run
+    is a self-check: every interval should collapse to exactly zero."""
+    return blend_shots_on_target_into_scores(matches, SHOTS_ON_TARGET_BLEND_WEIGHT[competition])
 
 
-def _blend(matches: pd.DataFrame, competition: str, use_shot_location: bool) -> pd.DataFrame:
-    sot_weight, location_weight = _config(competition, use_shot_location)
-    return blend_goal_proxies_into_scores(matches, sot_weight, location_weight)
-
-
-def _fit_all(train_matches: pd.DataFrame, use_shot_location: bool) -> dict[str, DixonColesModel]:
+def _fit_all(train_matches: pd.DataFrame, is_candidate: bool) -> dict[str, DixonColesModel]:
     """The same three fits app.evaluate builds, under one configuration."""
     joint = DixonColesModel()
     joint.fit(
-        _blend(train_matches, "FA Cup", use_shot_location),
+        _blend(train_matches, "FA Cup", is_candidate),
         half_life_days=HALF_LIFE_DAYS,
         shrinkage=SHRINKAGE["FA Cup"],
     )
@@ -93,7 +81,7 @@ def _fit_all(train_matches: pd.DataFrame, use_shot_location: bool) -> dict[str, 
     for competition in ("Premier League", "Championship"):
         model = DixonColesModel()
         model.fit(
-            _blend(train_matches[train_matches["competition_name"] == competition], competition, use_shot_location),
+            _blend(train_matches[train_matches["competition_name"] == competition], competition, is_candidate),
             half_life_days=HALF_LIFE_DAYS,
             shrinkage=SHRINKAGE[competition],
             prior_model=prior,
@@ -157,8 +145,8 @@ def main() -> None:
             print(f"  shot-location coverage, {competition}: {covered}/{len(rows)} ({covered / len(rows):.0%})")
         print()
 
-        baseline = _fit_all(train_matches, use_shot_location=False)
-        candidate = _fit_all(train_matches, use_shot_location=True)
+        baseline = _fit_all(train_matches, is_candidate=False)
+        candidate = _fit_all(train_matches, is_candidate=True)
 
         for competition in FIT_COMPETITIONS:
             competition_test = test_matches[test_matches["competition_name"] == competition]

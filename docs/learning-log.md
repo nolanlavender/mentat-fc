@@ -5980,3 +5980,75 @@ reintroduced version of the bug rather than assumed to work.
 the most likely confounder for any per-competition difference and
 belongs next to the verdict, not as one global number. Verdict on shot
 location itself: still open, pending a rerun of the corrected comparison.
+
+## 2026-08-21 -- Shot location: a well-supported negative result
+
+Corrected comparison, with per-competition coverage this time:
+
+```
+coverage: Premier League 1102/1140 (97%)  Championship 1404/1683 (83%)  FA Cup 112/2619 (4%)
+
+Premier League: A 0.6226  B 0.6164   diff -0.00626  CI [-0.01499, +0.00209]  INCONCLUSIVE
+Championship:   A 0.6474  B 0.6566   diff +0.00926  CI [+0.00259, +0.01582]  A is better
+FA Cup:         A 0.6258  B 0.6305   diff +0.00469  CI [+0.00113, +0.00829]  A is better
+```
+
+**The coverage hypothesis was wrong.** Having found the fallback bug, the
+natural expectation was that fixing it would dissolve the Championship
+result. It didn't: +0.00921 became +0.00926, essentially unmoved, on 83%
+coverage. Worth recording because the previous entry's lesson could
+easily be over-applied -- "the comparison was flawed" and "the finding was
+false" are different claims, and here only the first was true. The bug was
+real and worth fixing; it just wasn't what produced the result.
+
+(FA Cup shifting from inconclusive to a detected effect despite 4% own
+coverage is not a contradiction: FA Cup predictions come from the joint
+fit, whose training data is mostly Premier League and Championship
+matches, which ARE covered.)
+
+**Why location loses, and it's structural rather than incidental.**
+Inside-box + outside-box sums to TOTAL shots. So using location as the
+signal silently discards the on-target filter: a shot blocked from six
+yards counts the same as one that beat the keeper. And every goal is by
+definition an on-target shot, so shots-on-target strictly contains the
+goals in a way location never can. Location says where a shot came from;
+on-target says whether it actually threatened.
+
+**The obvious rescue also failed, which is the useful part.** If they
+measure different things, regress on all three and let the data weight
+them -- strictly more information than either alone. Built
+`estimate_goal_weights` to do exactly that, then tested it on synthetic
+matches with known structure before running anything against production:
+
+| config | corr to true xG | MAE |
+|---|---|---|
+| location only | 0.6746 | 0.3373 |
+| shots on target only | **0.9458** | **0.1477** |
+| all three | 0.9450 | 0.1475 |
+
+Adding location to shots-on-target changed nothing, and the regression
+said so itself by driving the weights to 0.0071 and 0.0000. The
+information location carries is almost entirely already inside
+shots-on-target. Beating it would need *on-target shots by location*,
+which is the one cut API-Football doesn't provide.
+
+**Consolidated rather than accumulated.** A negative result that leaves
+three unused functions behind is a tax on everyone who reads the file
+later. `estimate_shot_location_conversion`,
+`blend_shot_location_into_scores` and `blend_goal_proxies_into_scores`
+are all removed, subsumed by the one general
+`estimate_goal_weights` / `blend_learned_shot_proxy_into_scores` pair,
+which takes any combination of signals and is what a future experiment
+should reach for. Net effect: the codebase is smaller than before this
+experiment started, while being able to do strictly more. The
+`SHOT_LOCATION_BLEND_WEIGHT` constant and its wiring are gone, with a
+comment in their place recording why, so nobody re-derives this from
+scratch.
+
+The database columns and the backfill stay. The data is real, cheap to
+keep, and may earn its place somewhere other than team-strength fitting
+-- it just isn't a better input than shots on target for this.
+
+`app.compare` is reset to a neutral state (A == B) rather than left
+pointed at a settled question, so the next run of it is a self-check
+whose intervals should collapse to exactly zero.
