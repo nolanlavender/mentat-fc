@@ -167,6 +167,44 @@ class TestFitShrinkage:
         assert total == pytest.approx(1.0, abs=1e-6)
 
 
+class TestPathologicalRho:
+    """
+    predict() applies tau to four low-score cells, and tau goes negative for
+    a large enough rho (it is 1 - rho at 1-1). fit()'s likelihood already
+    clipped for this; predict() did not, so a negative cell survived
+    normalization and the triangle sums could return a "probability"
+    outside [0, 1] -- seen as a draw probability of -0.048 on a small,
+    poorly-constrained fit. Real fits land near rho ~= 0.07, but the joint
+    fit now backstops other competitions (see app.train), so this is
+    pinned rather than left to well-behaved data.
+    """
+
+    def test_probabilities_stay_in_range_for_a_rho_that_makes_tau_negative(self):
+        model = DixonColesModel()
+        model.fit(_round_robin_matches(), half_life_days=180)
+        model.rho = 5.0  # far past where tau at 1-1 (= 1 - rho) turns negative
+
+        pred = model.predict("Strong", "Weak")
+        for name, value in [
+            ("home", pred.prob_home_win),
+            ("draw", pred.prob_draw),
+            ("away", pred.prob_away_win),
+        ]:
+            assert 0.0 <= value <= 1.0, f"{name} probability out of range: {value}"
+        assert pred.prob_home_win + pred.prob_draw + pred.prob_away_win == pytest.approx(1.0, abs=1e-6)
+
+    def test_a_normal_rho_is_left_alone_by_the_guard(self):
+        # The guard must not disturb the ordinary case -- tau stays positive
+        # for a realistic rho, so clamping at zero should be a no-op.
+        model = DixonColesModel()
+        model.fit(_round_robin_matches(), half_life_days=180)
+        model.rho = 0.07
+
+        pred = model.predict("Strong", "Weak")
+        assert pred.prob_home_win > pred.prob_away_win
+        assert pred.prob_home_win + pred.prob_draw + pred.prob_away_win == pytest.approx(1.0, abs=1e-6)
+
+
 class TestPredictWithAvailability:
     def test_default_availability_of_one_matches_plain_predict(self):
         model = DixonColesModel()

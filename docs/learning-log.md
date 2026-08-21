@@ -5516,3 +5516,68 @@ Verified in a real browser across all three formats: 55% renders as
 55.00% / 1.82 / -122 and 25% as 25.00% / 4.00 / +300, the choice survives
 a full reload, and it carries across to the fixture detail page and its
 scorer picks.
+
+## 2026-08-21 -- Promoted teams silently suppressed ~114 fixtures' predictions
+
+Reported as "no goal predictions on Arsenal's game tomorrow with
+Coventry." Rather than guess between the several things that produce an
+empty scorer list, ran the `app.diagnose_coverage` tool built earlier the
+same night. It answered immediately:
+
+```
+[10051] 2026-08-21  Arsenal vs Coventry: 1 prediction(s), 0 scorer pick(s)
+    home Arsenal (id=3): in Premier League fit: yes
+      reliable players (>= 5 apps): 42
+    away Coventry (id=780): in Premier League fit: NO
+      reliable players (>= 5 apps): 36
+```
+
+**Root cause.** Coventry and Hull City were newly promoted, so they had
+zero *finished Premier League* matches -- and `load_finished_matches`
+scopes the Premier League fit to Premier League results. Neither club
+existed in that model's team list, so `model.predict()` raised
+`ValueError` and `predict_for_competition` hit its `continue`, skipping
+the fixture whole. The damage wasn't limited to the promoted side: the
+skip happens *before* goal-scorer allocation, so Arsenal's 42 perfectly
+reliable players produced nothing either. One team's missing history was
+suppressing its opponent's picks.
+
+Scale is what made this urgent rather than cosmetic: it's not four
+fixtures, it's every fixture involving a promoted club -- roughly 38 each,
+around 114 across the three promoted sides -- on the morning the season
+started.
+
+**Fix: fall back to the joint fit.** That model already exists and spans
+all three competitions, so a promoted club with a full Championship
+record *is* in it even when the Premier League's own fit has never seen
+them. This is the same cross-league comparability argument that makes the
+joint fit the right model for an FA Cup tie (see `app.train`'s 2026-08-15
+note) -- a Premier League side against a just-promoted one is the same
+situation, one team's strength known only from another division. Falling
+back is strictly better than skipping: it uses real data instead of
+none. A team in neither fit (a non-league FA Cup entrant with no
+appearances anywhere) still skips, which is correct.
+
+`_predict_fixture` was extracted so the primary and fallback paths share
+one implementation -- a fallback that silently skipped the availability
+adjustment would be a subtle, hard-to-spot inconsistency -- and the
+per-competition report now counts how many predictions came via the
+fallback, so this staying high once a promoted side has real top-flight
+results would itself be a signal something's wrong.
+
+**A second, unrelated bug fell out of verifying the first.** The
+synthetic check returned `draw = -0.048` -- a negative probability. Not
+the test data's fault: `fit()`'s likelihood clips tau against a
+pathological rho (`np.clip(tau_values, 1e-10, None)`) but `predict()`
+never did. tau is `1 - rho` at 1-1 and `1 - lambda_home*lambda_away*rho`
+at 0-0, so a large enough rho makes one of the four low-score cells
+negative; normalizing preserves the sign, and the triangle sums then
+return values outside [0, 1] that still sum to 1 (which is why nothing
+caught it). Real fits land near rho ~= 0.07 and never trip it, but the
+joint fit now backstops other competitions, so `predict()` got the same
+guard `fit()` always had. Pinned with a test that sets rho past the
+threshold directly -- confirmed it fails without the guard and passes
+with it, rather than trusting that it would.
+
+Both were found the same way: build the diagnostic instead of guessing,
+then actually run the verification rather than assuming it passes.
