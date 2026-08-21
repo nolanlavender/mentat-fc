@@ -304,13 +304,30 @@ export async function seedApiFootballLineup(
 // kickoff in case of a delay or a temporary gap in API-Football's own
 // data) rather than tuned tight, since checking a fixture that turns out
 // to have nothing yet costs one live call and nothing else.
-const MATCHDAY_LOOKBACK_HOURS = 3;
-const MATCHDAY_LOOKAHEAD_HOURS = 3;
+export const MATCHDAY_LOOKBACK_HOURS = 3;
+export const MATCHDAY_LOOKAHEAD_HOURS = 3;
+
+export interface MatchdayFixtureOutcome {
+  label: string;
+  kickoffAt: Date;
+  hoursToKickoff: number;
+  announced: boolean;
+}
 
 export interface MatchdayLineupsResult {
   checked: number;
   announced: number;
   stoppedOnBudget: boolean;
+  /**
+   * In-window fixtures skipped because their lineup is ALREADY captured.
+   * Reported because its absence made the log actively misleading once
+   * (2026-08-21): the selection query excludes these, so a fixture whose
+   * lineup landed successfully is invisible to the very message you would
+   * read to find out what happened, and "checked 1, 0 confirmed" looks
+   * identical whether your fixture was the one checked or not.
+   */
+  alreadyCaptured: number;
+  outcomes: MatchdayFixtureOutcome[];
 }
 
 /**
@@ -331,30 +348,61 @@ export interface MatchdayLineupsResult {
  * next run) or the match finishes and the regular backfill takes over.
  */
 export async function seedTodaysLineups(pool: Pool): Promise<MatchdayLineupsResult> {
-  const { rows } = await pool.query<{ id: number; external_api_football_id: number }>(
-    `SELECT f.id, f.external_api_football_id
+  // The has_lineup flag replaces the NOT EXISTS filter this query used to
+  // have. Same fixtures get called -- already-captured ones are skipped
+  // below -- but they can now be counted and reported instead of silently
+  // vanishing from the result set.
+  const { rows } = await pool.query<{
+    id: number;
+    external_api_football_id: number;
+    kickoff_at: Date;
+    home_team: string;
+    away_team: string;
+    hours_to_kickoff: string;
+    has_lineup: boolean;
+  }>(
+    `SELECT f.id, f.external_api_football_id, f.kickoff_at,
+            ht.name AS home_team, at.name AS away_team,
+            EXTRACT(EPOCH FROM (f.kickoff_at - now())) / 3600 AS hours_to_kickoff,
+            EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id) AS has_lineup
      FROM fixtures f
+     JOIN teams ht ON ht.id = f.home_team_id
+     JOIN teams at ON at.id = f.away_team_id
      WHERE f.status != 'finished'
        AND f.external_api_football_id IS NOT NULL
        AND f.kickoff_at BETWEEN now() - ($1 || ' hours')::interval AND now() + ($2 || ' hours')::interval
-       AND NOT EXISTS (SELECT 1 FROM fixture_lineups fl WHERE fl.fixture_id = f.id)
      ORDER BY f.kickoff_at ASC`,
     [MATCHDAY_LOOKBACK_HOURS, MATCHDAY_LOOKAHEAD_HOURS],
   );
 
+  const alreadyCaptured = rows.filter((row) => row.has_lineup).length;
+  const toCheck = rows.filter((row) => !row.has_lineup);
+
   let announced = 0;
-  for (const row of rows) {
+  const outcomes: MatchdayFixtureOutcome[] = [];
+  for (const row of toCheck) {
+    const describe = (didAnnounce: boolean): MatchdayFixtureOutcome => ({
+      label: `${row.home_team} vs ${row.away_team}`,
+      kickoffAt: row.kickoff_at,
+      hoursToKickoff: Number(row.hours_to_kickoff),
+      announced: didAnnounce,
+    });
     try {
       const result = await seedApiFootballLineup(pool, row.external_api_football_id, row.id, { skipCache: true });
       if (result.announced) announced++;
+      outcomes.push(describe(result.announced));
     } catch (err) {
       if (err instanceof BudgetExhaustedError) {
-        return { checked: announced, announced, stoppedOnBudget: true };
+        // `checked` was previously set to `announced` here, which reported
+        // zero fixtures examined whenever the budget ran out before
+        // anything was confirmed -- understating the work done and hiding
+        // the fact that fixtures HAD been looked at.
+        return { checked: outcomes.length, announced, stoppedOnBudget: true, alreadyCaptured, outcomes };
       }
       throw err;
     }
   }
-  return { checked: rows.length, announced, stoppedOnBudget: false };
+  return { checked: toCheck.length, announced, stoppedOnBudget: false, alreadyCaptured, outcomes };
 }
 
 interface ApiFootballPlayerStatsResponse {

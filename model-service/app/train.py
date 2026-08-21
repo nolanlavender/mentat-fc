@@ -214,8 +214,21 @@ def _predict_fixture(model: DixonColesModel, fixture, home_availability: float, 
 
 
 def predict_for_competition(
-    conn, model: DixonColesModel, competition_name: str, player_shares, fallback_model: DixonColesModel | None = None
+    conn,
+    model: DixonColesModel,
+    competition_name: str,
+    player_shares,
+    fallback_model: DixonColesModel | None = None,
+    only_with_confirmed_lineups: bool = False,
 ) -> None:
+    """
+    only_with_confirmed_lineups restricts the rewrite to fixtures that
+    actually have a confirmed matchday squad -- see app.apply_lineups for
+    why that distinction is worth a parameter. Everything else is
+    identical, deliberately: the two paths must produce the same
+    prediction for the same fixture, so they share one loop rather than
+    having a fast copy that can drift from the real one.
+    """
     upcoming = load_upcoming_fixtures(conn, competition_name)
     # Bulk-loaded once per competition rather than per fixture -- most
     # upcoming fixtures have no confirmed squad yet (typically only
@@ -229,6 +242,8 @@ def predict_for_competition(
     fell_back = 0
     for _, fixture in upcoming.iterrows():
         fixture_lineup = confirmed[confirmed["fixture_id"] == fixture["fixture_id"]]
+        if only_with_confirmed_lineups and fixture_lineup.empty:
+            continue
         home_confirmed = set(fixture_lineup[fixture_lineup["team_id"] == fixture["home_team_id"]]["player_id"])
         away_confirmed = set(fixture_lineup[fixture_lineup["team_id"] == fixture["away_team_id"]]["player_id"])
         home_availability = compute_team_availability(fixture["home_team_id"], home_confirmed, player_shares)

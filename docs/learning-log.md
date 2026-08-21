@@ -6332,3 +6332,76 @@ split was silently measuring nothing. Both are now asserted against.
 
 Neither would have been visible from reading the code, and both would have
 made the first production run quietly wrong rather than loudly broken.
+
+## 2026-08-21 -- A log line that could not answer its own question
+
+"Ran the matchday check, the lineup still isn't showing." The log said:
+
+```
+Matchday lineups: checked 1 fixture(s) kicking off soon, 0 had a confirmed lineup.
+```
+
+That message is useless, and worse than useless, because it reads like an
+answer. `seedTodaysLineups`' query had `NOT EXISTS (SELECT 1 FROM
+fixture_lineups ...)` -- so **a fixture whose lineup landed successfully is
+excluded from the very message you would read to find out what happened.**
+"checked 1, 0 confirmed" is identical whether the fixture you care about
+was the one checked, was already captured, or was never in the window.
+
+Three completely different situations, one indistinguishable sentence. The
+actual answer turned out to be timing (kickoff 19:00 UTC, checked at 18:24,
+so T-36min when lineups land at roughly T-60min) -- but I could not have
+known that from the log, and neither could anyone else.
+
+Fixed by making the log say what it did: per-fixture name, how far from
+kickoff, whether anything was published, plus a count of in-window fixtures
+skipped *because they already had a lineup*, and an explicit note when
+nothing was in the window at all. `app.diagnose_lineups` covers the rest.
+
+**The general lesson: a summary that aggregates away the thing being asked
+about is not a summary, it is a disguise.** Counting is the cheap part;
+the work is making sure the count answers a question someone will actually
+have at 3am.
+
+### A real bug found by reading that code
+
+```ts
+return { checked: announced, announced, stoppedOnBudget: true };
+```
+
+`checked` set to `announced` on the budget-exhausted path -- so running out
+of budget reported *zero fixtures examined* whenever nothing had been
+confirmed yet, understating the work done and hiding that fixtures had been
+looked at at all. Never fired here, would have been baffling when it did.
+
+### Restoring the retrain, properly this time
+
+The other half of the report: even once the lineup lands, the scorer odds
+don't change, because `app.train` was removed from this workflow during the
+2026-08-20 Actions billing incident. Capturing a lineup and acting on it
+became two things and only the first was automated.
+
+The reverted version ran `app.train` unconditionally, hourly: three model
+fits plus ~77,000 unbatched `player_goal_predictions` upserts, about twenty
+minutes, twenty-four times a day. That comment ended by naming what a safe
+version would need -- "only recomputing predictions for fixtures whose
+confirmed lineup actually changed." That now exists:
+
+1. The retrain step is **conditional** on the check having confirmed
+   something (the script writes `announced=N` to `GITHUB_OUTPUT`). Most
+   hours confirm nothing and cost one DB query, exactly as before.
+2. When it does run, `app.apply_lineups` reuses `train.predict_for_competition`
+   with `only_with_confirmed_lineups=True` -- a handful of fixtures, not the
+   ~900 whose predictions a lineup cannot possibly have changed.
+
+Worth being explicit about the reasoning, because there was a tempting
+wrong version available: the repo is public now, so Actions minutes are
+free, and "just put it back" would have worked. It would also have been
+wrong. Twenty minutes of pointless hourly work was wrong when it was
+billed and is still wrong when it is not -- the bill was the symptom. This
+went back only once it was *fixed*, not once it became affordable.
+
+`apply_lineups` deliberately calls `train`'s own loop rather than a fast
+copy. A separate implementation would be free to drift, and then the hourly
+job and the daily one would quietly disagree about the same fixture, which
+is a much worse failure than being slow.
