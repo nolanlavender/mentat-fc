@@ -5581,3 +5581,80 @@ with it, rather than trusting that it would.
 
 Both were found the same way: build the diagnostic instead of guessing,
 then actually run the verification rather than assuming it passes.
+
+## 2026-08-21 -- Shot location (inside vs outside the box): the data pipeline
+
+Requested as a model idea, and a good one: a shot from inside the penalty
+area converts at a far higher rate than one from outside, so the same
+"total shots" number means very different things depending on where they
+came from. `blend_shots_on_target_into_scores` already proved a
+shot-volume proxy beats raw goals for fitting (a real ~2.4% Brier gain in
+the Premier League), and location should sharpen exactly that signal --
+it's the closest thing to real xG this project can actually get.
+
+**Verifying first, again.** `fixture_team_stats` is populated
+*exclusively* by football-data.co.uk's CSV importer, which has no
+shot-location columns at all -- so this needed a whole new API-Football
+seed path, not just a column. Before building it, confirmed
+`Shots insidebox` / `Shots outsidebox` are real fields on
+`/fixtures/statistics` (from the endpoint's own documentation).
+
+That answers "does the field exist" but NOT the question that actually
+matters here: **are those fields populated for three-season-old fixtures,
+or only recent ones?** A stat that only exists for the current season is
+close to useless for a model that fits on three. Rather than make that a
+separate blocking step, the backfill answers it as a side effect: it
+processes **oldest fixtures first** and prints a running "N had
+shot-location data (X%)" every 25 fixtures. Thin historical coverage
+therefore shows up in the first handful of calls, and the run can be
+cancelled -- instead of spending a few thousand calls and discovering it
+in a backtest weeks later. That's the `xg` lesson applied one level
+deeper: it isn't enough to check that a field exists, the check has to
+cover the range the model will actually train on.
+
+**The one genuinely risky part: not clobbering the CSV.**
+`fixture_team_stats` rows for the two leagues are owned by the CSV
+importer (shots / shots_on_target / corners / fouls / cards), which is
+the more complete source for what it covers, and its numbers disagree
+slightly with API-Football's on definitions. A blanket upsert from the
+new source would silently overwrite all of it. So
+`upsertFixtureShotLocation` touches **only** its own two columns:
+
+```sql
+ON CONFLICT (fixture_id, team_id) DO UPDATE SET
+  shots_inside_box = EXCLUDED.shots_inside_box,
+  shots_outside_box = EXCLUDED.shots_outside_box
+```
+
+Its INSERT branch only ever fires for a fixture the CSV never covered (an
+FA Cup tie), where the other columns legitimately stay null. Proved
+rather than assumed: wrote a CSV-shaped row (14 shots, 6 on target, 7
+corners, 11 fouls, 2 yellows), ran the shot-location upsert over it, and
+confirmed every one of those values survived untouched while the box
+columns filled in.
+
+Team identity resolves through `teams.external_api_football_id` and is
+then checked against the fixture's own home/away ids before writing --
+the statistics endpoint identifies teams by API-Football's id space, and
+this project has already been bitten once by trusting a second id space
+to line up (see the player entity-resolution entries).
+
+Cost shape differs enough from the lineup backfill to justify its own
+entry point: one call per fixture with no bulk form, so a full
+three-season catch-up is a few thousand calls and will usually span more
+than one day's 7500 budget. Resumable with no flags -- every run
+re-queries for fixtures still missing the columns, so stopping on budget
+and rerunning tomorrow continues exactly where it left off.
+
+Migration verified to round-trip (`up` -> columns present -> `down` ->
+columns gone -> `up` again), which matters more than usual here because
+the column being added is the same *shape* as the `xg` column that turned
+out to be permanently null.
+
+**Not yet wired into the model.** That's deliberate and is the next step:
+there's no point blending a column that's still empty. Once the backfill
+has real coverage, the natural experiment is a
+`SHOT_LOCATION_BLEND_WEIGHT` sandboxed in `app.evaluate` exactly like
+`SHOTS_ON_TARGET_BLEND_WEIGHT` was -- and the honest possibility that it
+adds nothing beyond shots-on-target is a real outcome worth measuring,
+not assuming away.

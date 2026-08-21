@@ -28,7 +28,8 @@
     "check:lineup-depth": "tsx seed/check-lineup-depth.ts",
     "check:bulk-fixtures": "tsx seed/check-bulk-fixtures-endpoint.ts",
     "check:squads-endpoint": "tsx seed/check-squads-endpoint.ts",
-    "check:statistics-endpoint": "tsx seed/check-statistics-endpoint.ts"
+    "check:statistics-endpoint": "tsx seed/check-statistics-endpoint.ts",
+    "db:seed:shot-location": "tsx seed/backfill-shot-location.ts"
   },
   "license": "ISC",
   "dependencies": {

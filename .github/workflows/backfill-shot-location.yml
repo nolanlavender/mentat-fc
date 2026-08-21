@@ -1,0 +1,52 @@
+name: Backfill shot location
+
+# Manual-only: fills fixture_team_stats.shots_inside_box / shots_outside_box
+# from API-Football's /fixtures/statistics, oldest fixtures first.
+#
+# One API call per fixture (no bulk form of this endpoint), so a full
+# three-season catch-up is a few thousand calls and will usually need more
+# than one day's 7500 budget. Fully resumable -- it re-queries for fixtures
+# still missing the columns on every run, so just run it again tomorrow and
+# it continues where it stopped. Safe to run repeatedly.
+#
+# Watch the running "N had shot-location data (X%)" lines: the open
+# question this backfill answers as a side effect is whether OLD fixtures
+# carry shot location at all, or only recent ones. Oldest-first ordering
+# means a low percentage in the first few lines is the answer, and the run
+# can be cancelled rather than spending the rest of the budget confirming
+# it.
+#
+# Requires the DATABASE_URL, API_FOOTBALL_KEY and JWT_SECRET secrets the
+# other workflows already use.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # A full season's worth of per-fixture calls comfortably outlasts the
+    # 6h default; the job is resumable, so a timeout is a pause, not a loss.
+    timeout-minutes: 350
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run migrations (adds the shot-location columns if not applied yet)
+        working-directory: backend
+        run: npm run migrate:up
+
+      - name: Backfill shot location
+        working-directory: backend
+        run: npm run db:seed:shot-location
