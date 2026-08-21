@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "Mentat FC API — serves the app, reads predictions from Postgres",
+  "description": "Mentat FC API \u2014 serves the app, reads predictions from Postgres",
   "private": true,
   "type": "module",
   "engines": {
@@ -27,7 +27,8 @@
     "db:restore": "tsx seed/restore.ts",
     "check:lineup-depth": "tsx seed/check-lineup-depth.ts",
     "check:bulk-fixtures": "tsx seed/check-bulk-fixtures-endpoint.ts",
-    "check:squads-endpoint": "tsx seed/check-squads-endpoint.ts"
+    "check:squads-endpoint": "tsx seed/check-squads-endpoint.ts",
+    "check:statistics-endpoint": "tsx seed/check-statistics-endpoint.ts"
   },
   "license": "ISC",
   "dependencies": {
