@@ -189,7 +189,21 @@ class DixonColesModel:
 
         for hg in range(2):
             for ag in range(2):
-                grid[hg, ag] *= _tau(hg, ag, lambda_home, lambda_away, self.rho)
+                # max(..., 0) mirrors the identical guard fit()'s likelihood
+                # already applies (np.clip(tau_values, 1e-10, None)) --
+                # predict() was missing it, which was a real latent bug, not
+                # a theoretical one. tau goes negative for a large enough
+                # rho (it is 1 - rho at 1-1, and 1 - lambda_home*lambda_away*rho
+                # at 0-0), which made one of the four low-score cells
+                # negative. Normalizing kept it negative, so the triangle
+                # sums below could return a "probability" outside [0, 1] --
+                # observed as a draw probability of -0.048 on a small,
+                # noisy fit where rho was poorly constrained. Real
+                # production fits land near rho ~= 0.07 and never hit this,
+                # but the joint fit now backstops other competitions too
+                # (see app.train), so the guard is worth having rather than
+                # relying on the data always being well-behaved.
+                grid[hg, ag] *= max(_tau(hg, ag, lambda_home, lambda_away, self.rho), 0.0)
         grid = grid / grid.sum()  # tau perturbs the four cells, renormalize back to a valid distribution
 
         # grid[i, j]: i = home goals, j = away goals. Home win is row > column (tril);

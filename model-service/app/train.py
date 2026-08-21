@@ -160,7 +160,24 @@ def upsert_player_goal_prediction(conn, fixture_id: int, team_id: int, predictio
         )
 
 
-def predict_for_competition(conn, model: DixonColesModel, competition_name: str, player_shares) -> None:
+def _predict_fixture(model: DixonColesModel, fixture, home_availability: float, away_availability: float):
+    """
+    Shared by the primary and fallback paths below so the two can't drift
+    apart -- a fallback prediction that silently skipped the availability
+    adjustment would be a subtle, hard-to-spot inconsistency.
+    """
+    if home_availability == 1.0 and away_availability == 1.0:
+        # No confirmed squad yet (or a full-strength one) for either side --
+        # identical to predict(), so call it directly for the common case.
+        return model.predict(fixture["home_team"], fixture["away_team"])
+    return model.predict_with_availability(
+        fixture["home_team"], fixture["away_team"], home_availability, away_availability
+    )
+
+
+def predict_for_competition(
+    conn, model: DixonColesModel, competition_name: str, player_shares, fallback_model: DixonColesModel | None = None
+) -> None:
     upcoming = load_upcoming_fixtures(conn, competition_name)
     # Bulk-loaded once per competition rather than per fixture -- most
     # upcoming fixtures have no confirmed squad yet (typically only
@@ -171,6 +188,7 @@ def predict_for_competition(conn, model: DixonColesModel, competition_name: str,
     skipped = 0
     goal_scorer_predictions = 0
     availability_adjusted = 0
+    fell_back = 0
     for _, fixture in upcoming.iterrows():
         fixture_lineup = confirmed[confirmed["fixture_id"] == fixture["fixture_id"]]
         home_confirmed = set(fixture_lineup[fixture_lineup["team_id"] == fixture["home_team_id"]]["player_id"])
@@ -179,24 +197,43 @@ def predict_for_competition(conn, model: DixonColesModel, competition_name: str,
         away_availability = compute_team_availability(fixture["away_team_id"], away_confirmed, player_shares)
 
         try:
-            if home_availability == 1.0 and away_availability == 1.0:
-                # No confirmed squad yet (or a full-strength one) for
-                # either side -- identical to predict(), so just call it
-                # directly rather than going through the availability path
-                # for the common case.
-                prediction = model.predict(fixture["home_team"], fixture["away_team"])
-            else:
-                prediction = model.predict_with_availability(
-                    fixture["home_team"], fixture["away_team"], home_availability, away_availability
-                )
-                availability_adjusted += 1
+            prediction = _predict_fixture(model, fixture, home_availability, away_availability)
         except ValueError:
-            # A team with no finished matches yet in the joint fit (e.g. a
-            # non-league FA Cup minnow with zero appearances) has no fitted
-            # attack/defense -- skip rather than guess with an arbitrary
-            # default.
-            skipped += 1
-            continue
+            # A team with no finished matches in THIS competition yet has no
+            # fitted attack/defense here. Real production bug this fixes,
+            # found 2026-08-21 via app.diagnose_coverage: that's the normal
+            # state of a newly-promoted side for the whole first part of a
+            # season -- Coventry and Hull City had zero finished Premier
+            # League matches on the opening weekend -- and skipping outright
+            # meant every one of their ~38 fixtures produced no prediction
+            # AND no goal-scorer picks at all, including for a fully-fitted
+            # opponent like Arsenal sitting on 42 reliable players. One
+            # side's missing history was suppressing the other side's.
+            #
+            # The joint fit is exactly the right fallback and already
+            # exists: it spans all three competitions, so a promoted club
+            # with a full Championship record is in it even when this
+            # competition's own fit has never seen them. That's the same
+            # cross-league comparability argument that makes the joint fit
+            # the right model for FA Cup ties (see this file's 2026-08-15
+            # note) -- a Premier League side against a just-promoted one is
+            # the same situation, one team's strength known only from
+            # another division.
+            if fallback_model is None:
+                skipped += 1
+                continue
+            try:
+                prediction = _predict_fixture(fallback_model, fixture, home_availability, away_availability)
+                fell_back += 1
+            except ValueError:
+                # Not in the joint fit either -- genuinely no data anywhere
+                # (a non-league FA Cup entrant with zero appearances). Skip
+                # rather than guess with an arbitrary default.
+                skipped += 1
+                continue
+
+        if home_availability != 1.0 or away_availability != 1.0:
+            availability_adjusted += 1
         upsert_prediction(conn, fixture["fixture_id"], prediction)
         predicted += 1
 
@@ -224,8 +261,9 @@ def predict_for_competition(conn, model: DixonColesModel, competition_name: str,
 
     conn.commit()
     print(
-        f"{competition_name}: wrote {predicted} predictions ({availability_adjusted} availability-adjusted), "
-        f"skipped {skipped} (team not in training data), {goal_scorer_predictions} player goal-scorer predictions."
+        f"{competition_name}: wrote {predicted} predictions ({availability_adjusted} availability-adjusted, "
+        f"{fell_back} via the joint fit for a team with no history in this competition yet), "
+        f"skipped {skipped} (team not in any training data), {goal_scorer_predictions} player goal-scorer predictions."
     )
 
 
@@ -295,7 +333,13 @@ def main() -> None:
             if model is None:
                 print(f"{competition_name}: skipped (not enough matches to fit).")
                 continue
-            predict_for_competition(conn, model, competition_name, player_shares)
+            # The joint fit backstops a team this competition's own fit has
+            # never seen -- a newly-promoted/relegated side early in a
+            # season (see predict_for_competition's ValueError branch).
+            # Passed as None for FA Cup, which already IS the joint fit, so
+            # there'd be nothing left to fall back to.
+            fallback = None if model is joint_model else joint_model
+            predict_for_competition(conn, model, competition_name, player_shares, fallback_model=fallback)
     finally:
         conn.close()
 
