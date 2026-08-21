@@ -232,7 +232,27 @@ def main() -> None:
         # correct, because by the time production allocates with them they
         # are the present. That's what separates the two modes below.
         lineups = load_confirmed_lineups(conn, test_matches["fixture_id"].tolist())
-        print(f"Confirmed lineup rows for held-out fixtures: {len(lineups)}\n")
+        print(f"Confirmed lineup rows for held-out fixtures: {len(lineups)}")
+
+        # The optimism this mode carries, made visible rather than assumed
+        # away. Held-out fixtures are FINISHED, so their lineup rows were
+        # almost all written by the post-match backfill -- the same
+        # announced XI, but retrieved after the fact. Scoring the
+        # "confirmed lineup" mode on them silently assumes we would have
+        # had every one of those lineups before kickoff, which is exactly
+        # the assumption that fails for fixtures where pre-match capture
+        # doesn't work. Not corrected for -- there is nothing to correct
+        # with until pre-match captures accumulate (see migration
+        # 1701000000027) -- but a run that reports 0% here is reporting a
+        # ceiling on the matchday mode, not its real performance.
+        if "pre_match_captured_at" in lineups.columns and len(lineups) > 0:
+            pre_match = int(lineups["pre_match_captured_at"].notna().sum())
+            print(
+                f"  of which captured PRE-match: {pre_match}/{len(lineups)} "
+                f"({pre_match / len(lineups):.0%}) -- the rest were backfilled after the final whistle,\n"
+                f"  so the matchday mode below is an upper bound on what was actually knowable in time."
+            )
+        print()
 
         for use_confirmed_lineup, mode in ((False, "no lineup (days ahead)"), (True, "confirmed lineup (matchday)")):
             # Both allocation settings scored on the SAME held-out

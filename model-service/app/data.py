@@ -473,9 +473,9 @@ def load_confirmed_lineups(conn: psycopg.Connection, fixture_ids: list[int]) -> 
     not an error, same as every other missing-data case in this app.
     """
     if not fixture_ids:
-        return pd.DataFrame(columns=["fixture_id", "team_id", "player_id", "is_starting"])
+        return pd.DataFrame(columns=["fixture_id", "team_id", "player_id", "is_starting", "pre_match_captured_at"])
     query = """
-        SELECT fixture_id, team_id, player_id, is_starting
+        SELECT fixture_id, team_id, player_id, is_starting, pre_match_captured_at
         FROM fixture_lineups
         WHERE fixture_id = ANY(%(fixture_ids)s)
     """

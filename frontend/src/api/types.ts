@@ -240,6 +240,8 @@ export interface BetLeg {
   fixtureId: number;
   market: string;
   selection: string;
+  /** Goal handicap on the selected side (spread markets); 0 elsewhere. */
+  line: number;
   oddsDecimal: number;
   result: BetResult;
   settledAt: string | null;

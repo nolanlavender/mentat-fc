@@ -131,6 +131,7 @@ erDiagram
         bool is_starting
         int shirt_number
         text position
+        timestamptz pre_match_captured_at "NULL = post-match backfill"
     }
     fixture_player_stats {
         int id PK
@@ -219,8 +220,9 @@ erDiagram
         int id PK
         int bet_id FK
         int fixture_id FK
-        text market "e.g. match_winner"
-        text selection "e.g. home | draw | away"
+        text market "match_winner | spread | anytime_scorer"
+        text selection "home | draw | away, or a player id"
+        numeric line "goal handicap; 0 when the market has none"
         numeric odds_decimal
         text result "pending | won | lost | void"
         timestamptz settled_at
@@ -471,3 +473,52 @@ erDiagram
   `'api_football'`/`'fpl'` sources specifically, used everywhere they
   already were; this table is purely additive on top of them, for sources
   whose id space doesn't agree with that column 1:1.
+
+### `fixture_lineups.pre_match_captured_at` — when, not just whether
+
+Two jobs write this table and both call the same API-Football endpoint, so
+the rows are indistinguishable by content:
+
+| job | fixtures | timing |
+|---|---|---|
+| `seedTodaysLineups` | `status != 'finished'`, ±3h of kickoff | pre-match |
+| `backfillLineupsForCompetitionSeason` | `status = 'finished'` | post-match |
+
+The announced XI is the same either way, which is exactly why nothing
+looked wrong. What was missing is whether we had it *in time to act on it*,
+and that changes two things: the availability adjustment and starter-vs-bench
+scorer odds are only real if the lineup arrived before kickoff, and
+`app.evaluate_scorers`' matchday mode runs on finished fixtures — so without
+this column it silently assumed every one of those lineups would have been
+available pre-match, flattering the backtest for precisely the fixtures
+where pre-match capture fails.
+
+A timestamp rather than a boolean, because it also answers "how far ahead of
+kickoff do these actually land?", which is the number that decides whether
+the ±3h check window is wide enough.
+
+The upsert uses `COALESCE(existing, incoming)` — the opposite order from a
+normal "prefer the new value" merge. Once a lineup has been captured
+pre-match that is a permanent historical fact, and the post-match backfill
+re-upserting the same rows must not erase it.
+
+### `bet_legs.line` — why a spread needed a column
+
+`market`/`selection` are free text specifically so a new bet type never
+needs a migration, and that holds for anything whose selection is a single
+label. A spread is different in kind: the **same** market and the **same**
+selection settle differently depending on a number, so `home` at -2.5 and
+`home` at -0.5 are genuinely different bets. Packing it into the selection
+text (`home -2.5`) would push parsing into the settlement SQL, where a
+formatting slip becomes a mis-graded bet instead of a validation error.
+
+`fixture_odds` already reached the same conclusion and has this exact
+column, so both sides of the app now describe a line the same way.
+
+Spreads are also the first market here that can genuinely **push**: a whole
+line (Arsenal -2 winning by exactly 2) ties and settles `void`, which the
+existing result set already handles and which the bet's own result
+derivation already excludes from the parlay product. Half lines can't tie,
+which is the entire reason books quote them. Quarter lines (-2.25) are
+rejected rather than mis-graded — settling one means grading a leg as
+half-won, which a single `won`/`lost`/`void` value cannot express.

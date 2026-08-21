@@ -9,11 +9,19 @@ name: Matchday lineup check
 # for why that's a genuinely different check from the post-match backfill,
 # not just a more-frequent version of it.
 #
-# Does NOT rerun app.train after the lineup check -- reverted 2026-08-20
-# after a real production incident. It briefly did (2026-08-19's
-# player-availability PR): the reasoning at the time was "app.train makes
+# Reruns the model after the lineup check, but ONLY when a lineup was
+# actually newly confirmed, and only for the fixtures that have one
+# (app.apply_lineups, not app.train). Restored 2026-08-21 after being
+# reverted 2026-08-20; the history below is why the conditional and the
+# narrower job both matter, and is kept rather than trimmed because the
+# original reasoning was plausible and wrong in a way worth remembering.
+#
+# The reverted version ran app.train unconditionally, every hour
+# (2026-08-19's player-availability PR). The reasoning at the time was
+# "app.train makes
 # zero external API calls, so an hourly rerun costs nothing" -- true, but
-# wrong focus. It ignores that app.train refits three Dixon-Coles models
+# the wrong thing to measure. It ignores that app.train refits three
+# Dixon-Coles models
 # AND rewrites a player_goal_predictions row per reliable player per
 # upcoming fixture across all three competitions, via one
 # upsert_player_goal_prediction call (one DB round trip) per row, not
@@ -27,16 +35,25 @@ name: Matchday lineup check
 # in the job itself. Check Settings > Billing > Actions usage/spending
 # limits before re-attempting anything on this schedule.
 #
-# Making a newly-confirmed matchday squad reach that fixture's own
-# prediction within the hour is still real, wanted future work (see
-# docs/learning-log.md's 2026-08-20/2026-08-19 entries for the full
-# design) -- it just needs a genuinely cheap version first: batching the
-# player_goal_predictions upserts, and/or only recomputing predictions for
-# fixtures whose confirmed lineup actually changed since the last check,
-# instead of a full refit + full rewrite every single hour regardless.
-# Until that exists, this job goes back to being just the lineup check
-# below, and the daily-refresh.yml retrain (once a day) is the only place
-# a confirmed lineup's effect on predictions lands.
+# That comment ended by naming what a safe version would need: "only
+# recomputing predictions for fixtures whose confirmed lineup actually
+# changed since the last check, instead of a full refit + full rewrite
+# every single hour regardless." That is what now exists, in two parts:
+#
+#   1. The retrain step below is conditional on the lineup check having
+#      actually confirmed something. Most hours confirm nothing and cost
+#      one cheap DB query, exactly as before.
+#   2. When it does run, it runs app.apply_lineups, which reuses
+#      app.train's own prediction loop restricted to fixtures that have a
+#      confirmed squad -- a handful, not the ~900 upcoming fixtures whose
+#      predictions a lineup cannot possibly have changed. The model fits
+#      still happen (a prediction needs fitted parameters); the ~77,000
+#      unbatched upserts do not.
+#
+# The repository is also public now, so Actions minutes are free -- but
+# that is deliberately NOT the reason this is back. Running twenty minutes
+# of pointless work hourly was wrong when it was billed and is still wrong
+# when it is not; it was fixed, not merely made affordable.
 #
 # Hourly is comfortably inside budget -- confirmed via the account's
 # api-sports.io dashboard, the plan is 7500 calls/day (see api-football.ts's
@@ -73,5 +90,23 @@ jobs:
         run: npm ci
 
       - name: Check for newly-confirmed starting lineups
+        id: lineups
         working-directory: backend
         run: npm run db:seed:matchday-lineups
+
+      # Only when something was actually confirmed. This condition is the
+      # entire difference between this job and the version that exhausted
+      # the account's Actions minutes -- without it, every hour pays for a
+      # retrain that has nothing new to apply.
+      - uses: actions/setup-python@v5
+        if: steps.lineups.outputs.announced != '0' && steps.lineups.outputs.announced != ''
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        if: steps.lineups.outputs.announced != '0' && steps.lineups.outputs.announced != ''
+        working-directory: model-service
+        run: pip install -r requirements.txt
+      - name: Apply the confirmed lineups to those fixtures' predictions
+        if: steps.lineups.outputs.announced != '0' && steps.lineups.outputs.announced != ''
+        working-directory: model-service
+        run: python -m app.apply_lineups

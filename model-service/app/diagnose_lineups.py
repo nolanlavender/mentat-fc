@@ -1,0 +1,164 @@
+"""
+Read-only diagnostic: the matchday lineup check ran and a fixture's lineup
+still isn't showing.
+
+Built 2026-08-21 after exactly that report. "Matchday lineups: checked 1
+fixture(s) kicking off soon, 0 had a confirmed lineup" is genuinely
+ambiguous -- it is the same message whether the lineup isn't published
+yet, or the fixture was never in the window, or the lineup is already
+captured and something downstream is stale. Those need completely
+different responses and the log line cannot tell them apart, because
+seedTodaysLineups' query excludes any fixture that ALREADY has
+fixture_lineups rows. A fixture whose lineup landed successfully is
+therefore invisible to the very message you'd check to find out.
+
+The four states this separates, in the order they're worth ruling out:
+
+  1. OUTSIDE THE WINDOW -- seedTodaysLineups only looks at fixtures within
+     MATCHDAY_LOOKBACK/LOOKAHEAD_HOURS (+/- 3h) of now. A fixture further
+     out was never checked at all, and running the workflow again right
+     now will do nothing. Wait, or widen the window.
+  2. IN THE WINDOW, NOTHING PUBLISHED -- the normal state until roughly an
+     hour before kickoff. Nothing is broken; run it again later.
+  3. LINEUP CAPTURED, PREDICTIONS STALE -- fixture_lineups has rows, but
+     model_predictions.predicted_at is OLDER than when those rows landed,
+     so nothing the lineup should have changed (availability adjustment,
+     starter-vs-bench scorer odds, dropping unnamed players) has actually
+     been applied yet. app.train has to run again for that. This is the
+     state that looks most like a bug and isn't one -- see the note below.
+  4. LINEUP CAPTURED AND APPLIED -- if it still isn't on screen, the
+     problem is in the API or the frontend, not the data.
+
+The reason 3 is likely: the hourly matchday workflow used to re-run
+app.train after each lineup check, and that was REVERTED on 2026-08-20
+during the Actions billing incident (see docs/learning-log.md). Capturing
+a lineup and acting on it became two separate things, and only the first
+one is automated.
+
+Writes nothing, so it's safe against production any time.
+
+Usage: python -m app.diagnose_lineups [team name substring]
+"""
+
+from __future__ import annotations
+
+import sys
+
+from app.data import _query_df
+from app.db import get_connection
+
+# Kept in sync by hand with api-football.ts's MATCHDAY_LOOKBACK_HOURS /
+# MATCHDAY_LOOKAHEAD_HOURS. Duplicated rather than shared because they
+# live in the TypeScript seed layer and this is Python; if they diverge,
+# this diagnostic reports the wrong window, so it is printed explicitly
+# below rather than assumed.
+MATCHDAY_LOOKBACK_HOURS = 3
+MATCHDAY_LOOKAHEAD_HOURS = 3
+
+
+def main() -> None:
+    # `or None` matters: the workflow always passes an argument, and an
+    # unfilled optional input arrives as the empty string. Without this,
+    # the filter becomes ILIKE '%%' -- harmless, but the header would
+    # claim to be "matching ''" when it is actually showing everything.
+    team_filter = (sys.argv[1].strip() if len(sys.argv) > 1 else "") or None
+    conn = get_connection()
+    try:
+        rows = _query_df(
+            conn,
+            """
+            SELECT f.id AS fixture_id,
+                   c.name AS competition_name,
+                   ht.name AS home_team,
+                   at.name AS away_team,
+                   f.kickoff_at,
+                   f.status,
+                   f.external_api_football_id,
+                   now() AS checked_at,
+                   EXTRACT(EPOCH FROM (f.kickoff_at - now())) / 3600 AS hours_until_kickoff,
+                   (SELECT count(*) FROM fixture_lineups fl WHERE fl.fixture_id = f.id) AS lineup_rows,
+                   (SELECT count(*) FROM fixture_lineups fl
+                     WHERE fl.fixture_id = f.id AND fl.is_starting) AS starters,
+                   (SELECT max(mp.predicted_at) FROM model_predictions mp
+                     WHERE mp.fixture_id = f.id) AS predicted_at,
+                   (SELECT count(*) FROM player_goal_predictions pgp
+                     WHERE pgp.fixture_id = f.id) AS scorer_picks
+            FROM fixtures f
+            JOIN teams ht ON ht.id = f.home_team_id
+            JOIN teams at ON at.id = f.away_team_id
+            JOIN competition_seasons cs ON cs.id = f.competition_season_id
+            JOIN competitions c ON c.id = cs.competition_id
+            WHERE f.status != 'finished'
+              AND f.kickoff_at BETWEEN now() - interval '12 hours' AND now() + interval '48 hours'
+              AND (%(team)s IS NULL OR ht.name ILIKE %(like)s OR at.name ILIKE %(like)s)
+            ORDER BY f.kickoff_at
+            """,
+            {"team": team_filter, "like": f"%{team_filter}%" if team_filter else None},
+        )
+
+        scope = f" matching '{team_filter}'" if team_filter else ""
+        print(
+            f"Unfinished fixtures{scope} from 12h ago to 48h ahead: {len(rows)}\n"
+            f"Matchday check window is now -{MATCHDAY_LOOKBACK_HOURS}h to "
+            f"now +{MATCHDAY_LOOKAHEAD_HOURS}h.\n"
+        )
+        if rows.empty:
+            print(
+                "Nothing in range. If you expected a fixture here, it is either already\n"
+                "marked 'finished', outside the 48h horizon, or the team name didn't match."
+            )
+            return
+
+        for row in rows.itertuples():
+            hours = float(row.hours_until_kickoff)
+            in_window = -MATCHDAY_LOOKBACK_HOURS <= hours <= MATCHDAY_LOOKAHEAD_HOURS
+            when = f"in {hours:.1f}h" if hours >= 0 else f"{abs(hours):.1f}h ago"
+
+            print(f"{row.home_team} vs {row.away_team}  ({row.competition_name}, fixture {row.fixture_id})")
+            print(f"  kickoff {row.kickoff_at} ({when}), status '{row.status}'")
+
+            if row.external_api_football_id is None:
+                print("  -> BLOCKED: no external_api_football_id, so the lineup check can never look it up.\n")
+                continue
+
+            if row.lineup_rows == 0:
+                if not in_window:
+                    print(
+                        f"  -> STATE 1: outside the check window, so it was never looked up.\n"
+                        f"     Running the workflow again now will not help. It becomes eligible "
+                        f"{max(hours - MATCHDAY_LOOKAHEAD_HOURS, 0):.1f}h from now.\n"
+                    )
+                else:
+                    print(
+                        "  -> STATE 2: in the window, but API-Football has published nothing yet.\n"
+                        "     Normal until roughly an hour before kickoff. Nothing is broken; run it again later.\n"
+                    )
+                continue
+
+            print(f"  lineup: {row.lineup_rows} players ({row.starters} starting)")
+            if row.predicted_at is None:
+                print("  -> STATE 3: lineup captured, but this fixture has NO prediction at all. Run app.train.\n")
+                continue
+
+            # The lineup has no timestamp of its own, so "was the prediction
+            # made with it?" is inferred from the check that actually
+            # matters downstream: a lineup-aware run drops unnamed players,
+            # so the scorer-pick count should not exceed the squad size.
+            print(f"  predicted_at {row.predicted_at}, {row.scorer_picks} scorer picks")
+            if row.scorer_picks > row.lineup_rows:
+                print(
+                    "  -> STATE 3: predictions predate the lineup. There are more scorer picks than\n"
+                    "     players in the squad, which only happens when allocate_team_goals ran\n"
+                    "     WITHOUT the confirmed squad. Re-run app.train (Daily data refresh) to apply it.\n"
+                )
+            else:
+                print(
+                    "  -> STATE 4: lineup captured and predictions look lineup-aware.\n"
+                    "     If it still isn't on screen, the problem is the API or the frontend, not the data.\n"
+                )
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

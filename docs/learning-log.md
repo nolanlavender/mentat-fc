@@ -6332,3 +6332,171 @@ split was silently measuring nothing. Both are now asserted against.
 
 Neither would have been visible from reading the code, and both would have
 made the first production run quietly wrong rather than loudly broken.
+
+## 2026-08-21 -- A log line that could not answer its own question
+
+"Ran the matchday check, the lineup still isn't showing." The log said:
+
+```
+Matchday lineups: checked 1 fixture(s) kicking off soon, 0 had a confirmed lineup.
+```
+
+That message is useless, and worse than useless, because it reads like an
+answer. `seedTodaysLineups`' query had `NOT EXISTS (SELECT 1 FROM
+fixture_lineups ...)` -- so **a fixture whose lineup landed successfully is
+excluded from the very message you would read to find out what happened.**
+"checked 1, 0 confirmed" is identical whether the fixture you care about
+was the one checked, was already captured, or was never in the window.
+
+Three completely different situations, one indistinguishable sentence. The
+actual answer turned out to be timing (kickoff 19:00 UTC, checked at 18:24,
+so T-36min when lineups land at roughly T-60min) -- but I could not have
+known that from the log, and neither could anyone else.
+
+Fixed by making the log say what it did: per-fixture name, how far from
+kickoff, whether anything was published, plus a count of in-window fixtures
+skipped *because they already had a lineup*, and an explicit note when
+nothing was in the window at all. `app.diagnose_lineups` covers the rest.
+
+**The general lesson: a summary that aggregates away the thing being asked
+about is not a summary, it is a disguise.** Counting is the cheap part;
+the work is making sure the count answers a question someone will actually
+have at 3am.
+
+### A real bug found by reading that code
+
+```ts
+return { checked: announced, announced, stoppedOnBudget: true };
+```
+
+`checked` set to `announced` on the budget-exhausted path -- so running out
+of budget reported *zero fixtures examined* whenever nothing had been
+confirmed yet, understating the work done and hiding that fixtures had been
+looked at at all. Never fired here, would have been baffling when it did.
+
+### Restoring the retrain, properly this time
+
+The other half of the report: even once the lineup lands, the scorer odds
+don't change, because `app.train` was removed from this workflow during the
+2026-08-20 Actions billing incident. Capturing a lineup and acting on it
+became two things and only the first was automated.
+
+The reverted version ran `app.train` unconditionally, hourly: three model
+fits plus ~77,000 unbatched `player_goal_predictions` upserts, about twenty
+minutes, twenty-four times a day. That comment ended by naming what a safe
+version would need -- "only recomputing predictions for fixtures whose
+confirmed lineup actually changed." That now exists:
+
+1. The retrain step is **conditional** on the check having confirmed
+   something (the script writes `announced=N` to `GITHUB_OUTPUT`). Most
+   hours confirm nothing and cost one DB query, exactly as before.
+2. When it does run, `app.apply_lineups` reuses `train.predict_for_competition`
+   with `only_with_confirmed_lineups=True` -- a handful of fixtures, not the
+   ~900 whose predictions a lineup cannot possibly have changed.
+
+Worth being explicit about the reasoning, because there was a tempting
+wrong version available: the repo is public now, so Actions minutes are
+free, and "just put it back" would have worked. It would also have been
+wrong. Twenty minutes of pointless hourly work was wrong when it was
+billed and is still wrong when it is not -- the bill was the symptom. This
+went back only once it was *fixed*, not once it became affordable.
+
+`apply_lineups` deliberately calls `train`'s own loop rather than a fast
+copy. A separate implementation would be free to drift, and then the hourly
+job and the daily one would quietly disagree about the same fixture, which
+is a much worse failure than being slow.
+
+## 2026-08-21 -- Two columns, both about a distinction the data couldn't make
+
+### `fixture_lineups.pre_match_captured_at`
+
+Prompted by a question I had answered too confidently. Asked whether the
+lineup we store is the pre-game one, I said yes -- correctly, as far as it
+went. Both writers call API-Football's `/fixtures/lineups`, which returns
+the announced XI plus bench and does *not* morph into "who actually played"
+(minutes come from a separate endpoint). So the content is pre-game either
+way.
+
+What I missed on the first pass is that **content being identical is not
+the same as the information being available**. Two jobs write this table:
+
+| job | fixtures | timing |
+|---|---|---|
+| `seedTodaysLineups` | `status != 'finished'`, ±3h of kickoff | pre-match |
+| `backfillLineupsForCompetitionSeason` | `status = 'finished'` | post-match |
+
+Nothing recorded which one wrote a row. That matters twice over. The
+availability adjustment and starter-vs-bench scorer odds are only worth
+anything if the lineup arrived before kickoff. And -- the one that actually
+stings -- `app.evaluate_scorers`' "confirmed lineup (matchday)" mode runs on
+**finished** fixtures, whose rows came from the post-match backfill. Written
+that same day, it silently assumed we would have had every one of those
+lineups in time.
+
+**That is an optimism bias aimed exactly at the fixtures where pre-match
+capture fails**, which is the worst place for one, and it looked completely
+correct in code. It joins the list of measurement bugs this project keeps
+producing: none of them were visible from reading, all of them flattered the
+result.
+
+Not corrected for, because there is nothing to correct with -- every
+historical row predates the column. The backtest now *reports* pre-match
+coverage instead, so a run at 0% is legible as a ceiling on the matchday
+mode rather than a measurement of it.
+
+Small thing worth stating: the upsert is `COALESCE(existing, incoming)`, the
+opposite order from a normal merge. Once a lineup has been captured
+pre-match that is permanent, and the post-match backfill re-upserting the
+same rows must not overwrite it with NULL. Verified against a real Postgres
+by running both upserts in sequence rather than by reading the SQL.
+
+### `bet_legs.line`, and where "free text avoids migrations" runs out
+
+`bet_legs.market`/`selection` are deliberately free text so a new bet type
+never needs a migration. That was a good decision and it still is -- for
+markets whose selection is a single label (`home`, a player id).
+
+A spread breaks the pattern in a way worth naming: the **same** market and
+the **same** selection settle differently depending on a number. `home` at
+-2.5 and `home` at -0.5 are different bets. The tempting move is to keep the
+schema untouched and encode it as `home -2.5`, which works right up until
+the settlement SQL has to parse it -- and there a formatting slip is a
+**mis-graded bet**, not a validation error. `fixture_odds` had already
+reached this conclusion and has the identical column.
+
+The general shape: free-text extensibility holds while the new thing is
+another *value* of an existing dimension, and breaks when it adds a
+dimension.
+
+Spreads also introduced the first market here that can genuinely **push**.
+A whole line (Arsenal -2, winning by exactly 2) ties, settles `void`, and
+the existing result derivation already excludes voids from the parlay
+product -- so the machinery was there, unexercised. Half lines cannot tie,
+which is the whole reason books quote them. Quarter lines are refused
+rather than rounded: settling one means grading a leg half-won, which
+`won`/`lost`/`void` cannot express, and silently rounding would settle a
+bet the user didn't place.
+
+Graded by extracting the real settlement SQL from the source and running it
+against real rows on a throwaway Postgres -- all four legs on Arsenal 3-0
+Coventry, including both push directions and a match_winner regression
+check. Reading that CASE expression and believing it would have been the
+same mistake this log keeps recording.
+
+### The spread's model probability is reconstructed, and says so
+
+`model_predictions` stores three match-winner probabilities and two lambdas
+-- not the scoreline grid a spread needs. So the cover probability is
+rebuilt from two independent Poissons, which omits the Dixon-Coles low-score
+correction (see `docs/models.md` §2).
+
+Checked against the live Arsenal-Coventry numbers (1.76-0.89): reconstructed
+57.93% vs 58.18% stored for the home win, 18.77% vs 19.08% away. Under a
+percentage point, and much of even that is the 2dp rounding on the displayed
+lambdas rather than the missing tau. Good enough to be indicative, labelled
+as such in the code, and exactly fixable by storing rho alongside the
+prediction if it ever matters.
+
+Nice confirmation the maths is right: -1 and -1.5 return the identical cover
+probability (both need a 2+ win). The difference between them isn't the
+chance of covering, it's that -1 can push and refund.

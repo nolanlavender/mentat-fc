@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { assertValidCreateInput, createBet, legModelProbability, rowsToBet, type BetLegRow } from './bets.service.js';
+import {
+  assertValidCreateInput,
+  assertValidLeg,
+  createBet,
+  legModelProbability,
+  rowsToBet,
+  spreadCoverProbability,
+  SPREAD_MARKET,
+  type BetLegRow,
+  type CreateLegInput,
+} from './bets.service.js';
 import { AppError } from '../lib/errors.js';
 
 // Only the pure aggregation/validation logic in bets.service.ts is under
@@ -293,5 +303,89 @@ describe('assertValidCreateInput (via createBet)', () => {
         oddsOverrideDecimal: 3.75,
       }),
     ).not.toThrow();
+  });
+});
+
+describe('spread legs', () => {
+  describe('validation', () => {
+    const leg = (over: Partial<CreateLegInput> = {}): CreateLegInput => ({
+      fixtureId: 1,
+      market: SPREAD_MARKET,
+      selection: 'home',
+      line: -2.5,
+      oddsDecimal: 2.1,
+      ...over,
+    });
+
+    it('accepts a half line', () => {
+      expect(() => assertValidLeg(leg())).not.toThrow();
+    });
+
+    it('accepts a whole line, which can push', () => {
+      expect(() => assertValidLeg(leg({ line: -2 }))).not.toThrow();
+    });
+
+    it('accepts a positive line for the underdog', () => {
+      expect(() => assertValidLeg(leg({ selection: 'away', line: 2.5 }))).not.toThrow();
+    });
+
+    it('rejects a quarter line rather than mis-grading it', () => {
+      // A quarter line splits the stake across two lines, which a single
+      // won/lost/void result cannot express. Better to refuse than to
+      // round it into a bet the user did not place.
+      expect(() => assertValidLeg(leg({ line: -2.25 }))).toThrow(/quarter/i);
+    });
+
+    it('rejects a missing line', () => {
+      expect(() => assertValidLeg(leg({ line: undefined }))).toThrow(/needs a line/i);
+    });
+
+    it("rejects a selection that isn't a side", () => {
+      expect(() => assertValidLeg(leg({ selection: 'Arsenal' }))).toThrow(/'home' or 'away'/);
+    });
+
+    it('leaves other markets free to omit a line', () => {
+      expect(() =>
+        assertValidLeg({ fixtureId: 1, market: 'match_winner', selection: 'home', oddsDecimal: 1.8 }),
+      ).not.toThrow();
+    });
+  });
+
+  describe('spreadCoverProbability', () => {
+    it('a big favourite covers a small handicap more often than a large one', () => {
+      const small = spreadCoverProbability(2.5, 0.6, -0.5);
+      const large = spreadCoverProbability(2.5, 0.6, -3.5);
+      expect(small).toBeGreaterThan(large);
+    });
+
+    it('is a probability, not a truncated sum', () => {
+      // The grid stops at 10 goals a side, so without renormalising this
+      // drifts below 1 for high-scoring fixtures.
+      const cover = spreadCoverProbability(3.2, 2.8, -100);
+      expect(cover).toBeGreaterThanOrEqual(0);
+      expect(cover).toBeLessThanOrEqual(1);
+      expect(spreadCoverProbability(3.2, 2.8, 100)).toBeCloseTo(1, 6);
+    });
+
+    it('mirrors: one side covering -x is the other failing to cover +x, plus the push', () => {
+      const homeCovers = spreadCoverProbability(1.9, 1.1, -1);
+      const awayCovers = spreadCoverProbability(1.1, 1.9, 1);
+      const push = 1 - homeCovers - awayCovers;
+      expect(push).toBeGreaterThan(0); // a whole line must leave room for a tie
+      expect(push).toBeLessThan(1);
+    });
+
+    it('a half line leaves no push', () => {
+      const homeCovers = spreadCoverProbability(1.9, 1.1, -1.5);
+      const awayCovers = spreadCoverProbability(1.1, 1.9, 1.5);
+      expect(homeCovers + awayCovers).toBeCloseTo(1, 6);
+    });
+
+    it('line 0 is draw-no-bet: cover + cover + draw = 1', () => {
+      const homeWins = spreadCoverProbability(1.76, 0.89, 0);
+      const awayWins = spreadCoverProbability(0.89, 1.76, 0);
+      expect(homeWins + awayWins).toBeLessThan(1); // the draw is the push
+      expect(homeWins).toBeGreaterThan(awayWins);
+    });
   });
 });
