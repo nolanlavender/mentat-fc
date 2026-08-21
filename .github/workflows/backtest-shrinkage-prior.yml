@@ -1,0 +1,55 @@
+name: Backtest shrinkage prior (temporary)
+
+# Temporary A/B, delete once there's a verdict (along with
+# app.evaluate's SHRINK_TOWARD_JOINT_OVERRIDE support).
+#
+# The question: shrinkage currently pulls every team toward LEAGUE
+# AVERAGE. For the case it was added to fix -- a club relegated into this
+# competition with almost no matches played here -- that's a poor prior,
+# because three seasons of top-flight results say they're well above this
+# division's average. Pulling them to 1.0 trades an overrating for an
+# underrating.
+#
+# The alternative pulls each team toward the JOINT fit's rating for them
+# instead (re-centred onto this competition's scale), which is effectively
+# "everything we know about this club, expressed on a comparable scale".
+#
+# Runs app.evaluate both ways in parallel -- one job per setting, each its
+# own collapsible section. Compare the Brier/log-loss per competition. A
+# synthetic check already showed the ordering is plausible; this is the
+# part that says whether it actually predicts better.
+#
+# app.evaluate is read-only, so both jobs can share the real DATABASE_URL
+# safely.
+#
+# Actions > "Backtest shrinkage prior (temporary)" > Run workflow.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: 'toward league average (current)'
+            value: '0'
+          - label: 'toward joint fit (candidate)'
+            value: '1'
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SHRINK_TOWARD_JOINT_OVERRIDE: ${{ matrix.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+
+      - name: Backtest, shrinking ${{ matrix.label }}
+        working-directory: model-service
+        run: python -m app.evaluate

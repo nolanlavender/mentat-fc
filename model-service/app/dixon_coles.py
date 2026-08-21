@@ -68,7 +68,13 @@ class DixonColesModel:
     rho: float = 0.0
     fitted_on: int = 0  # match count, kept for reporting/sanity-checking, not used in the math
 
-    def fit(self, matches: pd.DataFrame, half_life_days: float = 180, shrinkage: float = 0.0) -> None:
+    def fit(
+        self,
+        matches: pd.DataFrame,
+        half_life_days: float = 180,
+        shrinkage: float = 0.0,
+        prior_model: "DixonColesModel | None" = None,
+    ) -> None:
         """
         matches needs columns: kickoff_date, home_team, away_team, home_score, away_score.
         Fits by maximizing the weighted Dixon-Coles log-likelihood via scipy.
@@ -97,6 +103,24 @@ class DixonColesModel:
         MAP-with-a-Gaussian-prior behavior, just applied to this fit's own
         log-space parameters instead of a linear model's coefficients.
 
+        prior_model changes WHAT that penalty pulls toward. Left as None,
+        every team is pulled toward league average, which is the right
+        default when nothing better is known -- but it is a genuinely poor
+        prior for the exact case shrinkage was added to fix. A club
+        relegated into this competition has three seasons of top-flight
+        results saying they are well ABOVE this division's average, and
+        shrinking them to 1.0 throws all of that away: it trades an
+        overrating for an underrating rather than fixing the estimate.
+
+        Passing the joint fit (which spans every competition and is
+        calibrated across divisions by the cup ties that connect them)
+        instead pulls each team toward what all of their data implies,
+        expressed on this competition's own scale. A team with plenty of
+        matches here is barely moved either way; a team with almost none
+        lands near their cross-competition strength rather than near the
+        league mean. Standard hierarchical / partial-pooling behaviour --
+        the shrinkage target becomes team-specific instead of global.
+
         Not yet the deployed default -- see SHRINKAGE's own comment in
         app.evaluate for why this needs a real backtest before promoting
         a candidate value to app.train, the same process
@@ -105,6 +129,33 @@ class DixonColesModel:
         self.teams = sorted(set(matches["home_team"]) | set(matches["away_team"]))
         n = len(self.teams)
         team_index = {team: i for i, team in enumerate(self.teams)}
+
+        # Shrinkage targets, in the same log space the optimizer works in.
+        # All zeros (league average) unless a prior model is supplied.
+        prior_log_attack = np.zeros(n)
+        prior_log_defense = np.zeros(n)
+        if prior_model is not None:
+            known = [t for t in self.teams if t in prior_model.attack]
+            if known:
+                # Re-centre onto THIS competition's scale before using it as
+                # a target. The prior model centred its own attack mean to 0
+                # across its whole (much larger) team set, so its raw values
+                # are not comparable here -- a Championship side's joint-fit
+                # attack is below the joint mean, but that says nothing about
+                # where they sit among Championship teams. Shifting by the
+                # mean over just this competition's teams answers the
+                # question that actually matters: how strong is this team
+                # RELATIVE TO the others in this fit.
+                offset = float(np.mean([log(prior_model.attack[t]) for t in known]))
+                for team in known:
+                    i = team_index[team]
+                    # attack -= offset and defense += offset together, which
+                    # is a move along the (attack + c, defense - c) ridge the
+                    # model is invariant to -- so this re-centres the prior
+                    # without distorting what it actually claims about any
+                    # team's strength.
+                    prior_log_attack[i] = log(prior_model.attack[team]) - offset
+                    prior_log_defense[i] = log(prior_model.defense[team]) + offset
 
         as_of = matches["kickoff_date"].max()
         weights = matches["kickoff_date"].apply(lambda d: time_weight(d, as_of, half_life_days)).to_numpy()
@@ -148,10 +199,17 @@ class DixonColesModel:
             nll = -np.sum(weights * log_likelihood)
 
             if shrinkage > 0:
-                nll += shrinkage * (np.sum(log_attack**2) + np.sum(log_defense**2))
+                nll += shrinkage * (
+                    np.sum((log_attack - prior_log_attack) ** 2) + np.sum((log_defense - prior_log_defense) ** 2)
+                )
             return nll
 
         initial_guess = np.zeros(2 * n + 2)
+        # Start from the prior rather than flat zeros when there is one --
+        # it is already a better guess than "everyone is average", so the
+        # optimizer starts closer to the answer.
+        initial_guess[:n] = prior_log_attack
+        initial_guess[n : 2 * n] = prior_log_defense
         initial_guess[2 * n] = log(1.3)  # modest home-advantage starting point
 
         result = minimize(negative_log_likelihood, initial_guess, method="L-BFGS-B")

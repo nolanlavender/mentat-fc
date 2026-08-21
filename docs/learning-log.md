@@ -5658,3 +5658,71 @@ has real coverage, the natural experiment is a
 `SHOTS_ON_TARGET_BLEND_WEIGHT` was -- and the honest possibility that it
 adds nothing beyond shots-on-target is a real outcome worth measuring,
 not assuming away.
+
+## 2026-08-21 -- Shrinking toward an informative prior, not the league mean
+
+Asked directly, and it's the right question: "could we not add a
+coefficient and use prior data or something to give a better prediction?"
+
+**The gap it identifies.** The shrinkage shipped earlier pulls every
+team's attack/defense toward *league average*. That's a reasonable
+default when nothing better is known, but it's a genuinely poor prior for
+the exact case shrinkage was added to fix. West Ham, relegated into the
+Championship, have three seasons of Premier League results saying they
+are well ABOVE that division's average. Shrinking them to 1.0 throws all
+of it away -- it trades an overrating for an underrating rather than
+actually improving the estimate.
+
+**The better prior already existed.** The joint fit spans all three
+competitions and is calibrated across divisions by the cup ties that
+connect them, so a relegated club's joint rating is effectively "their
+top-flight strength expressed on a scale comparable to this division."
+`DixonColesModel.fit()` now takes an optional `prior_model`, and the L2
+penalty becomes `(log_attack - prior)^2` instead of `log_attack^2`.
+Textbook hierarchical / partial pooling: the shrinkage target goes from
+global to team-specific. A team with plenty of matches here is barely
+moved either way; a team with almost none now lands near their
+cross-competition strength instead of near the league mean.
+
+**The fiddly part is re-centring, and getting it wrong would be silent.**
+The joint fit centres its own attack mean to 0 across ~800 teams, so its
+raw values mean nothing inside a 25-team Premier League fit -- every
+Championship side sits below the joint mean, which says nothing about
+where they rank among Championship sides. The prior is therefore shifted
+by the mean over *just this competition's* teams before use. Crucially
+that shift is applied as `attack -= offset` **and** `defense += offset`
+together, which is a move along the `(attack + c, defense - c)` ridge the
+model is invariant to -- so it re-centres the prior without distorting
+what it actually claims about any team. Teams absent from the prior keep
+a target of 0, i.e. they fall back to plain league-average shrinkage,
+which is the honest default when there's genuinely no information.
+
+**Synthetic check on the real shape** (a strong top-flight club relegated
+into a weaker division, one match played there):
+
+| shrinkage target | fitted attack | P(beat a mid-table side) |
+|---|---|---|
+| none | 2.596 | 98.2% |
+| league average | 1.216 | 63.4% |
+| joint fit (prior) | 1.835 | 84.3% |
+
+The 98.2% reproduces the production pathology almost exactly (the real
+one was 99.49%). What the middle row shows is the thing worth
+remembering: plain shrinkage *does* fix the runaway number, but plausibly
+overshoots in the other direction. The prior lands between them, which is
+where a recently-relegated side belongs.
+
+Worth stating plainly: that ordering is *plausible*, not *validated*. A
+synthetic fixture built to have a hierarchy will show a hierarchy. Only a
+backtest against held-out real matches can say whether it predicts
+better, so this ships as `SHRINK_TOWARD_JOINT` (default False --
+production behaviour unchanged) with a temporary A/B workflow, exactly
+the same sandbox-then-promote arc `HALF_LIFE_DAYS`,
+`SHOTS_ON_TARGET_BLEND_WEIGHT` and `SHRINKAGE` each went through. It is
+entirely possible the backtest says league-average shrinkage is already
+good enough, and that's a real result.
+
+One structural change fell out of this: `app.evaluate` now fits the joint
+model FIRST rather than last, since the two single-competition fits may
+now depend on it as their prior. The joint fit itself never takes a prior
+-- there is nothing broader to pull it toward.
