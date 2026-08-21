@@ -65,168 +65,99 @@ def load_finished_matches(conn: psycopg.Connection, competition_names: list[str]
     return _query_df(conn, query, {"competition_names": competition_names})
 
 
-def estimate_shot_location_conversion(matches: pd.DataFrame) -> tuple[float, float] | None:
+# Column pairs (home, away) for each shot signal the goal proxy can learn
+# from. Location and shots-on-target are NOT alternatives, which the
+# 2026-08-21 backtest made clear the hard way: inside-box + outside-box
+# sums to TOTAL shots, so using location alone silently discards the
+# on-target quality filter -- a blocked shot from six yards counts the
+# same as one that beat the keeper. Regressing on all three lets the fit
+# keep both the location information and the accuracy information.
+SHOT_SIGNALS: dict[str, tuple[str, str]] = {
+    "inside_box": ("home_shots_inside_box", "away_shots_inside_box"),
+    "outside_box": ("home_shots_outside_box", "away_shots_outside_box"),
+    "shots_on_target": ("home_shots_on_target", "away_shots_on_target"),
+}
+
+
+def estimate_goal_weights(matches: pd.DataFrame, signals: list[str]) -> dict[str, float] | None:
     """
-    Learns how much a shot from inside the box is worth versus one from
-    outside, in goals, from `matches` itself.
+    Learns how many goals each shot signal is worth, by least squares on
+    `matches` itself: goals ~= sum(signal * weight), no intercept.
 
-    The awkward part this solves: the data records a team's goals and its
-    shot counts by location, but never WHICH shots became goals. So the
-    two conversion rates can't be read off directly the way
-    blend_shots_on_target_into_scores reads off a single pooled ratio.
-    They can be estimated though -- across many matches, goals is
-    approximately `inside * rate_inside + outside * rate_outside`, which
-    is an ordinary least-squares problem with two unknowns and one row per
-    team-match. That is the whole "add a coefficient" idea, and it is what
-    makes this different from just counting shots: the model learns the
-    relative value of location instead of being told it.
+    Generalises estimate_shot_location_conversion to any combination of the
+    signals in SHOT_SIGNALS. The reason it needs to generalise: the data
+    never records WHICH shots became goals, so no per-signal conversion
+    rate can be read off a column directly -- but across many team-matches
+    the weights are identifiable by regression, and letting one regression
+    see all the signals at once is strictly more information than picking
+    one and discarding the rest.
 
-    No intercept, deliberately: a team that takes zero shots scores zero
-    goals, and fitting a constant would let the proxy hand out goals for
-    nothing, which would flatten the differences between teams that the
-    fit is supposed to see.
+    Only rows where EVERY requested signal is present are used, so the
+    weights are estimated on a consistent sample rather than a different
+    subset per column.
 
-    Returns None when there isn't enough real data to estimate from, so
-    callers can fall back rather than blend on a meaningless coefficient.
-    Both rates are clipped at 0 -- a negative conversion rate is not a
-    real quantity, and least squares can produce one from noise.
-
-    Precision, measured against synthetic data with known rates (0.130
-    inside, 0.035 outside, Poisson noise, 12 trials of 600 team-matches):
-    both estimates are unbiased (recovered 0.1291 and 0.0367 on average),
-    but the OUTSIDE rate is about twice as noisy (sd 0.0123 vs 0.0065).
-    That is expected -- outside-box shots are fewer, and without an
-    intercept the two columns are somewhat collinear, so the pair trades
-    off against each other run to run. Do not read a single run's
-    individual rates as precise facts about football.
-
-    What survives that noise is the thing callers actually use: the
-    fitted combination. Across the same trials the resulting proxy
-    correlated 0.997 with the true expected goals and sat within 0.036
-    goals of it on average -- because least squares optimises the
-    combination, not the interpretability of either coefficient alone.
+    Returns None when there isn't enough data, or when the design is
+    rank-deficient (e.g. a signal that is constant, or two that are exact
+    duplicates) -- inventing weights from a degenerate system would be
+    worse than declining to blend. Weights are clipped at 0: a negative
+    goals-per-shot rate is not a real quantity, though note that with
+    collinear signals (shots on target is a SUBSET of total shots) least
+    squares can legitimately want one, so a clipped weight means "this
+    signal added nothing once the others were accounted for", not "shots
+    prevent goals".
     """
-    inside = pd.concat([matches["home_shots_inside_box"], matches["away_shots_inside_box"]]).astype(float)
-    outside = pd.concat([matches["home_shots_outside_box"], matches["away_shots_outside_box"]]).astype(float)
+    stacked: dict[str, pd.Series] = {}
+    for name in signals:
+        home_column, away_column = SHOT_SIGNALS[name]
+        stacked[name] = pd.concat([matches[home_column], matches[away_column]]).astype(float)
     goals = pd.concat([matches["home_score"], matches["away_score"]]).astype(float)
 
-    usable = inside.notna() & outside.notna() & goals.notna()
-    # Two coefficients from a handful of rows would be noise dressed up as
-    # a rate; this floor is a sanity guard, not a tuned value.
+    usable = goals.notna()
+    for series in stacked.values():
+        usable &= series.notna()
     if usable.sum() < 50:
         return None
 
-    design = np.column_stack([inside[usable].to_numpy(), outside[usable].to_numpy()])
-    # Both columns all-zero (or collinear) leaves the system rank-deficient
-    # -- lstsq would still return something, but it wouldn't mean anything.
-    if np.linalg.matrix_rank(design) < 2:
+    design = np.column_stack([stacked[name][usable].to_numpy() for name in signals])
+    if np.linalg.matrix_rank(design) < len(signals):
         return None
 
     coefficients, *_ = np.linalg.lstsq(design, goals[usable].to_numpy(), rcond=None)
-    rate_inside, rate_outside = (float(max(c, 0.0)) for c in coefficients)
-    if rate_inside <= 0 and rate_outside <= 0:
+    weights = {name: float(max(c, 0.0)) for name, c in zip(signals, coefficients)}
+    if all(w <= 0 for w in weights.values()):
         return None
-    return rate_inside, rate_outside
+    return weights
 
 
-def blend_shot_location_into_scores(matches: pd.DataFrame, blend_weight: float) -> pd.DataFrame:
+def blend_learned_shot_proxy_into_scores(matches: pd.DataFrame, blend_weight: float, signals: list[str]) -> pd.DataFrame:
     """
-    Same idea as blend_shots_on_target_into_scores, but the proxy is built
-    from WHERE the shots came from rather than how many were on target.
+    Replaces each side's score with a blend of the real score and a
+    goals-scaled proxy built from `signals`, using weights learned by
+    estimate_goal_weights.
 
-    Why that should be better in principle: shots on target treats a
-    tap-in and a speculative 30-yarder as the same event, and they are not
-    remotely the same event. Weighting each side's shots by a learned
-    per-location conversion rate (see estimate_shot_location_conversion)
-    produces a crude expected-goals figure instead of a shot count --
-    which is the closest this project can get to real xG, since no data
-    source available here actually provides it.
-
-    "Should be better in principle" is doing real work in that sentence:
-    it is a hypothesis, and the point of putting this behind a weight is
-    to measure it against the shots-on-target blend rather than assume it.
-
-    Falls back to the untouched real score wherever a side has no shot-
-    location data -- coverage is genuinely partial, since these columns
-    are backfilled per fixture from API-Football while the rest of
-    fixture_team_stats comes from the CSV.
+    Falls back to the untouched real score for any side missing one of the
+    requested signals -- never invents a value, same contract as every
+    other blend here.
     """
     blended = matches.copy()
-    # float first, for the same strict-dtype reason documented in
-    # blend_shots_on_target_into_scores below.
-    for column in ("home_score", "away_score", "home_shots_inside_box", "away_shots_inside_box",
-                   "home_shots_outside_box", "away_shots_outside_box"):
-        blended[column] = blended[column].astype(float)
+    blended["home_score"] = blended["home_score"].astype(float)
+    blended["away_score"] = blended["away_score"].astype(float)
 
-    rates = estimate_shot_location_conversion(blended)
-    if rates is None or blend_weight == 0:
+    weights = estimate_goal_weights(matches, signals)
+    if weights is None or blend_weight == 0:
         return blended
-    rate_inside, rate_outside = rates
 
-    for score_column, inside_column, outside_column in (
-        ("home_score", "home_shots_inside_box", "home_shots_outside_box"),
-        ("away_score", "away_shots_inside_box", "away_shots_outside_box"),
-    ):
-        available = blended[inside_column].notna() & blended[outside_column].notna()
-        proxy = blended.loc[available, inside_column] * rate_inside + blended.loc[available, outside_column] * rate_outside
-        blended.loc[available, score_column] = (
-            (1 - blend_weight) * blended.loc[available, score_column] + blend_weight * proxy
-        )
-    return blended
-
-
-def blend_goal_proxies_into_scores(
-    matches: pd.DataFrame, shots_on_target_weight: float, shot_location_weight: float
-) -> pd.DataFrame:
-    """
-    Applies both goal proxies with an explicit precedence, so that partial
-    coverage of one never leaves a match with LESS smoothing than it would
-    have had otherwise.
-
-    Precedence per side, per match:
-      1. shot location, where inside/outside box counts exist
-      2. shots on target, where those exist but location doesn't
-      3. the real score, untouched, where neither exists
-
-    Why this needs to be one function rather than two calls chained
-    together. A real methodological bug found 2026-08-21, in a comparison
-    that had already produced a confident-looking verdict: running the
-    location blend at weight 1.0 over a frame where only ~48% of matches
-    had location data meant the other ~52% kept their RAW goal counts,
-    while the configuration it was being compared against had the
-    shots-on-target blend applied to every row. The candidate was handicapped
-    on half the sample, and the "shot location is worse in the Championship"
-    result that came out of it was partly measuring coverage, not signal.
-
-    The second trap, avoided here: both calibrations are estimated from the
-    ORIGINAL scores. Chaining the two blends naively estimates the location
-    conversion rates from already-blended pseudo-goals, which is fitting a
-    rate against a number that is no longer a goal count.
-    """
-    rates = estimate_shot_location_conversion(matches)
-
-    # Baseline: shots-on-target wherever it's available. Rows that also have
-    # location data get overwritten below.
-    blended = blend_shots_on_target_into_scores(matches, shots_on_target_weight)
-    if rates is None or shot_location_weight == 0:
-        return blended
-    rate_inside, rate_outside = rates
-
-    for score_column, inside_column, outside_column in (
-        ("home_score", "home_shots_inside_box", "home_shots_outside_box"),
-        ("away_score", "away_shots_inside_box", "away_shots_outside_box"),
-    ):
-        inside = matches[inside_column].astype(float)
-        outside = matches[outside_column].astype(float)
-        available = inside.notna() & outside.notna()
+    for side, score_column in (("home", "home_score"), ("away", "away_score")):
+        columns = {name: SHOT_SIGNALS[name][0 if side == "home" else 1] for name in signals}
+        available = pd.Series(True, index=matches.index)
+        for column in columns.values():
+            available &= matches[column].notna()
         if not available.any():
             continue
-        proxy = inside[available] * rate_inside + outside[available] * rate_outside
-        # Blended against the ORIGINAL score, not the shots-on-target blend
-        # sitting in `blended` -- location replaces that estimate rather
-        # than compounding with it.
+
+        proxy = sum(matches.loc[available, columns[name]].astype(float) * weights[name] for name in signals)
         original = matches.loc[available, score_column].astype(float)
-        blended.loc[available, score_column] = (1 - shot_location_weight) * original + shot_location_weight * proxy
+        blended.loc[available, score_column] = (1 - blend_weight) * original + blend_weight * proxy
     return blended
 
 

@@ -29,9 +29,8 @@ import numpy as np
 import pandas as pd
 
 from app.data import (
-    blend_shot_location_into_scores,
     blend_shots_on_target_into_scores,
-    estimate_shot_location_conversion,
+    estimate_goal_weights,
     load_closing_match_winner_probabilities,
     load_finished_matches,
 )
@@ -177,28 +176,15 @@ SHRINKAGE: dict[str, float] = {
 # the constant to edit" convention as HALF_LIFE_DAYS.
 SHRINK_TOWARD_JOINT: bool = False
 
-# How much of the fit's "goals" comes from a shot-LOCATION proxy instead
-# of the actual score -- see app.data.blend_shot_location_into_scores.
-#
-# The alternative to SHOTS_ON_TARGET_BLEND_WEIGHT above, not an addition
-# to it: both replace the same thing (the goal count) with a lower-noise
-# proxy, so a run should use one or the other. Shots on target counts
-# shots; this one weights them by where they were taken from, using rates
-# learned from the data, which makes it a crude expected-goals figure
-# rather than a shot count. That SHOULD be the better signal -- a tap-in
-# and a speculative 30-yarder are not the same event -- but "should" is a
-# hypothesis, and the shot-location columns are freshly backfilled, so it
-# needs measuring against the incumbent before anything is promoted.
-#
-# Use app.compare (paired, bootstrapped) rather than eyeballing two
-# app.evaluate runs: the last change that looked like a win on aggregate
-# numbers turned out to be inside the noise floor, which is roughly
-# 0.003 Brier at this test set's size.
-SHOT_LOCATION_BLEND_WEIGHT: dict[str, float] = {
-    "Premier League": 0.0,
-    "Championship": 0.0,
-    "FA Cup": 0.0,
-}
+# Shot location (inside vs outside the box) was tested as an alternative
+# fitting signal on 2026-08-21 and REJECTED -- see docs/learning-log.md.
+# Short version: inside + outside sums to TOTAL shots, so using location
+# means discarding the on-target quality filter, and every goal is by
+# definition an on-target shot. A paired comparison found it measurably
+# WORSE in the Championship and FA Cup and inconclusive in the Premier
+# League, and regressing on all three signals at once drove the location
+# weights to ~0. The columns stay populated; they're just not a better
+# input than shots on target for this.
 
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
@@ -303,11 +289,9 @@ def main() -> None:
         # column had, where a feature looked wired up but touched nothing.
         located = matches["home_shots_inside_box"].notna().sum()
         print(f"Shot-location coverage: {located}/{len(matches)} matches ({located / len(matches):.0%})")
-        rates = estimate_shot_location_conversion(matches)
-        if rates is not None:
-            print(f"  learned conversion: inside-box {rates[0]:.4f} goals/shot, outside-box {rates[1]:.4f}")
-        else:
-            print("  not enough shot-location data to estimate conversion rates yet")
+        weights = estimate_goal_weights(matches, ["inside_box", "outside_box", "shots_on_target"])
+        if weights is not None:
+            print("  learned goals-per-shot: " + ", ".join(f"{k} {v:.4f}" for k, v in weights.items()))
 
         split_idx = int(len(matches) * (1 - TEST_FRACTION))
         cutoff_date = matches.iloc[split_idx]["kickoff_date"]
@@ -335,9 +319,6 @@ def main() -> None:
         pl_train = blend_shots_on_target_into_scores(
             train_matches[train_matches["competition_name"] == "Premier League"], SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]
         )
-        pl_train = blend_shot_location_into_scores(
-            pl_train, SHOT_LOCATION_BLEND_WEIGHT["Premier League"]
-        )
         pl_model = DixonColesModel()
         pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Premier League"], prior_model=prior)
         print(f"Premier League fit on {pl_model.fitted_on} matches, {len(pl_model.teams)} teams, cutoff {cutoff_date}")
@@ -347,9 +328,6 @@ def main() -> None:
 
         championship_train = blend_shots_on_target_into_scores(
             train_matches[train_matches["competition_name"] == "Championship"], SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]
-        )
-        championship_train = blend_shot_location_into_scores(
-            championship_train, SHOT_LOCATION_BLEND_WEIGHT["Championship"]
         )
         championship_model = DixonColesModel()
         championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Championship"], prior_model=prior)
