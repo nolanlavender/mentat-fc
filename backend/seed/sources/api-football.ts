@@ -18,6 +18,7 @@ import {
   clearStaleTeamRoster,
   markFixturesLineupsChecked,
   type FixturePlayerStatsInput,
+  upsertFixtureShotLocation,
 } from '../lib/db.js';
 
 // CONFIRMED 2026-08-15 via `npm run check:lineup-depth` against a real
@@ -758,4 +759,141 @@ export async function seedApiFootballTeamSquadPhotos(
   await clearStaleTeamRoster(pool, teamId, rosterPlayerIds);
 
   return { playersSeen: squad.players.length };
+}
+
+interface ApiFootballStatisticsResponse {
+  response: Array<{
+    team: { id: number };
+    statistics: Array<{ type: string; value: number | string | null }>;
+  }>;
+}
+
+// API-Football reports a stat that genuinely didn't happen as null rather
+// than 0 in some blocks, and as a string in others. Only a real number
+// (or a numeric string) counts as coverage -- see the null-rate reporting
+// in backfillShotLocationForCompetitionSeason for why that distinction
+// matters here specifically.
+function statValue(stats: Array<{ type: string; value: number | string | null }>, type: string): number | null {
+  const raw = stats.find((s) => s.type === type)?.value;
+  if (raw === null || raw === undefined) return null;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Shot location (inside vs outside the penalty area) for one fixture, from
+ * GET /fixtures/statistics. One API call per fixture -- there is no bulk
+ * form of this endpoint, unlike the fixtures endpoint the lineup backfill
+ * uses.
+ *
+ * Returns how many team blocks actually carried a non-null inside-box
+ * number, so the caller can measure real coverage rather than assume it.
+ */
+export async function seedApiFootballShotLocation(
+  pool: Pool,
+  fixture: { fixtureId: number; externalId: number; homeTeamId: number; awayTeamId: number },
+): Promise<{ teamsWritten: number; teamsWithData: number }> {
+  const data = await callApiFootball<ApiFootballStatisticsResponse>(
+    `/fixtures/statistics?fixture=${fixture.externalId}`,
+    `statistics-${fixture.externalId}.json`,
+  );
+
+  let teamsWritten = 0;
+  let teamsWithData = 0;
+  for (const block of data.response ?? []) {
+    // The statistics endpoint identifies teams by API-Football's own id,
+    // which this project deliberately does not use as its primary key --
+    // resolve through the fixture's own home/away ids instead of trusting
+    // a second id space to line up (the same entity-resolution caution
+    // that the players table needed, see docs/erd.md).
+    const externalTeamId = block.team?.id;
+    const localTeamId = await resolveTeamIdByExternalId(pool, externalTeamId);
+    if (localTeamId === null) continue;
+    if (localTeamId !== fixture.homeTeamId && localTeamId !== fixture.awayTeamId) continue;
+
+    const insideBox = statValue(block.statistics ?? [], 'Shots insidebox');
+    const outsideBox = statValue(block.statistics ?? [], 'Shots outsidebox');
+    if (insideBox !== null || outsideBox !== null) teamsWithData += 1;
+
+    await upsertFixtureShotLocation(pool, fixture.fixtureId, localTeamId, localTeamId === fixture.homeTeamId, insideBox, outsideBox);
+    teamsWritten += 1;
+  }
+  return { teamsWritten, teamsWithData };
+}
+
+async function resolveTeamIdByExternalId(pool: Pool, externalId: number | undefined): Promise<number | null> {
+  if (!externalId) return null;
+  const { rows } = await pool.query<{ id: number }>(`SELECT id FROM teams WHERE external_api_football_id = $1`, [externalId]);
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Resumable shot-location backfill for one competition season.
+ *
+ * Oldest fixtures first, deliberately: the open question this data carries
+ * is not "does the endpoint have these fields" (it does, they're
+ * documented) but "are they populated for OLD fixtures, or only recent
+ * ones?" -- a stat that only exists for the current season is close to
+ * useless for a model that fits on three. Going oldest-first means thin
+ * historical coverage shows up in the first handful of calls, which is why
+ * this reports a running null rate instead of finishing quietly and
+ * leaving someone to discover it in a backtest later.
+ *
+ * Resumable the same way the lineup backfill is: it re-queries for
+ * fixtures still missing the columns every run, so stopping on budget (or
+ * crashing) and rerunning picks up where it left off.
+ */
+export async function backfillShotLocationForCompetitionSeason(
+  pool: Pool,
+  competitionSeasonId: number,
+): Promise<{ done: number; remaining: number; withData: number; stoppedOnBudget: boolean }> {
+  const { rows } = await pool.query<{
+    id: number;
+    external_api_football_id: number;
+    home_team_id: number;
+    away_team_id: number;
+  }>(
+    `SELECT f.id, f.external_api_football_id, f.home_team_id, f.away_team_id
+     FROM fixtures f
+     WHERE f.competition_season_id = $1
+       AND f.external_api_football_id IS NOT NULL
+       AND f.status = 'finished'
+       AND NOT EXISTS (
+         SELECT 1 FROM fixture_team_stats fts
+         WHERE fts.fixture_id = f.id AND fts.shots_inside_box IS NOT NULL
+       )
+     ORDER BY f.kickoff_date ASC`,
+    [competitionSeasonId],
+  );
+
+  let done = 0;
+  let withData = 0;
+  for (const row of rows) {
+    try {
+      const result = await seedApiFootballShotLocation(pool, {
+        fixtureId: row.id,
+        externalId: row.external_api_football_id,
+        homeTeamId: row.home_team_id,
+        awayTeamId: row.away_team_id,
+      });
+      done += 1;
+      if (result.teamsWithData > 0) withData += 1;
+    } catch (err) {
+      if (err instanceof BudgetExhaustedError) {
+        return { done, remaining: rows.length - done, withData, stoppedOnBudget: true };
+      }
+      throw err;
+    }
+
+    // Early and often, not just at the end: if the first 25 fixtures of the
+    // oldest season all come back empty, that's the answer to the coverage
+    // question and there's no reason to spend another 2,000 calls finding
+    // out the same thing.
+    if (done % 25 === 0 || done === rows.length) {
+      const pct = done === 0 ? 0 : Math.round((withData / done) * 100);
+      console.log(`  ${done}/${rows.length} fixtures -- ${withData} had shot-location data (${pct}%)`);
+    }
+  }
+
+  return { done, remaining: rows.length - done, withData, stoppedOnBudget: false };
 }

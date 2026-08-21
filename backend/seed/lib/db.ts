@@ -912,6 +912,40 @@ export async function upsertFixture(pool: Pool, f: FixtureInput): Promise<number
   return rows[0].id;
 }
 
+/**
+ * Writes ONLY the shot-location columns, deliberately leaving every other
+ * column on the row untouched.
+ *
+ * That restraint is the whole point: fixture_team_stats is owned by the
+ * football-data.co.uk CSV importer (shots/shots_on_target/corners/fouls/
+ * cards), which is the more complete and trustworthy source for the two
+ * leagues it covers. A blanket upsert from API-Football would overwrite
+ * that CSV data with a second source's numbers, which disagree slightly
+ * on definitions -- so this one touches its own two columns and nothing
+ * else. The INSERT branch only fires for a fixture the CSV never covered
+ * (an FA Cup tie), where the other columns legitimately stay null.
+ *
+ * is_home is required by the table's NOT NULL constraint on the INSERT
+ * path, but is never updated -- an existing row already has it right.
+ */
+export async function upsertFixtureShotLocation(
+  pool: Pool,
+  fixtureId: number,
+  teamId: number,
+  isHome: boolean,
+  shotsInsideBox: number | null,
+  shotsOutsideBox: number | null,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO fixture_team_stats (fixture_id, team_id, is_home, shots_inside_box, shots_outside_box)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (fixture_id, team_id) DO UPDATE SET
+       shots_inside_box = EXCLUDED.shots_inside_box,
+       shots_outside_box = EXCLUDED.shots_outside_box`,
+    [fixtureId, teamId, isHome, shotsInsideBox, shotsOutsideBox],
+  );
+}
+
 export async function upsertFixtureTeamStats(
   pool: Pool,
   fixtureId: number,
