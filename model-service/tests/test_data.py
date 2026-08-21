@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from app.data import (
+    blend_goal_proxies_into_scores,
     blend_shot_location_into_scores,
     blend_shots_on_target_into_scores,
     estimate_shot_location_conversion,
@@ -143,3 +144,58 @@ class TestShotLocationBlend:
         assert (blended.loc[:9, "home_score"] == matches.loc[:9, "home_score"].astype(float)).all()
         # ...while rows that DO have coverage still get blended.
         assert not (blended.loc[10:, "home_score"] == matches.loc[10:, "home_score"].astype(float)).all()
+
+
+class TestCombinedGoalProxies:
+    """
+    Precedence: shot location where available, shots on target where not,
+    real score where neither. Pinned because getting this wrong is silent
+    -- a real 2026-08-21 comparison ran the location blend over a frame
+    with ~48% coverage and left the other half on raw unsmoothed goals,
+    then reported a confident verdict that was partly measuring coverage.
+    """
+
+    @staticmethod
+    def _partial_coverage(n: int = 400):
+        rng = np.random.default_rng(3)
+        inside = rng.integers(2, 14, n).astype(float)
+        outside = rng.integers(1, 10, n).astype(float)
+        sot = rng.integers(1, 12, n)
+        goals = rng.poisson(inside * 0.13 + outside * 0.035)
+        half = n // 2
+        frame = pd.DataFrame({
+            "home_score": goals[:half], "away_score": goals[half:],
+            "home_shots_on_target": sot[:half], "away_shots_on_target": sot[half:],
+            "home_shots_inside_box": inside[:half], "away_shots_inside_box": inside[half:],
+            "home_shots_outside_box": outside[:half], "away_shots_outside_box": outside[half:],
+        })
+        # Half the rows have no location data at all.
+        frame.loc[: half // 2, ["home_shots_inside_box", "home_shots_outside_box"]] = None
+        return frame
+
+    def test_rows_without_location_still_get_shots_on_target(self):
+        # THE regression test: uncovered rows must not silently fall back
+        # to raw goals when the location weight is on.
+        matches = self._partial_coverage()
+        blended = blend_goal_proxies_into_scores(matches, shots_on_target_weight=0.75, shot_location_weight=1.0)
+        uncovered = matches["home_shots_inside_box"].isna()
+        assert not np.allclose(blended.loc[uncovered, "home_score"], matches.loc[uncovered, "home_score"].astype(float))
+
+    def test_rows_with_location_use_the_location_proxy(self):
+        matches = self._partial_coverage()
+        both = blend_goal_proxies_into_scores(matches, shots_on_target_weight=0.75, shot_location_weight=1.0)
+        sot_only = blend_goal_proxies_into_scores(matches, shots_on_target_weight=0.75, shot_location_weight=0.0)
+        covered = matches["home_shots_inside_box"].notna()
+        # Location takes precedence, so covered rows must differ from the
+        # shots-on-target-only result.
+        assert not np.allclose(both.loc[covered, "home_score"], sot_only.loc[covered, "home_score"])
+
+    def test_both_weights_zero_is_an_exact_no_op(self):
+        matches = self._partial_coverage()
+        blended = blend_goal_proxies_into_scores(matches, 0.0, 0.0)
+        assert np.allclose(blended["home_score"], matches["home_score"].astype(float))
+
+    def test_blending_reduces_variance(self):
+        matches = self._partial_coverage()
+        blended = blend_goal_proxies_into_scores(matches, 0.75, 1.0)
+        assert blended["home_score"].var() < matches["home_score"].astype(float).var()

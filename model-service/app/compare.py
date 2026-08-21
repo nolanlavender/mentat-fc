@@ -30,7 +30,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from app.data import blend_shot_location_into_scores, blend_shots_on_target_into_scores, load_finished_matches
+from app.data import blend_goal_proxies_into_scores, load_finished_matches
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.evaluate import (
@@ -51,20 +51,24 @@ from app.evaluate import (
 # generic. Keep the labels honest -- they're what the verdict is
 # reported against.
 #
-# Current question (2026-08-21): the shot-location proxy has just been
-# backfilled. Is weighting shots by WHERE they were taken a better
-# fitting signal than counting shots on target? They are alternatives,
-# not complements -- both replace the goal count with a lower-noise
-# proxy -- so B turns the incumbent off and the candidate on.
-A_LABEL = "shots on target (current)"
-B_LABEL = "shot location (candidate)"
+# Current question (2026-08-21): the shot-location proxy has been
+# backfilled. Where it exists, is weighting shots by WHERE they were
+# taken better than counting shots on target?
+#
+# Note what B is, because the first version of this comparison got it
+# wrong and produced a confident, misleading verdict. B is NOT "location
+# instead of shots on target" -- location coverage is only ~48%, so that
+# configuration left half the matches with raw unsmoothed goals while A
+# had shots-on-target smoothing everywhere, handicapping B on half the
+# sample. B is "A, upgraded to location on the rows that have it", which
+# is both the fair comparison and the only sane production design.
+A_LABEL = "shots on target everywhere (current)"
+B_LABEL = "shot location where available, shots on target elsewhere"
 
 
 def _config(competition: str, use_shot_location: bool) -> tuple[float, float]:
     """Returns (shots_on_target_weight, shot_location_weight)."""
-    if use_shot_location:
-        return 0.0, 1.0
-    return SHOTS_ON_TARGET_BLEND_WEIGHT[competition], 0.0
+    return SHOTS_ON_TARGET_BLEND_WEIGHT[competition], 1.0 if use_shot_location else 0.0
 
 BOOTSTRAP_SAMPLES = 5000
 CONFIDENCE = 95
@@ -72,8 +76,7 @@ CONFIDENCE = 95
 
 def _blend(matches: pd.DataFrame, competition: str, use_shot_location: bool) -> pd.DataFrame:
     sot_weight, location_weight = _config(competition, use_shot_location)
-    blended = blend_shots_on_target_into_scores(matches, sot_weight)
-    return blend_shot_location_into_scores(blended, location_weight)
+    return blend_goal_proxies_into_scores(matches, sot_weight, location_weight)
 
 
 def _fit_all(train_matches: pd.DataFrame, use_shot_location: bool) -> dict[str, DixonColesModel]:
@@ -140,11 +143,19 @@ def main() -> None:
         train_matches = matches[matches["kickoff_date"] < cutoff_date]
         test_matches = matches[matches["kickoff_date"] >= cutoff_date]
 
-        located = matches["home_shots_inside_box"].notna().sum()
         print(f"Paired A/B on held-out matches after {cutoff_date}")
         print(f"  A = {A_LABEL}")
         print(f"  B = {B_LABEL}")
-        print(f"  shot-location coverage: {located}/{len(matches)} matches ({located / len(matches):.0%})\n")
+        # Per competition, not just overall: coverage is the most likely
+        # confounder for any per-competition difference in the verdict, so
+        # it belongs next to the verdict rather than as one global number.
+        for competition in FIT_COMPETITIONS:
+            rows = matches[matches["competition_name"] == competition]
+            if rows.empty:
+                continue
+            covered = rows["home_shots_inside_box"].notna().sum()
+            print(f"  shot-location coverage, {competition}: {covered}/{len(rows)} ({covered / len(rows):.0%})")
+        print()
 
         baseline = _fit_all(train_matches, use_shot_location=False)
         candidate = _fit_all(train_matches, use_shot_location=True)

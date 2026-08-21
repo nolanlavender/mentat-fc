@@ -175,6 +175,61 @@ def blend_shot_location_into_scores(matches: pd.DataFrame, blend_weight: float) 
     return blended
 
 
+def blend_goal_proxies_into_scores(
+    matches: pd.DataFrame, shots_on_target_weight: float, shot_location_weight: float
+) -> pd.DataFrame:
+    """
+    Applies both goal proxies with an explicit precedence, so that partial
+    coverage of one never leaves a match with LESS smoothing than it would
+    have had otherwise.
+
+    Precedence per side, per match:
+      1. shot location, where inside/outside box counts exist
+      2. shots on target, where those exist but location doesn't
+      3. the real score, untouched, where neither exists
+
+    Why this needs to be one function rather than two calls chained
+    together. A real methodological bug found 2026-08-21, in a comparison
+    that had already produced a confident-looking verdict: running the
+    location blend at weight 1.0 over a frame where only ~48% of matches
+    had location data meant the other ~52% kept their RAW goal counts,
+    while the configuration it was being compared against had the
+    shots-on-target blend applied to every row. The candidate was handicapped
+    on half the sample, and the "shot location is worse in the Championship"
+    result that came out of it was partly measuring coverage, not signal.
+
+    The second trap, avoided here: both calibrations are estimated from the
+    ORIGINAL scores. Chaining the two blends naively estimates the location
+    conversion rates from already-blended pseudo-goals, which is fitting a
+    rate against a number that is no longer a goal count.
+    """
+    rates = estimate_shot_location_conversion(matches)
+
+    # Baseline: shots-on-target wherever it's available. Rows that also have
+    # location data get overwritten below.
+    blended = blend_shots_on_target_into_scores(matches, shots_on_target_weight)
+    if rates is None or shot_location_weight == 0:
+        return blended
+    rate_inside, rate_outside = rates
+
+    for score_column, inside_column, outside_column in (
+        ("home_score", "home_shots_inside_box", "home_shots_outside_box"),
+        ("away_score", "away_shots_inside_box", "away_shots_outside_box"),
+    ):
+        inside = matches[inside_column].astype(float)
+        outside = matches[outside_column].astype(float)
+        available = inside.notna() & outside.notna()
+        if not available.any():
+            continue
+        proxy = inside[available] * rate_inside + outside[available] * rate_outside
+        # Blended against the ORIGINAL score, not the shots-on-target blend
+        # sitting in `blended` -- location replaces that estimate rather
+        # than compounding with it.
+        original = matches.loc[available, score_column].astype(float)
+        blended.loc[available, score_column] = (1 - shot_location_weight) * original + shot_location_weight * proxy
+    return blended
+
+
 def blend_shots_on_target_into_scores(matches: pd.DataFrame, blend_weight: float) -> pd.DataFrame:
     """
     Returns a copy of `matches` with home_score/away_score replaced by a
