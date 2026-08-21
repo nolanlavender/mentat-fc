@@ -5917,3 +5917,66 @@ rates up front. Partial coverage silently makes the blend a partial
 no-op, which is precisely how the `xg` column managed to look wired up
 while touching nothing -- printing it means that failure announces itself
 instead of hiding inside an unchanged Brier score.
+
+## 2026-08-21 -- A confident verdict that was measuring the wrong thing
+
+Ran the shot-location comparison. It came back with what looked like a
+clean, statistically detected result:
+
+```
+shot-location coverage: 2618/5442 matches (48%)
+
+Premier League: A 0.6226  B 0.6160   diff -0.00658  CI [-0.01563, +0.00212]  INCONCLUSIVE
+Championship:   A 0.6474  B 0.6566   diff +0.00921  CI [+0.00296, +0.01527]  A is better
+FA Cup:         A 0.6258  B 0.6293   diff +0.00344  CI [-0.00002, +0.00695]  INCONCLUSIVE
+```
+
+The Championship interval **excludes zero** -- by the standard this
+project just adopted, that is a real detected effect, and the obvious
+reading is "shot location is genuinely worse in the Championship."
+
+**That reading was wrong, and the fault was in the comparison, not the
+data.** Configuration B set the shots-on-target weight to 0 and the
+location weight to 1. Location coverage is 48%. So on the other ~52% of
+matches, B fell back to *raw, completely unsmoothed goal counts* -- while
+A had shots-on-target smoothing applied to every single row. B wasn't
+"location instead of shots on target"; it was "location on half the
+matches, and nothing at all on the rest." The candidate was handicapped
+on half the sample, and the detected Championship effect was at least
+partly measuring coverage rather than signal.
+
+The uncomfortable part is that the statistics were *fine*. The pairing
+was correct, the bootstrap was correct, the interval genuinely excluded
+zero. A correct test of a badly-specified comparison produces a
+confident, precise, wrong answer -- and it looks exactly like a real
+finding. Rigour in the measurement does not protect against asking the
+wrong question, and having just built the paired test made it MORE
+tempting to trust its output uncritically.
+
+The 48% coverage number was printed right there at the top of the output,
+which is the only reason this got caught. That was added for an unrelated
+reason (so partial coverage couldn't silently no-op the blend, the way
+the `xg` column once did). It ended up being the thing that invalidated
+the headline result. Printing the boring context next to the answer earns
+its place.
+
+**The fix is also the right production design.** New
+`blend_goal_proxies_into_scores` applies an explicit precedence per side
+per match: shot location where it exists, shots on target where it
+doesn't, real score where neither does. B is now "A, upgraded to location
+on the rows that have it", which is a fair comparison and the only
+sensible way to actually deploy this.
+
+A second trap avoided while writing it: chaining the two blends naively
+would estimate the location conversion rates from *already-blended
+pseudo-goals*. Both calibrations are now estimated from the original
+scores before anything is modified -- fitting a goals-per-shot rate
+against a number that is no longer a goal count would be quietly
+meaningless.
+
+Pinned with a regression test, verified to fail against a deliberately
+reintroduced version of the bug rather than assumed to work.
+`app.compare` now also prints coverage **per competition**, since that's
+the most likely confounder for any per-competition difference and
+belongs next to the verdict, not as one global number. Verdict on shot
+location itself: still open, pending a rerun of the corrected comparison.
