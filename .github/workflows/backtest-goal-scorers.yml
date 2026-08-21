@@ -1,0 +1,47 @@
+name: Backtest goal scorers
+
+# The goal-scorer model's first ever backtest. Permanent, not temporary:
+# every team-level change in this project goes through a held-out
+# comparison, and this is the equivalent for the model the app displays
+# most prominently -- which shipped on plausibility alone and has never
+# been scored against what actually happened.
+#
+# How to read the output. Three numbers matter, in this order:
+#
+#   calib  -- predicted scorers divided by actual scorers. 1.0 is honest.
+#             Below 1.0 means we systematically under-call, which is a
+#             pricing error even if the ranking is perfect. This is the
+#             headline, because a scorer probability is read directly as
+#             a price.
+#   AUC    -- do we rank the right players higher? 0.5 is coin-flip,
+#             1.0 is perfect. Invariant to rescaling, so it says nothing
+#             about calib -- the two failures are independent.
+#   Brier  -- the two mixed together. Compare against the "base rate"
+#             row, which is one constant probability for everybody:
+#             perfectly calibrated, zero ranking ability. If the model
+#             can't beat it, the per-player machinery earns nothing.
+#
+# Both prediction modes are reported: "no lineup" is how a fixture looks
+# days ahead on the Predictions page, "confirmed lineup" is how it looks
+# an hour before kickoff.
+#
+# Read-only. Actions > "Backtest goal scorers" > Run workflow.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+      - name: Backtest
+        working-directory: model-service
+        run: python -m app.evaluate_scorers

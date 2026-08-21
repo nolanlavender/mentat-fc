@@ -32,6 +32,11 @@ point of this project.** Concretely, that means:
   ask.
 - Keep `/docs/architecture.md` and `/docs/erd.md` accurate any time the
   system design or schema changes — these are my reference diagrams.
+- Keep `/docs/models.md` accurate any time the prediction maths, a tuned
+  constant, or a known gap changes — it's the reference for what the
+  models do and why, and it's meant to be readable end to end. It states
+  current beliefs; `/docs/learning-log.md` stays the running history of
+  what was tried. If the two ever disagree, `models.md` is the stale one.
 
 ## What the app actually does
 

@@ -501,3 +501,85 @@ class TestComputeTeamAvailability:
         shares = compute_player_shares(appearances, AS_OF, half_life_days=180)
         availability = compute_team_availability(1, {999}, shares)
         assert 0.0 <= availability <= 1.0
+
+
+class TestAllocationNormalization:
+    """
+    The ~24% leak and its fix. Two causes, both arithmetic:
+    goal_share is normalised before the MIN_PLAYER_MATCHES filter drops
+    fringe players, and a per-90 RATE share is then multiplied by a
+    minutes share (< 1), discounting a second time.
+
+    See app.goal_scorer.NORMALIZE_ALLOCATION. These tests pin both the
+    shipped behaviour and the candidate, because until the backtest says
+    which is closer to reality both have to keep working.
+    """
+
+    @staticmethod
+    def _shares():
+        # Four reliable squad players plus one fringe player who will be
+        # filtered out -- the fringe player is what makes goal_share sum
+        # to less than 1 across the survivors.
+        appearances = []
+        for day in range(12):
+            appearances.append(_appearance(1, 100, day, 90, 1 if day % 2 == 0 else 0, rating=7.2))
+            appearances.append(_appearance(1, 101, day, 90, 1 if day % 4 == 0 else 0, rating=7.0))
+            appearances.append(_appearance(1, 102, day, 45, 1 if day % 6 == 0 else 0, rating=6.8, is_starting=False))
+            appearances.append(_appearance(1, 103, day, 20, 0, rating=6.5, is_starting=False))
+        for day in range(2):  # below MIN_PLAYER_MATCHES, dropped after normalising
+            appearances.append(_appearance(1, 104, day, 90, 2, rating=7.5))
+        return compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
+
+    def test_shipped_allocation_leaks(self):
+        shares = self._shares()
+        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalize_shares=False))
+        assert allocated < 2.0 * 0.95, f"expected a visible shortfall, allocated {allocated:.3f} of 2.0"
+
+    def test_normalized_allocation_conserves_the_team_total(self):
+        shares = self._shares()
+        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalize_shares=True))
+        assert allocated == pytest.approx(2.0)
+
+    def test_normalization_preserves_the_ranking(self):
+        # It is a monotone rescale, so it must not reorder anybody -- this
+        # is why AUC in the backtest cannot distinguish the two settings
+        # and calibration is the number that decides it.
+        shares = self._shares()
+        shipped = allocate_team_goals(2.0, 1, shares, normalize_shares=False)
+        normalized = allocate_team_goals(2.0, 1, shares, normalize_shares=True)
+        order = lambda ps: [p.player_id for p in sorted(ps, key=lambda p: -p.expected_goals)]  # noqa: E731
+        assert order(shipped) == order(normalized)
+
+    def test_a_missing_player_has_his_share_absorbed(self):
+        # Under the shipped behaviour a confirmed-out player's share simply
+        # vanishes. Normalising hands it to whoever is actually playing,
+        # which is right: compute_team_availability has already reduced the
+        # team's expected goals for his absence, so what remains really is
+        # going to be scored by someone on the pitch.
+        shares = self._shares()
+        squad = {101, 102, 103}  # 100, the top scorer, is out
+        without_top = allocate_team_goals(
+            2.0, 1, shares, confirmed_squad=squad, confirmed_starting=squad, normalize_shares=True
+        )
+        assert sum(p.expected_goals for p in without_top) == pytest.approx(2.0)
+
+    def test_no_division_by_zero_when_nobody_has_a_scoring_history(self):
+        appearances = [_appearance(1, 200, day, 90, 0, rating=6.5) for day in range(8)]
+        shares = compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
+        predictions = allocate_team_goals(1.5, 1, shares, normalize_shares=True)
+        assert all(p.expected_goals == 0 for p in predictions)
+        assert all(p.prob_scores == 0 for p in predictions)
+
+    def test_penalties_are_added_on_top_of_the_normalized_open_play(self):
+        # The penalty portion is carved out before normalisation and handed
+        # to one player whole. If it were swept into the normalised pool the
+        # taker would lose most of it to his team-mates.
+        appearances = []
+        for day in range(10):
+            appearances.append(
+                _appearance(1, 100, day, 90, 1, rating=7.2, penalties_scored=1 if day < 4 else 0)
+            )
+            appearances.append(_appearance(1, 101, day, 90, 1 if day % 3 == 0 else 0, rating=7.0))
+        shares = compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
+        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalize_shares=True))
+        assert allocated == pytest.approx(2.0), "open play + penalties must still add back to the team total"

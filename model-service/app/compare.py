@@ -74,6 +74,16 @@ MIN_MATCHES_PER_COMPETITION = 50
 # shots-on-target sweep never had: those values were chosen from point
 # estimates alone, so "0.75 is the Premier League optimum" has never
 # actually been shown to be distinguishable from 0.5 or 1.0.
+#
+# ANSWERED, 2026-08-21: Premier League best at 0.75 (-0.00693, CI
+# [-0.01384, +0.00001]), Championship worse at every weight with the
+# interval excluding zero every time, FA Cup unresolvable below 1.0.
+# Promoted as app.train.SHOT_LOCATION_BLEND_WEIGHT -- see that constant
+# for the table and the caveats. Left pointed at this question rather than
+# reset to a placeholder: the next question is easier to write by editing
+# a working example than by reconstructing one, and re-running this as-is
+# after the season adds held-out matches is itself a useful thing to do,
+# since the Premier League verdict is the one still touching zero.
 LOCATION_SIGNALS = ["inside_box", "outside_box"]
 FALLBACK_SIGNALS = ["shots_on_target"]
 

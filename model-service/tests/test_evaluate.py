@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 
 from app.evaluate import _outcome_one_hot, brier_score, log_loss
@@ -62,3 +63,49 @@ class TestLogLoss:
         # Should not raise or return inf/nan.
         result = log_loss(probs, outcomes)
         assert np.isfinite(result)
+
+
+class TestDeployedBlendConfiguration:
+    """
+    Executes app.train's and app.evaluate's real blend paths on a synthetic
+    frame. Importing a module proves almost nothing about whether it runs
+    (see tests/test_compare.py's note -- that lesson cost a production
+    crash), and these two _blend helpers are the only code between a
+    weights dict and what every model actually trains on.
+    """
+
+    @staticmethod
+    def _frame():
+        rng = np.random.default_rng(11)
+        n = 200
+        inside = rng.integers(2, 15, n).astype(float)
+        outside = rng.integers(1, 11, n).astype(float)
+        sot = (rng.binomial(inside.astype(int), 0.4) + rng.binomial(outside.astype(int), 0.25)).astype(float)
+        return pd.DataFrame({
+            "home_score": rng.poisson(sot * 0.22), "away_score": rng.poisson(sot * 0.18),
+            "home_shots_inside_box": inside, "away_shots_inside_box": inside,
+            "home_shots_outside_box": outside, "away_shots_outside_box": outside,
+            "home_shots_on_target": sot, "away_shots_on_target": sot,
+        })
+
+    @pytest.mark.parametrize("competition", ["Premier League", "Championship", "FA Cup"])
+    def test_both_modules_blend_every_competition_identically(self, competition):
+        import app.evaluate as evaluate_module
+        import app.train as train_module
+
+        frame = self._frame()
+        assert np.allclose(
+            train_module._blend(frame, competition)["home_score"],
+            evaluate_module._blend(frame, competition)["home_score"],
+        ), "the sandbox and the deployed job must blend the same way for the backtest to mean anything"
+
+    def test_the_two_weight_dicts_are_in_sync(self):
+        # Hand-synced by design (see either constant's comment), which is
+        # exactly why it needs a test rather than trust.
+        import app.evaluate as evaluate_module
+        import app.train as train_module
+
+        assert train_module.SHOT_LOCATION_BLEND_WEIGHT == evaluate_module.SHOT_LOCATION_BLEND_WEIGHT
+        assert train_module.SHOTS_ON_TARGET_BLEND_WEIGHT == evaluate_module.SHOTS_ON_TARGET_BLEND_WEIGHT
+        assert train_module.SHRINKAGE == evaluate_module.SHRINKAGE
+        assert train_module.HALF_LIFE_DAYS == evaluate_module.HALF_LIFE_DAYS

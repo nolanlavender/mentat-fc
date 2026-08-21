@@ -1,3 +1,5 @@
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import psycopg
@@ -205,6 +207,33 @@ def blend_shot_proxies_with_fallback(
     return blended
 
 
+LOCATION_SIGNALS = ["inside_box", "outside_box"]
+SHOTS_ON_TARGET_SIGNALS = ["shots_on_target"]
+
+
+def blend_fitting_signals(matches: pd.DataFrame, location_weight: float, shots_on_target_weight: float) -> pd.DataFrame:
+    """
+    The one place that turns a competition's two blend weights into the
+    frame a fit actually trains on. Shared by app.train and app.evaluate so
+    the deployed configuration and the sandbox can't silently diverge in
+    HOW they blend while looking identical in WHAT they blend.
+
+    At location_weight 0 this is deliberately not just
+    blend_shot_proxies_with_fallback(..., 0, ...). Both paths would use
+    shots on target alone, but they rescale it to goals by different
+    methods -- pooled mean ratio here, least squares there -- and only the
+    pooled-mean-ratio version has ever been backtested for the
+    competitions that sit at 0 (Championship, FA Cup). Routing them through
+    the other calibration would be shipping an unmeasured change disguised
+    as a no-op.
+    """
+    if location_weight == 0:
+        return blend_shots_on_target_into_scores(matches, shots_on_target_weight)
+    return blend_shot_proxies_with_fallback(
+        matches, LOCATION_SIGNALS, location_weight, SHOTS_ON_TARGET_SIGNALS, shots_on_target_weight
+    )
+
+
 def blend_shots_on_target_into_scores(matches: pd.DataFrame, blend_weight: float) -> pd.DataFrame:
     """
     Returns a copy of `matches` with home_score/away_score replaced by a
@@ -297,7 +326,37 @@ def load_upcoming_fixtures(conn: psycopg.Connection, competition_name: str) -> p
     return _query_df(conn, query, {"competition_name": competition_name})
 
 
-def load_player_squad_appearances(conn: psycopg.Connection, competition_names: list[str]) -> pd.DataFrame:
+def load_fixture_player_goals(conn: psycopg.Connection, competition_names: list[str]) -> pd.DataFrame:
+    """
+    Ground truth for the goal-scorer backtest: one row per (fixture,
+    player) who was named in a matchday squad for a finished match, with
+    how many goals he actually scored.
+
+    Squad membership comes from fixture_lineups and goals from
+    fixture_player_stats, LEFT joined -- a named player with no stats row
+    scored zero, which is a real answer and must not be dropped. Scoring
+    only the players who happen to have a stats row would silently
+    condition on having done something notable, which is the sort of
+    selection effect that makes a model look far better than it is.
+    """
+    query = """
+        SELECT fl.fixture_id, fl.team_id, fl.player_id, f.kickoff_date,
+               COALESCE(fps.goals, 0) AS goals
+        FROM fixture_lineups fl
+        JOIN fixtures f ON f.id = fl.fixture_id
+        LEFT JOIN fixture_player_stats fps ON fps.fixture_id = fl.fixture_id AND fps.player_id = fl.player_id
+        JOIN competition_seasons cs ON cs.id = f.competition_season_id
+        JOIN competitions c ON c.id = cs.competition_id
+        WHERE c.name = ANY(%(competition_names)s)
+          AND f.status = 'finished'
+        ORDER BY f.kickoff_date
+    """
+    return _query_df(conn, query, {"competition_names": competition_names})
+
+
+def load_player_squad_appearances(
+    conn: psycopg.Connection, competition_names: list[str], as_of: date | None = None
+) -> pd.DataFrame:
     """
     One row per (team, player, fixture) where the player was named in the
     matchday squad -- starting XI or substitute -- for a finished match,
@@ -367,6 +426,7 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
             JOIN competitions c ON c.id = cs.competition_id
             WHERE c.name = ANY(%(competition_names)s)
               AND f.status = 'finished'
+              AND (%(as_of)s::date IS NULL OR f.kickoff_date < %(as_of)s::date)
         ),
         most_recent_club AS (
             SELECT DISTINCT ON (player_id) player_id, team_id
@@ -374,7 +434,17 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
             ORDER BY player_id, kickoff_date DESC
         ),
         effective_club AS (
-            SELECT mrc.player_id, COALESCE(p.current_team_id, mrc.team_id) AS team_id
+            -- players.current_team_id is live (FPL reflects a transfer the
+            -- instant it happens), which is exactly what production wants
+            -- and exactly what a backtest must not see: at as_of it would
+            -- be reporting club moves from the future. So when a cutoff is
+            -- given, fall back to what the appearance history itself said
+            -- at the time. Leaving this leak in would have flattered the
+            -- backtest most for the players who moved -- the hardest ones.
+            SELECT mrc.player_id,
+                   CASE WHEN %(as_of)s::date IS NULL
+                        THEN COALESCE(p.current_team_id, mrc.team_id)
+                        ELSE mrc.team_id END AS team_id
             FROM most_recent_club mrc
             JOIN players p ON p.id = mrc.player_id
         )
@@ -384,7 +454,7 @@ def load_player_squad_appearances(conn: psycopg.Connection, competition_names: l
         JOIN effective_club ec ON ec.player_id = a.player_id
         ORDER BY a.kickoff_date
     """
-    return _query_df(conn, query, {"competition_names": competition_names})
+    return _query_df(conn, query, {"competition_names": competition_names, "as_of": as_of})
 
 
 def load_confirmed_lineups(conn: psycopg.Connection, fixture_ids: list[int]) -> pd.DataFrame:

@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from app.data import (
+    blend_fitting_signals,
     blend_learned_shot_proxy_into_scores,
     blend_shot_proxies_with_fallback,
     blend_shots_on_target_into_scores,
@@ -186,3 +187,47 @@ class TestProxyFallback:
         blended = blend_shot_proxies_with_fallback(matches, ["inside_box", "outside_box"], 0.0, ["shots_on_target"], 0.75)
         fallback_only = blend_learned_shot_proxy_into_scores(matches, 0.75, ["shots_on_target"])
         assert np.allclose(blended["home_score"], fallback_only["home_score"])
+
+
+class TestBlendFittingSignals:
+    """
+    The single entry point app.train and app.evaluate both fit through.
+    What's pinned here is mostly the location_weight == 0 branch, which
+    looks like a redundant special case and is not: the two paths rescale
+    shots on target to goals by different methods, and only one of them
+    has been backtested for the competitions that ship at 0.
+    """
+
+    def test_zero_location_weight_keeps_the_backtested_calibration(self):
+        matches = TestProxyFallback._partial()
+        assert np.allclose(
+            blend_fitting_signals(matches, 0.0, 0.75)["home_score"],
+            blend_shots_on_target_into_scores(matches, 0.75)["home_score"],
+        )
+
+    def test_zero_location_weight_is_not_the_least_squares_path(self):
+        # If these ever coincided the branch would be dead code and the
+        # comment explaining it would be wrong -- worth knowing.
+        matches = TestProxyFallback._partial()
+        assert not np.allclose(
+            blend_fitting_signals(matches, 0.0, 0.75)["home_score"],
+            blend_shot_proxies_with_fallback(matches, ["inside_box", "outside_box"], 0.0, ["shots_on_target"], 0.75)["home_score"],
+        )
+
+    def test_nonzero_location_weight_uses_location_with_fallback(self):
+        matches = TestProxyFallback._partial()
+        assert np.allclose(
+            blend_fitting_signals(matches, 0.75, 0.5)["home_score"],
+            blend_shot_proxies_with_fallback(matches, ["inside_box", "outside_box"], 0.75, ["shots_on_target"], 0.5)["home_score"],
+        )
+
+    def test_location_actually_changes_covered_rows(self):
+        # Guards the whole promotion being a silent no-op -- the exact
+        # failure the `xg` column had, where a feature looked wired up and
+        # touched nothing.
+        matches = TestProxyFallback._partial()
+        covered = matches["home_shots_inside_box"].notna()
+        assert not np.allclose(
+            blend_fitting_signals(matches, 0.75, 0.75).loc[covered, "home_score"],
+            blend_fitting_signals(matches, 0.0, 0.75).loc[covered, "home_score"],
+        )

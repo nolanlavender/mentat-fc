@@ -6149,3 +6149,186 @@ running the code instead of reading it. The pattern across this whole
 session is consistent enough to state plainly: every serious error here
 has been in how something was measured, not in the modelling idea, and
 none of them were visible without execution.
+
+## 2026-08-21 -- Shot location, promoted (and what nearly buried it)
+
+The sweep ran clean and answered the question:
+
+| location weight | Premier League (97% cov.) | Championship (83%) | FA Cup (4%) |
+|---|---|---|---|
+| 0.25 | +0.00104 `[-0.00708, +0.00954]` | **+0.00138** `[+0.00022, +0.00257]` | +0.00041 `[-0.00355, +0.00429]` |
+| 0.50 | -0.00303 `[-0.00918, +0.00339]` | **+0.00308** `[+0.00060, +0.00559]` | +0.00027 `[-0.00282, +0.00332]` |
+| 0.75 | **-0.00693** `[-0.01384, +0.00001]` | **+0.00588** `[+0.00117, +0.01049]` | +0.00137 `[-0.00152, +0.00428]` |
+| 1.00 | -0.00615 `[-0.01471, +0.00219]` | **+0.00915** `[+0.00245, +0.01572]` | **+0.00447** `[+0.00096, +0.00802]` |
+
+(Mean per-match Brier difference vs. the shots-on-target baseline, 95%
+bootstrap CI. Negative is better. Bold = interval excludes zero.)
+
+Shipped as `SHOT_LOCATION_BLEND_WEIGHT` = Premier League 0.75,
+Championship 0, FA Cup 0.
+
+**The Championship and FA Cup zeros are the strong part of this result,
+which is the opposite of how it feels.** A zero usually means "we found
+nothing." Here it means the opposite: the Championship is significantly
+worse at all four weights, monotonically, with the interval excluding
+zero every time. That is a detected effect pointing the wrong way -- a
+far firmer reason to leave a feature off than never having measured it.
+Distinguishing "measured, and it hurts" from "unmeasured, so off by
+default" matters, because only one of them is worth revisiting.
+
+**The Premier League 0.75 is the weak part, and it got promoted anyway.**
+Its interval touches zero (`+0.00001`), so it fails a strict 95%
+significance test by the narrowest possible margin. I promoted it because
+significance is the wrong decision rule here. Significance answers "can I
+publish this?"; the question in front of me is "which of two values do I
+deploy tomorrow?", where the loss is symmetric and there is no privileged
+null. About 97.5% of the bootstrap mass sits below zero, and the point
+estimate is the largest effect anything has produced this season. Under
+symmetric loss you take the better expected value; refusing to move
+because a threshold wasn't cleared is itself a choice, and a worse one.
+
+Recorded rather than buried, because I would want to know it later: the
+Premier League curve is *not* clean. A smooth real effect should show
+about a third of 0.75's gain at 0.25, and instead 0.25 came back slightly
+**positive**. And the sweep's baseline used least-squares shots-on-target
+calibration while production ships the pooled-mean-ratio one, so a small
+unmeasured delta separates the tested baseline from the live one. Neither
+is enough to overturn the decision; both are enough that this gets re-run
+when the season adds held-out matches.
+
+### The mistake this corrects, which is the actually reusable part
+
+Location was **rejected** four days of commits ago, on a comparison
+between shots on target at its tuned per-competition weight
+(0.75/0.25/1.0, chosen from a five-value sweep) and location at a flat
+1.0 that had never been tuned at all. Both numbers were real. The
+comparison was still meaningless, and the Premier League optimum turned
+out to be nowhere near the value location had been tested at.
+
+Generalised: **when a new signal loses to an incumbent that has been
+tuned and the challenger has not, the experiment measured tuning, not
+signal.** This is easy to miss precisely because the incumbent's tuning
+was legitimate work -- it doesn't feel like stacking the deck, it feels
+like comparing against your best current setup, which is the right
+instinct applied at the wrong level.
+
+The thing that actually saved it was Nolan pushing back on the rejection
+rather than accepting a confidently-worded negative result. Worth
+remembering that the write-up quality of a wrong conclusion is completely
+uncorrelated with whether it's right.
+
+### The `location_weight == 0` branch that looks redundant
+
+`blend_fitting_signals` special-cases zero instead of just passing 0
+through to `blend_shot_proxies_with_fallback`, which already handles it.
+Both paths use shots on target alone, so the branch reads like clutter.
+
+It isn't. The two paths rescale shots on target to goals by *different*
+methods -- pooled mean ratio vs. least squares -- and only the
+pooled-mean-ratio version has ever been backtested for the two
+competitions now shipping at 0. Collapsing the branch would ship an
+unmeasured change to the Championship and FA Cup disguised as a no-op,
+which is the same shape as the confound that corrupted the sweep itself
+two entries ago. There's a test pinning both halves: that zero-weight
+matches the backtested calibration, *and* that the two paths genuinely
+differ (if they ever coincided, the branch would be dead code and its
+comment would be a lie).
+
+Also added: a test that runs `app.train._blend` and `app.evaluate._blend`
+on the same frame and asserts they agree, plus one asserting the two
+modules' hand-synced weight dicts are actually in sync. Hand-syncing is
+deliberate -- the sandbox has to be editable without touching production
+-- but "deliberate" and "unverified" are different things.
+
+## 2026-08-21 -- The goal-scorer model finally gets measured
+
+Every team-level change in this project went through a held-out
+comparison. The goal-scorer model -- the thing the app puts most
+prominently on screen -- shipped on plausibility and was never scored
+against what actually happened. `app/evaluate_scorers.py` fixes that.
+
+### Three numbers, deliberately kept apart
+
+The instinct is to report one score. That would have hidden the actual
+problem, because **calibration and ranking fail independently**:
+
+- **calibration** = predicted scorers ÷ actual scorers. If we say 0.20 to
+  a hundred player-fixtures, about twenty should score. This is the
+  headline, because a scorer probability is read directly as a price.
+- **AUC** = do we rank the right players higher? Invariant to any monotone
+  rescale, so it says *nothing* about the level.
+- **Brier / log loss** = the two mixed.
+
+Both are scored against a base-rate baseline: one constant probability for
+everybody. It is perfectly calibrated by construction and ranks nobody, so
+it is exactly the right thing to beat -- if the per-player machinery can't,
+it earns nothing over "someone scores sometimes."
+
+Two findings from the synthetic run, both about *reading* the output:
+
+**Brier is nearly useless for this question.** With a base rate around 8%,
+a 20% error in the probability level barely moves it. The allocation fix
+below took calibration from 0.75 to 0.91 and made Brier *slightly worse*.
+Log loss moved the right way. A metric being proper doesn't make it
+sensitive to the failure you're chasing.
+
+**AUC cannot distinguish the two allocation settings at all**, and that's
+not a limitation, it's the proof the diagnosis is right: normalising is a
+monotone rescale, so by construction the ranking is identical and only the
+level changes.
+
+### The leakage that would have flattered it most
+
+`load_player_squad_appearances` derives a player's club partly from
+`players.current_team_id`, which is live -- FPL reflects a transfer the
+instant it happens. In a backtest at cutoff date T, that column is
+reporting club moves from the future. Left in, it would have flattered the
+result **most for the players who moved**, i.e. the hardest cases. So the
+`as_of` cutoff applies inside the appearances CTE and, when set, stops
+trusting `current_team_id` in favour of what the appearance history itself
+said at the time.
+
+The join to ground truth is a LEFT join with goals filled to zero. The
+tempting version is an inner join, which quietly deletes every predicted
+player who wasn't in the squad -- i.e. deletes *only* confident predictions
+that turned out wrong. That is the single most flattering thing a backtest
+can do to itself, and it looks completely innocent in code.
+
+### The leak, now with a fix
+
+Two causes, both arithmetic, both confirmed:
+
+1. `goal_share` is normalised across all of a team's players and
+   `MIN_PLAYER_MATCHES` is applied *afterwards*, so surviving shares sum
+   to under 1 by construction.
+2. A per-90 **rate** share is multiplied by `minutes_share` (< 1),
+   discounting a second time.
+
+One change fixes both: divide each weight by the sum of the weights
+actually being allocated for that fixture. And it fixes a third thing that
+was never the point -- today a confirmed-out player's share vanishes into
+nothing, and under normalisation his team-mates absorb it, which is right
+because `compute_team_availability` has already reduced the team's expected
+goals for his absence.
+
+Shipped as `NORMALIZE_ALLOCATION = False`. The fix raises every scorer
+probability by ~1/0.76, and before the backtest existed there was no way to
+know whether that moves toward the truth or straight past it. The backtest
+scores both settings on the same held-out player-fixtures in one run.
+
+### The test that runs the whole pipeline with no database
+
+`app.compare`'s NameError reached production because the only way to
+execute that module was against the production database. The same was true
+of this one on the day it was written. So `TestMainEndToEnd` fakes the four
+loaders and runs `main()` top to bottom on synthetic data.
+
+It earned its keep immediately, catching two real bugs in itself before a
+single real row was read: the synthetic fixtures were dated in generation
+order, so the held-out tail contained exactly one competition and the
+per-competition reporting was never exercised; and with a fixed starting
+XI the two prediction modes produced byte-identical output, so the mode
+split was silently measuring nothing. Both are now asserted against.
+
+Neither would have been visible from reading the code, and both would have
+made the first production run quietly wrong rather than loudly broken.
