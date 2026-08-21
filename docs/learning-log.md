@@ -5792,3 +5792,67 @@ until the paired comparison says the interval excludes zero. "The
 difference is not distinguishable from noise" is a completely legitimate
 outcome here, and much better than shipping a per-competition rule
 fitted to sampling error.
+
+## 2026-08-21 -- Verdict on the shrinkage prior: not distinguishable from noise
+
+Ran the paired comparison built for exactly this question:
+
+```
+Premier League: 350 paired matches (350 scored differently)
+  A Brier 0.6226   B Brier 0.6209
+  mean difference (B - A): -0.00171   95% CI [-0.00468, +0.00141]
+  -> INCONCLUSIVE
+
+Championship:   516 paired matches (516 scored differently)
+  A Brier 0.6474   B Brier 0.6484
+  mean difference (B - A): +0.00108   95% CI [-0.00165, +0.00394]
+  -> INCONCLUSIVE
+
+FA Cup:         303 paired matches (0 scored differently)
+```
+
+Both intervals span zero. `SHRINK_TOWARD_JOINT` stays False; production is
+unchanged.
+
+**This is the entry to remember.** The raw aggregates looked like a
+Premier League win and a Championship loss, and the obvious move was to
+go per-competition -- which is a pattern this project has legitimately
+used before, for `SHOTS_ON_TARGET_BLEND_WEIGHT`. Doing it here would have
+been fitting sampling error and calling it a validated improvement. The
+difference between the two cases is worth stating precisely, because
+"per-competition" is not itself the lesson: shots-on-target showed a
+*large, monotonic trend across five values* (0.6399 -> 0.6248, ~2.4%);
+this showed *two numbers* a third that size with no trend behind them.
+Same shape of conclusion, completely different strength of evidence.
+
+**What the confidence interval is really telling us.** Its half-width is
+roughly 0.003 Brier, which is a property of the test set, not of this
+change: with ~350-500 held-out matches, anything smaller than about
+0.003 simply cannot be resolved. That is a standing calibration for
+future work here -- chasing sub-0.003 effects with this backtest is not
+a modelling problem, it's a measurement-floor problem, and more clever
+model changes will not fix it. `app.compare` now prints that floor
+alongside an inconclusive verdict so the limit is visible at the moment
+someone would otherwise over-read a result.
+
+**Kept, not deleted.** The mechanism is sound and well-tested, and the
+most plausible reason it doesn't register is that the held-out window
+contains very few newly-promoted or relegated clubs -- precisely the
+teams it helps. An effect concentrated in ~2 of 25 teams is easily
+swamped when averaged over every match in the division. Worth re-running
+after a season whose test window has more division changes, or with a
+better prior. Flipping the constant re-tests it.
+
+Also fixed a real wording bug the run exposed: FA Cup reported
+"INCONCLUSIVE -- not distinguishable from noise" while showing `0 scored
+differently` and an exactly-zero interval. That fit takes no prior, so it
+is a *control* proving the flag is plumbed only where intended -- calling
+it a null result was technically true and actively misleading. It now
+reports UNCHANGED, and distinguishes "we couldn't tell" from "nothing
+happened."
+
+The temporary A/B workflow and the `SHRINK_TOWARD_JOINT_OVERRIDE` env var
+are both deleted, as their own comments said they should be once a
+verdict existed. `app.compare` stays -- it is now the standard way to
+judge a model change here, and its first real use was talking this
+project out of a change it would otherwise have shipped.

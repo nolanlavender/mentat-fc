@@ -143,12 +143,22 @@ def main() -> None:
             print(f"  mean difference (B - A): {mean_diff:+.5f}   {CONFIDENCE}% CI [{low:+.5f}, {high:+.5f}]")
 
             # The whole point: does the interval actually exclude zero?
-            if low > 0:
+            if changed == 0:
+                # Not "inconclusive" -- this configuration provably does not
+                # touch this fit at all, which makes it a control rather than
+                # a result. Calling an untouched fit "not distinguishable from
+                # noise" would be technically true and actively misleading.
+                verdict = "UNCHANGED -- this configuration does not affect this fit (a control, not a null result)"
+            elif low > 0:
                 verdict = "A is better -- the interval excludes zero"
             elif high < 0:
                 verdict = "B is better -- the interval excludes zero"
             else:
-                verdict = "INCONCLUSIVE -- the interval spans zero, this difference is not distinguishable from noise"
+                verdict = (
+                    "INCONCLUSIVE -- the interval spans zero, this difference is not distinguishable from noise. "
+                    f"Anything smaller than about {max(abs(low), abs(high)):.4f} Brier is below what "
+                    f"{len(shared)} held-out matches can resolve."
+                )
             print(f"  -> {verdict}\n")
     finally:
         conn.close()
