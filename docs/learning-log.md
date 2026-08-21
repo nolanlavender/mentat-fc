@@ -6405,3 +6405,98 @@ went back only once it was *fixed*, not once it became affordable.
 copy. A separate implementation would be free to drift, and then the hourly
 job and the daily one would quietly disagree about the same fixture, which
 is a much worse failure than being slow.
+
+## 2026-08-21 -- Two columns, both about a distinction the data couldn't make
+
+### `fixture_lineups.pre_match_captured_at`
+
+Prompted by a question I had answered too confidently. Asked whether the
+lineup we store is the pre-game one, I said yes -- correctly, as far as it
+went. Both writers call API-Football's `/fixtures/lineups`, which returns
+the announced XI plus bench and does *not* morph into "who actually played"
+(minutes come from a separate endpoint). So the content is pre-game either
+way.
+
+What I missed on the first pass is that **content being identical is not
+the same as the information being available**. Two jobs write this table:
+
+| job | fixtures | timing |
+|---|---|---|
+| `seedTodaysLineups` | `status != 'finished'`, ±3h of kickoff | pre-match |
+| `backfillLineupsForCompetitionSeason` | `status = 'finished'` | post-match |
+
+Nothing recorded which one wrote a row. That matters twice over. The
+availability adjustment and starter-vs-bench scorer odds are only worth
+anything if the lineup arrived before kickoff. And -- the one that actually
+stings -- `app.evaluate_scorers`' "confirmed lineup (matchday)" mode runs on
+**finished** fixtures, whose rows came from the post-match backfill. Written
+that same day, it silently assumed we would have had every one of those
+lineups in time.
+
+**That is an optimism bias aimed exactly at the fixtures where pre-match
+capture fails**, which is the worst place for one, and it looked completely
+correct in code. It joins the list of measurement bugs this project keeps
+producing: none of them were visible from reading, all of them flattered the
+result.
+
+Not corrected for, because there is nothing to correct with -- every
+historical row predates the column. The backtest now *reports* pre-match
+coverage instead, so a run at 0% is legible as a ceiling on the matchday
+mode rather than a measurement of it.
+
+Small thing worth stating: the upsert is `COALESCE(existing, incoming)`, the
+opposite order from a normal merge. Once a lineup has been captured
+pre-match that is permanent, and the post-match backfill re-upserting the
+same rows must not overwrite it with NULL. Verified against a real Postgres
+by running both upserts in sequence rather than by reading the SQL.
+
+### `bet_legs.line`, and where "free text avoids migrations" runs out
+
+`bet_legs.market`/`selection` are deliberately free text so a new bet type
+never needs a migration. That was a good decision and it still is -- for
+markets whose selection is a single label (`home`, a player id).
+
+A spread breaks the pattern in a way worth naming: the **same** market and
+the **same** selection settle differently depending on a number. `home` at
+-2.5 and `home` at -0.5 are different bets. The tempting move is to keep the
+schema untouched and encode it as `home -2.5`, which works right up until
+the settlement SQL has to parse it -- and there a formatting slip is a
+**mis-graded bet**, not a validation error. `fixture_odds` had already
+reached this conclusion and has the identical column.
+
+The general shape: free-text extensibility holds while the new thing is
+another *value* of an existing dimension, and breaks when it adds a
+dimension.
+
+Spreads also introduced the first market here that can genuinely **push**.
+A whole line (Arsenal -2, winning by exactly 2) ties, settles `void`, and
+the existing result derivation already excludes voids from the parlay
+product -- so the machinery was there, unexercised. Half lines cannot tie,
+which is the whole reason books quote them. Quarter lines are refused
+rather than rounded: settling one means grading a leg half-won, which
+`won`/`lost`/`void` cannot express, and silently rounding would settle a
+bet the user didn't place.
+
+Graded by extracting the real settlement SQL from the source and running it
+against real rows on a throwaway Postgres -- all four legs on Arsenal 3-0
+Coventry, including both push directions and a match_winner regression
+check. Reading that CASE expression and believing it would have been the
+same mistake this log keeps recording.
+
+### The spread's model probability is reconstructed, and says so
+
+`model_predictions` stores three match-winner probabilities and two lambdas
+-- not the scoreline grid a spread needs. So the cover probability is
+rebuilt from two independent Poissons, which omits the Dixon-Coles low-score
+correction (see `docs/models.md` §2).
+
+Checked against the live Arsenal-Coventry numbers (1.76-0.89): reconstructed
+57.93% vs 58.18% stored for the home win, 18.77% vs 19.08% away. Under a
+percentage point, and much of even that is the 2dp rounding on the displayed
+lambdas rather than the missing tau. Good enough to be indicative, labelled
+as such in the code, and exactly fixable by storing rho alongside the
+prediction if it ever matters.
+
+Nice confirmation the maths is right: -1 and -1.5 return the identical cover
+probability (both need a 2+ win). The difference between them isn't the
+chance of covering, it's that -1 can push and refund.

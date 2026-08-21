@@ -1081,16 +1081,32 @@ export async function upsertFixtureLineup(
     isStarting: boolean;
     shirtNumber?: number;
     position?: string;
+    /** Set only by the pre-kickoff matchday check -- see migration 1701000000027. */
+    preMatchCapturedAt?: Date;
   },
 ): Promise<void> {
   await pool.query(
-    `INSERT INTO fixture_lineups (fixture_id, team_id, player_id, is_starting, shirt_number, position)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO fixture_lineups (fixture_id, team_id, player_id, is_starting, shirt_number, position, pre_match_captured_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (fixture_id, player_id) DO UPDATE SET
        is_starting = EXCLUDED.is_starting,
        shirt_number = COALESCE(EXCLUDED.shirt_number, fixture_lineups.shirt_number),
-       position = COALESCE(EXCLUDED.position, fixture_lineups.position)`,
-    [entry.fixtureId, entry.teamId, entry.playerId, entry.isStarting, entry.shirtNumber ?? null, entry.position ?? null],
+       position = COALESCE(EXCLUDED.position, fixture_lineups.position),
+       -- Existing value first, deliberately the opposite way round from a
+       -- normal "prefer the incoming value" COALESCE. Once a lineup has
+       -- been captured pre-match that is a permanent historical fact, and
+       -- the post-match backfill re-upserting these same rows (it does,
+       -- when it comes back for player stats) must not erase it.
+       pre_match_captured_at = COALESCE(fixture_lineups.pre_match_captured_at, EXCLUDED.pre_match_captured_at)`,
+    [
+      entry.fixtureId,
+      entry.teamId,
+      entry.playerId,
+      entry.isStarting,
+      entry.shirtNumber ?? null,
+      entry.position ?? null,
+      entry.preMatchCapturedAt ?? null,
+    ],
   );
 }
 
@@ -1121,6 +1137,11 @@ export async function upsertFixtureLineupsBatch(
 ): Promise<void> {
   if (entries.length === 0) return;
   const params = entries.flatMap((e) => [e.fixtureId, e.teamId, e.playerId, e.isStarting, e.shirtNumber ?? null, e.position ?? null]);
+  // pre_match_captured_at is deliberately absent from both the column list
+  // and the DO UPDATE: this is the bulk POST-match path, so it has nothing
+  // to stamp, and leaving the column out of the update means an existing
+  // pre-match timestamp is preserved untouched rather than overwritten
+  // with NULL. See migration 1701000000027.
   await pool.query(
     `INSERT INTO fixture_lineups (fixture_id, team_id, player_id, is_starting, shirt_number, position)
      VALUES ${buildValuesPlaceholders(entries.length, 6)}

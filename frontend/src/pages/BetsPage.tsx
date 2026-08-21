@@ -17,7 +17,8 @@ interface UpcomingFixture {
 
 const MATCH_WINNER = 'match_winner';
 const ANYTIME_SCORER = 'anytime_scorer';
-type Market = typeof MATCH_WINNER | typeof ANYTIME_SCORER;
+const SPREAD = 'spread';
+type Market = typeof MATCH_WINNER | typeof ANYTIME_SCORER | typeof SPREAD;
 type OddsFormat = 'decimal' | 'american';
 
 interface DraftLeg {
@@ -27,7 +28,20 @@ interface DraftLeg {
   market: Market;
   selection: string;
   selectionLabel: string;
+  /** Spread legs only; 0 elsewhere, matching bet_legs.line. */
+  line: number;
   oddsDecimal: number;
+}
+
+// A spread's line has to be part of its identity, not just its display:
+// "Arsenal -2.5" and "Arsenal -0.5" are different bets that would otherwise
+// collide on the same key and get rejected as a duplicate pick.
+function spreadKey(fixtureId: number, selection: string, line: number): string {
+  return `${fixtureId}-${SPREAD}-${selection}-${line}`;
+}
+
+function formatLine(line: number): string {
+  return `${line > 0 ? '+' : ''}${line}`;
 }
 
 function formatPercent(value: number | null): string {
@@ -79,6 +93,7 @@ export function BetsPage() {
   const [legMarket, setLegMarket] = useState<Market>(MATCH_WINNER);
   const [legFixtureId, setLegFixtureId] = useState('');
   const [legSelection, setLegSelection] = useState<'home' | 'draw' | 'away'>('home');
+  const [legSpreadLine, setLegSpreadLine] = useState('-0.5');
   const [legTeamId, setLegTeamId] = useState('');
   const [legPlayerId, setLegPlayerId] = useState('');
   const [legOddsFormat, setLegOddsFormat] = useState<OddsFormat>('decimal');
@@ -147,6 +162,8 @@ export function BetsPage() {
     : [];
   // Goalkeepers excluded -- vanishingly rare for one to score, and it just
   // clutters a picker meant for realistic anytime-scorer bets.
+  const spreadFixture = fixtures?.find((f) => f.id === Number(legFixtureId));
+
   const teamSquad = legTeamId
     ? (squadsByTeam[Number(legTeamId)] ?? []).filter((p) => positionGroup(p.position) !== 'Goalkeeper')
     : [];
@@ -156,6 +173,7 @@ export function BetsPage() {
     setLegFixtureId('');
     setLegTeamId('');
     setLegPlayerId('');
+    if (market === SPREAD && legSelection === 'draw') setLegSelection('home');
   }
 
   function handleAddLeg(): void {
@@ -168,7 +186,45 @@ export function BetsPage() {
       return;
     }
 
-    if (legMarket === MATCH_WINNER) {
+    if (legMarket === SPREAD) {
+      const fixture = fixtures?.find((f) => f.id === Number(legFixtureId));
+      if (!fixture) {
+        setFormError('Pick a fixture first');
+        return;
+      }
+      const line = Number(legSpreadLine);
+      if (!Number.isFinite(line)) {
+        setFormError('Enter a line, e.g. -2.5');
+        return;
+      }
+      // Mirrors the server's rule rather than trusting it to catch this --
+      // a quarter line splits the stake across two lines, which a single
+      // won/lost/void result cannot express.
+      if (Math.abs(line * 2 - Math.round(line * 2)) > 1e-9) {
+        setFormError('Only half and whole lines are supported (e.g. -2.5, -2, +1.5)');
+        return;
+      }
+      const side = legSelection === 'away' ? 'away' : 'home';
+      const key = spreadKey(fixture.id, side, line);
+      if (draftLegs.some((l) => l.key === key)) {
+        setFormError('That pick is already in this bet');
+        return;
+      }
+      const teamName = side === 'home' ? fixture.homeTeam.name : fixture.awayTeam.name;
+      setDraftLegs([
+        ...draftLegs,
+        {
+          key,
+          fixtureId: fixture.id,
+          fixtureLabel: `${fixture.homeTeam.name} vs ${fixture.awayTeam.name}`,
+          market: SPREAD,
+          selection: side,
+          selectionLabel: `${teamName} ${formatLine(line)}`,
+          line,
+          oddsDecimal: odds,
+        },
+      ]);
+    } else if (legMarket === MATCH_WINNER) {
       const fixture = fixtures?.find((f) => f.id === Number(legFixtureId));
       if (!fixture) {
         setFormError('Pick a fixture first');
@@ -188,6 +244,7 @@ export function BetsPage() {
           market: MATCH_WINNER,
           selection: legSelection,
           selectionLabel: legSelection === 'home' ? 'Home win' : legSelection === 'away' ? 'Away win' : 'Draw',
+          line: 0,
           oddsDecimal: odds,
         },
       ]);
@@ -216,6 +273,7 @@ export function BetsPage() {
           market: ANYTIME_SCORER,
           selection: String(player.id),
           selectionLabel: `${player.fullName} anytime scorer`,
+          line: 0,
           oddsDecimal: odds,
         },
       ]);
@@ -261,6 +319,7 @@ export function BetsPage() {
             fixtureId: l.fixtureId,
             market: l.market,
             selection: l.selection,
+            line: l.line,
             oddsDecimal: l.oddsDecimal,
           })),
           ...(oddsOverrideDecimal !== undefined ? { oddsOverrideDecimal } : {}),
@@ -296,6 +355,12 @@ export function BetsPage() {
   function legLine(leg: BetLeg): string {
     if (leg.market === ANYTIME_SCORER && leg.player) {
       return `${leg.player.name} anytime scorer — ${leg.fixture.homeTeam.name} vs ${leg.fixture.awayTeam.name} @ ${leg.oddsDecimal.toFixed(2)}`;
+    }
+    if (leg.market === SPREAD) {
+      // Named team plus signed line -- "home -2.5" is unreadable next to
+      // the fixture it already names.
+      const side = leg.selection === 'away' ? leg.fixture.awayTeam : leg.fixture.homeTeam;
+      return `${side.name} ${formatLine(leg.line)} — ${leg.fixture.homeTeam.name} vs ${leg.fixture.awayTeam.name} @ ${leg.oddsDecimal.toFixed(2)}`;
     }
     return `${leg.fixture.homeTeam.name} vs ${leg.fixture.awayTeam.name} — ${leg.selection} @ ${leg.oddsDecimal.toFixed(2)}`;
   }
@@ -358,11 +423,52 @@ export function BetsPage() {
             Market
             <select value={legMarket} onChange={(e) => handleMarketChange(e.target.value as Market)}>
               <option value={MATCH_WINNER}>Match winner</option>
+              <option value={SPREAD}>Spread (goal handicap)</option>
               <option value={ANYTIME_SCORER}>Anytime goalscorer</option>
             </select>
           </label>
 
-          {legMarket === MATCH_WINNER ? (
+          {legMarket === SPREAD ? (
+            <>
+              <label>
+                Fixture
+                <select value={legFixtureId} onChange={(e) => setLegFixtureId(e.target.value)}>
+                  <option value="" disabled>
+                    Select an upcoming fixture…
+                  </option>
+                  {fixtures?.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.homeTeam.name} vs {f.awayTeam.name} — {new Date(f.kickoffAt).toLocaleDateString()}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Side
+                <select value={legSelection} onChange={(e) => setLegSelection(e.target.value as 'home' | 'away')}>
+                  <option value="home">{spreadFixture ? spreadFixture.homeTeam.name : 'Home'}</option>
+                  <option value="away">{spreadFixture ? spreadFixture.awayTeam.name : 'Away'}</option>
+                </select>
+              </label>
+              <label>
+                Line
+                {/* step 0.5 rather than 0.25: a quarter line splits the stake
+                    across two lines, which one won/lost/void result cannot
+                    express, so it is rejected rather than mis-graded. */}
+                <input
+                  type="number"
+                  step="0.5"
+                  value={legSpreadLine}
+                  onChange={(e) => setLegSpreadLine(e.target.value)}
+                  placeholder="-2.5"
+                />
+                <small>
+                  Negative gives goals away ({spreadFixture ? spreadFixture.homeTeam.name : 'the favourite'} -2.5 needs a 3+ goal
+                  win). A whole line can push and refunds the stake.
+                </small>
+              </label>
+            </>
+          ) : legMarket === MATCH_WINNER ? (
             <>
               <label>
                 Fixture

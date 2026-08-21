@@ -249,7 +249,7 @@ export async function seedApiFootballLineup(
   pool: Pool,
   fixtureExternalId: number,
   fixtureId: number,
-  options: { skipCache?: boolean } = {},
+  options: { skipCache?: boolean; preMatch?: boolean } = {},
 ): Promise<{ announced: boolean }> {
   const data = await callApiFootball<ApiFootballLineupsResponse>(
     `/fixtures/lineups?fixture=${fixtureExternalId}`,
@@ -257,6 +257,10 @@ export async function seedApiFootballLineup(
     options,
   );
   if (data.response.length === 0) return { announced: false };
+
+  // One timestamp for the whole fixture rather than one per row, so every
+  // player in a squad agrees on when it was captured.
+  const preMatchCapturedAt = options.preMatch ? new Date() : undefined;
 
   for (const teamLineup of data.response) {
     const teamId = await getOrCreateTeam(pool, canonicalTeamName(teamLineup.team.name), teamLineup.team.logo ?? undefined, teamLineup.team.id);
@@ -275,6 +279,7 @@ export async function seedApiFootballLineup(
         isStarting: true,
         shirtNumber: player.number ?? undefined,
         position: player.pos ?? undefined,
+        preMatchCapturedAt,
       });
     }
 
@@ -292,6 +297,7 @@ export async function seedApiFootballLineup(
         isStarting: false,
         shirtNumber: player.number ?? undefined,
         position: player.pos ?? undefined,
+        preMatchCapturedAt,
       });
     }
   }
@@ -388,7 +394,7 @@ export async function seedTodaysLineups(pool: Pool): Promise<MatchdayLineupsResu
       announced: didAnnounce,
     });
     try {
-      const result = await seedApiFootballLineup(pool, row.external_api_football_id, row.id, { skipCache: true });
+      const result = await seedApiFootballLineup(pool, row.external_api_football_id, row.id, { skipCache: true, preMatch: true });
       if (result.announced) announced++;
       outcomes.push(describe(result.announced));
     } catch (err) {

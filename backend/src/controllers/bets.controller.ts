@@ -39,6 +39,10 @@ export async function postBet(req: Request, res: Response): Promise<void> {
           fixtureId: Number(l?.fixtureId),
           market: l?.market,
           selection: l?.selection,
+          // Left undefined when absent rather than defaulted to 0, so a
+          // spread leg that forgot its line fails validation instead of
+          // silently becoming a draw-no-bet at 0.
+          line: l?.line === undefined || l?.line === null || l?.line === '' ? undefined : Number(l.line),
           oddsDecimal: Number(l?.oddsDecimal),
         }))
       : [],

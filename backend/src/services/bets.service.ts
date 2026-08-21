@@ -7,11 +7,33 @@ export type BetResult = LegResult; // same closed set -- overall result is deriv
 const VALID_RESULTS: LegResult[] = ['pending', 'won', 'lost', 'void'];
 
 export const ANYTIME_SCORER_MARKET = 'anytime_scorer';
+export const SPREAD_MARKET = 'spread';
+
+/**
+ * A spread leg's line is added to the SELECTED side's goals before the two
+ * are compared: "Arsenal -2.5" is selection 'home' (if Arsenal are home)
+ * with line -2.5, and wins only if Arsenal win by 3 or more.
+ *
+ * Quarter lines (-2.25, splitting the stake across -2 and -2.5) are
+ * rejected rather than silently mishandled. Settling one correctly means
+ * grading a single leg as half-won, which the result column
+ * ('won'/'lost'/'void') genuinely cannot express -- supporting them needs
+ * a stake-splitting model, not a rounding rule. Half and whole lines cover
+ * every spread a US book offers on soccer.
+ */
+export function assertSettleableLine(line: number): void {
+  if (!Number.isFinite(line)) throw new AppError('A spread leg needs a numeric line', 400);
+  if (Math.abs(line * 2 - Math.round(line * 2)) > 1e-9) {
+    throw new AppError('Only half and whole lines are supported (e.g. -2.5, -2, +1.5), not quarter lines', 400);
+  }
+}
 
 export interface CreateLegInput {
   fixtureId: number;
   market: string;
   selection: string;
+  /** Goal handicap on the selected side, spread markets only. Omitted elsewhere. */
+  line?: number;
   oddsDecimal: number;
 }
 
@@ -29,6 +51,8 @@ export interface BetLeg {
   fixtureId: number;
   market: string;
   selection: string;
+  /** 0 for markets with no line -- see migration 1701000000028. */
+  line: number;
   oddsDecimal: number;
   result: LegResult;
   settledAt: string | null;
@@ -102,6 +126,15 @@ export function assertValidLeg(leg: CreateLegInput): void {
   if (leg.market === ANYTIME_SCORER_MARKET && !(Number.isInteger(Number(leg.selection)) && Number(leg.selection) > 0)) {
     throw new AppError(`An ${ANYTIME_SCORER_MARKET} leg's selection must be a player id`, 400);
   }
+  if (leg.market === SPREAD_MARKET) {
+    if (leg.selection !== 'home' && leg.selection !== 'away') {
+      throw new AppError(`A ${SPREAD_MARKET} leg's selection must be 'home' or 'away'`, 400);
+    }
+    if (leg.line === undefined) {
+      throw new AppError(`A ${SPREAD_MARKET} leg needs a line (e.g. -2.5)`, 400);
+    }
+    assertSettleableLine(leg.line);
+  }
 }
 
 export function assertValidCreateInput(input: CreateBetInput): void {
@@ -142,9 +175,9 @@ export async function createBet(userId: number, input: CreateBetInput): Promise<
 
     for (const leg of input.legs) {
       await client.query(
-        `INSERT INTO bet_legs (bet_id, fixture_id, market, selection, odds_decimal)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [betId, leg.fixtureId, leg.market, leg.selection, leg.oddsDecimal],
+        `INSERT INTO bet_legs (bet_id, fixture_id, market, selection, odds_decimal, line)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [betId, leg.fixtureId, leg.market, leg.selection, leg.oddsDecimal, leg.line ?? 0],
       );
     }
     await client.query('COMMIT');
@@ -169,6 +202,7 @@ export interface BetLegRow {
   fixture_id: number;
   market: string;
   selection: string;
+  line: string;
   odds_decimal: string;
   leg_result: LegResult;
   leg_settled_at: string | null;
@@ -185,6 +219,8 @@ export interface BetLegRow {
   prob_home_win: string | null;
   prob_draw: string | null;
   prob_away_win: string | null;
+  predicted_home_goals: string | null;
+  predicted_away_goals: string | null;
   scorer_prob_scores: string | null;
   scorer_player_id: number | null;
   scorer_player_name: string | null;
@@ -198,10 +234,57 @@ export function legModelProbability(row: BetLegRow): number | null {
     if (row.selection === 'away') return Number(row.prob_away_win);
     return null;
   }
+  if (row.market === SPREAD_MARKET) {
+    // Rebuilt from the stored expected goals rather than read off a
+    // column, because model_predictions only stores the three match-winner
+    // probabilities and the two lambdas -- not the scoreline grid a spread
+    // needs. Two independent Poissons reproduce that grid closely, but NOT
+    // exactly: this omits the Dixon-Coles low-score correction (see
+    // docs/models.md section 2), which perturbs only the 0-0/1-0/0-1/1-1
+    // cells. That matters least for the handicaps anyone actually bets and
+    // most for a line near zero, so treat this as indicative rather than
+    // as the model's own number. Storing rho alongside the prediction
+    // would make it exact.
+    const lambdaHome = row.predicted_home_goals === null ? null : Number(row.predicted_home_goals);
+    const lambdaAway = row.predicted_away_goals === null ? null : Number(row.predicted_away_goals);
+    if (lambdaHome === null || lambdaAway === null) return null;
+    const line = Number(row.line);
+    const forHome = row.selection === 'home';
+    return spreadCoverProbability(forHome ? lambdaHome : lambdaAway, forHome ? lambdaAway : lambdaHome, line);
+  }
   if (row.market === ANYTIME_SCORER_MARKET) {
     return row.scorer_prob_scores === null ? null : Number(row.scorer_prob_scores);
   }
   return null;
+}
+
+const MAX_GOALS = 10; // matches DixonColesModel's own grid bound; the tail beyond is negligible
+
+function poissonPmf(k: number, lambda: number): number {
+  let logFactorial = 0;
+  for (let i = 2; i <= k; i++) logFactorial += Math.log(i);
+  return Math.exp(k * Math.log(lambda) - lambda - logFactorial);
+}
+
+/**
+ * P(selected side's goals + line > opponent's goals) under two independent
+ * Poissons. A push (exact equality on a whole line) is excluded from the
+ * "cover" probability, matching how the leg settles: void, not won.
+ */
+export function spreadCoverProbability(lambdaFor: number, lambdaAgainst: number, line: number): number {
+  const forProbs = Array.from({ length: MAX_GOALS + 1 }, (_, k) => poissonPmf(k, lambdaFor));
+  const againstProbs = Array.from({ length: MAX_GOALS + 1 }, (_, k) => poissonPmf(k, lambdaAgainst));
+  let cover = 0;
+  for (let scored = 0; scored <= MAX_GOALS; scored++) {
+    for (let conceded = 0; conceded <= MAX_GOALS; conceded++) {
+      if (scored + line > conceded) cover += forProbs[scored] * againstProbs[conceded];
+    }
+  }
+  // The grid is truncated at MAX_GOALS, so it sums to slightly under 1.
+  // Renormalising keeps this a probability rather than a number that
+  // drifts low for high-scoring fixtures.
+  const total = forProbs.reduce((a, b) => a + b, 0) * againstProbs.reduce((a, b) => a + b, 0);
+  return cover / total;
 }
 
 export function rowsToBet(rows: BetLegRow[]): Bet {
@@ -211,6 +294,7 @@ export function rowsToBet(rows: BetLegRow[]): Bet {
     fixtureId: r.fixture_id,
     market: r.market,
     selection: r.selection,
+    line: Number(r.line),
     oddsDecimal: Number(r.odds_decimal),
     result: r.leg_result,
     settledAt: r.leg_settled_at,
@@ -285,13 +369,14 @@ export function rowsToBet(rows: BetLegRow[]): Bet {
 // up the cast.
 const BET_LEG_SELECT = `
   SELECT b.id AS bet_id, b.stake, b.placed_at, b.odds_override_decimal,
-    bl.id AS leg_id, bl.fixture_id, bl.market, bl.selection, bl.odds_decimal,
+    bl.id AS leg_id, bl.fixture_id, bl.market, bl.selection, bl.line, bl.odds_decimal,
     bl.result AS leg_result, bl.settled_at AS leg_settled_at,
     f.kickoff_at, f.status, f.home_score, f.away_score,
     c.name AS competition_name, s.label AS season_label,
     ht.id AS home_team_id, ht.name AS home_team_name,
     at.id AS away_team_id, at.name AS away_team_name,
     mp.prob_home_win, mp.prob_draw, mp.prob_away_win,
+    mp.predicted_home_goals, mp.predicted_away_goals,
     sp.prob_scores AS scorer_prob_scores,
     sp_player.id AS scorer_player_id, sp_player.full_name AS scorer_player_name
   FROM bets b
@@ -303,7 +388,7 @@ const BET_LEG_SELECT = `
   JOIN competitions c ON c.id = cs.competition_id
   JOIN seasons s ON s.id = cs.season_id
   LEFT JOIN LATERAL (
-    SELECT prob_home_win, prob_draw, prob_away_win
+    SELECT prob_home_win, prob_draw, prob_away_win, predicted_home_goals, predicted_away_goals
     FROM model_predictions mp2
     WHERE mp2.fixture_id = f.id
     ORDER BY predicted_at DESC
@@ -361,6 +446,12 @@ async function qualifyingBetIds(userId: number, filters: BetFilters): Promise<nu
 //     grades as a loss, not a void -- a deliberate call (see
 //     docs/learning-log.md's Bets-overhaul entry): the bet is "did he
 //     score", and an unused sub or an unselected squad player didn't.
+//   - spread: the selected side's goals PLUS its line, against the other
+//     side's goals. This is the first market here that can genuinely tie:
+//     a whole line (Arsenal -2 winning by exactly 2) is a push, graded
+//     'void' so the stake comes back and the bet's own result derivation
+//     already excludes it from the parlay product. Half lines (-2.5)
+//     cannot tie, which is the whole reason books quote them.
 // Any other market (or a match_winner leg whose fixture is finished but
 // missing a score, e.g. abandoned) is left pending for a manual Won/Lost/
 // Void call via settleLeg -- there's no stored data to grade it from.
@@ -391,6 +482,20 @@ async function autoSettleFinishedLegs(userId: number): Promise<void> {
                ) >= 1 THEN 'won'
                ELSE 'lost'
              END
+           WHEN bl2.market = '${SPREAD_MARKET}' THEN
+             CASE
+               WHEN (
+                 CASE bl2.selection WHEN 'home' THEN f.home_score ELSE f.away_score END + bl2.line
+               ) > (
+                 CASE bl2.selection WHEN 'home' THEN f.away_score ELSE f.home_score END
+               ) THEN 'won'
+               WHEN (
+                 CASE bl2.selection WHEN 'home' THEN f.home_score ELSE f.away_score END + bl2.line
+               ) = (
+                 CASE bl2.selection WHEN 'home' THEN f.away_score ELSE f.home_score END
+               ) THEN 'void'
+               ELSE 'lost'
+             END
          END AS new_result
        FROM bet_legs bl2
        JOIN bets b2 ON b2.id = bl2.bet_id
@@ -398,8 +503,11 @@ async function autoSettleFinishedLegs(userId: number): Promise<void> {
        WHERE b2.user_id = $1
          AND bl2.result = 'pending'
          AND f.status = 'finished'
-         AND bl2.market IN ('match_winner', '${ANYTIME_SCORER_MARKET}')
-         AND (bl2.market != 'match_winner' OR (f.home_score IS NOT NULL AND f.away_score IS NOT NULL))
+         AND bl2.market IN ('match_winner', '${ANYTIME_SCORER_MARKET}', '${SPREAD_MARKET}')
+         -- Both score-derived markets need a real scoreline. An abandoned
+         -- fixture marked finished with NULL scores stays pending for a
+         -- manual call rather than grading against NULL.
+         AND (bl2.market = '${ANYTIME_SCORER_MARKET}' OR (f.home_score IS NOT NULL AND f.away_score IS NOT NULL))
      ) graded
      WHERE bl.id = graded.id`,
     [userId],
