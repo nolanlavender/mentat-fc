@@ -30,7 +30,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from app.data import blend_shots_on_target_into_scores, load_finished_matches
+from app.data import blend_shot_location_into_scores, blend_shots_on_target_into_scores, load_finished_matches
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.evaluate import (
@@ -39,32 +39,58 @@ from app.evaluate import (
     MIN_MATCHES_FOR_BACKTEST,
     SHOTS_ON_TARGET_BLEND_WEIGHT,
     SHRINKAGE,
+    SHRINK_TOWARD_JOINT,
     TEST_FRACTION,
     _outcome_one_hot,
 )
+
+# --- What this run compares -------------------------------------------
+#
+# THIS is the block to edit to point the comparison at a different
+# question. A and B are just two configurations; everything below is
+# generic. Keep the labels honest -- they're what the verdict is
+# reported against.
+#
+# Current question (2026-08-21): the shot-location proxy has just been
+# backfilled. Is weighting shots by WHERE they were taken a better
+# fitting signal than counting shots on target? They are alternatives,
+# not complements -- both replace the goal count with a lower-noise
+# proxy -- so B turns the incumbent off and the candidate on.
+A_LABEL = "shots on target (current)"
+B_LABEL = "shot location (candidate)"
+
+
+def _config(competition: str, use_shot_location: bool) -> tuple[float, float]:
+    """Returns (shots_on_target_weight, shot_location_weight)."""
+    if use_shot_location:
+        return 0.0, 1.0
+    return SHOTS_ON_TARGET_BLEND_WEIGHT[competition], 0.0
 
 BOOTSTRAP_SAMPLES = 5000
 CONFIDENCE = 95
 
 
-def _fit_all(train_matches: pd.DataFrame, shrink_toward_joint: bool) -> dict[str, DixonColesModel]:
+def _blend(matches: pd.DataFrame, competition: str, use_shot_location: bool) -> pd.DataFrame:
+    sot_weight, location_weight = _config(competition, use_shot_location)
+    blended = blend_shots_on_target_into_scores(matches, sot_weight)
+    return blend_shot_location_into_scores(blended, location_weight)
+
+
+def _fit_all(train_matches: pd.DataFrame, use_shot_location: bool) -> dict[str, DixonColesModel]:
     """The same three fits app.evaluate builds, under one configuration."""
     joint = DixonColesModel()
     joint.fit(
-        blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
+        _blend(train_matches, "FA Cup", use_shot_location),
         half_life_days=HALF_LIFE_DAYS,
         shrinkage=SHRINKAGE["FA Cup"],
     )
-    prior = joint if shrink_toward_joint else None
+    prior = joint if SHRINK_TOWARD_JOINT else None
 
     models: dict[str, DixonColesModel] = {"FA Cup": joint}
     for competition in ("Premier League", "Championship"):
         model = DixonColesModel()
         model.fit(
-            blend_shots_on_target_into_scores(
-                train_matches[train_matches["competition_name"] == competition],
-                SHOTS_ON_TARGET_BLEND_WEIGHT[competition],
-            ),
+            _blend(train_matches[train_matches["competition_name"] == competition], competition, use_shot_location),
             half_life_days=HALF_LIFE_DAYS,
             shrinkage=SHRINKAGE[competition],
             prior_model=prior,
@@ -114,12 +140,14 @@ def main() -> None:
         train_matches = matches[matches["kickoff_date"] < cutoff_date]
         test_matches = matches[matches["kickoff_date"] >= cutoff_date]
 
+        located = matches["home_shots_inside_box"].notna().sum()
         print(f"Paired A/B on held-out matches after {cutoff_date}")
-        print("  A = shrink toward league average (current)")
-        print("  B = shrink toward the joint fit (candidate)\n")
+        print(f"  A = {A_LABEL}")
+        print(f"  B = {B_LABEL}")
+        print(f"  shot-location coverage: {located}/{len(matches)} matches ({located / len(matches):.0%})\n")
 
-        baseline = _fit_all(train_matches, shrink_toward_joint=False)
-        candidate = _fit_all(train_matches, shrink_toward_joint=True)
+        baseline = _fit_all(train_matches, use_shot_location=False)
+        candidate = _fit_all(train_matches, use_shot_location=True)
 
         for competition in FIT_COMPETITIONS:
             competition_test = test_matches[test_matches["competition_name"] == competition]

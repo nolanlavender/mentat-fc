@@ -1,7 +1,14 @@
+from datetime import date
+
+import numpy as np
 import pandas as pd
 import pytest
 
-from app.data import blend_shots_on_target_into_scores
+from app.data import (
+    blend_shot_location_into_scores,
+    blend_shots_on_target_into_scores,
+    estimate_shot_location_conversion,
+)
 
 
 def _match(home_score, away_score, home_sot, away_sot):
@@ -68,3 +75,71 @@ class TestBlendShotsOnTargetIntoScores:
         blend_shots_on_target_into_scores(matches, blend_weight=1.0)
         assert matches["home_score"].iloc[0] == 2
         assert matches["away_score"].iloc[0] == 1
+
+
+class TestShotLocationBlend:
+    """
+    The shot-location proxy learns per-location conversion rates from the
+    data rather than being told them (see
+    app.data.estimate_shot_location_conversion). These pin the properties
+    that actually matter: the rates are recovered from known data, the
+    combination is what's reliable, and partial coverage never invents a
+    value for a match that has none.
+    """
+
+    @staticmethod
+    def _synthetic(rate_inside: float, rate_outside: float, seed: int = 7, n: int = 600):
+        rng = np.random.default_rng(seed)
+        inside = rng.integers(2, 14, n)
+        outside = rng.integers(1, 10, n)
+        goals = rng.poisson(inside * rate_inside + outside * rate_outside)
+        half = n // 2
+        return pd.DataFrame({
+            "kickoff_date": [date(2026, 1, 1)] * half,
+            "home_score": goals[:half], "away_score": goals[half:],
+            "home_shots_inside_box": inside[:half], "away_shots_inside_box": inside[half:],
+            "home_shots_outside_box": outside[:half], "away_shots_outside_box": outside[half:],
+        })
+
+    def test_recovers_known_conversion_rates(self):
+        matches = self._synthetic(0.13, 0.035)
+        rate_inside, rate_outside = estimate_shot_location_conversion(matches)
+        # Generous tolerances on purpose: the point is that it lands in the
+        # right region and gets the ORDERING right, not that a noisy
+        # coefficient hits a decimal place (see the function's own note).
+        assert 0.09 < rate_inside < 0.17
+        assert 0.0 <= rate_outside < 0.08
+        assert rate_inside > rate_outside, "an inside-box shot must be worth more than one from distance"
+
+    def test_returns_none_without_enough_data(self):
+        assert estimate_shot_location_conversion(self._synthetic(0.13, 0.035, n=20)) is None
+
+    def test_returns_none_when_the_design_is_degenerate(self):
+        # Every shot from inside, none from outside -- the second rate is
+        # simply not estimable, and inventing one would be worse than
+        # declining to blend.
+        matches = self._synthetic(0.13, 0.035)
+        matches["home_shots_outside_box"] = 0
+        matches["away_shots_outside_box"] = 0
+        assert estimate_shot_location_conversion(matches) is None
+
+    def test_zero_weight_is_a_no_op(self):
+        matches = self._synthetic(0.13, 0.035)
+        blended = blend_shot_location_into_scores(matches, 0.0)
+        assert (blended["home_score"] == matches["home_score"].astype(float)).all()
+
+    def test_full_weight_is_smoother_than_real_goals(self):
+        # The entire reason to blend a proxy in: it should carry the same
+        # average signal with less match-to-match noise than the goal count.
+        matches = self._synthetic(0.13, 0.035)
+        blended = blend_shot_location_into_scores(matches, 1.0)
+        assert blended["home_score"].var() < matches["home_score"].astype(float).var()
+        assert blended["home_score"].mean() == pytest.approx(matches["home_score"].mean(), abs=0.15)
+
+    def test_missing_location_keeps_the_real_score(self):
+        matches = self._synthetic(0.13, 0.035)
+        matches.loc[:9, "home_shots_inside_box"] = None
+        blended = blend_shot_location_into_scores(matches, 1.0)
+        assert (blended.loc[:9, "home_score"] == matches.loc[:9, "home_score"].astype(float)).all()
+        # ...while rows that DO have coverage still get blended.
+        assert not (blended.loc[10:, "home_score"] == matches.loc[10:, "home_score"].astype(float)).all()
