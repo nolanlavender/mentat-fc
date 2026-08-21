@@ -167,6 +167,83 @@ class TestFitShrinkage:
         assert total == pytest.approx(1.0, abs=1e-6)
 
 
+def _two_division_prior() -> DixonColesModel:
+    """
+    A joint fit spanning a strong and a weak division, connected by cup
+    ties -- the shape app.train's real joint model has, and the thing that
+    makes a cross-division prior meaningful at all.
+    """
+    strong = ["Alpha", "Bravo", "Charlie"]
+    weak = ["Xray", "Yankee", "Zulu"]
+    rows = []
+    for teams, home_goals, away_goals in ((strong, 3, 1), (weak, 1, 1)):
+        for h in teams:
+            for a in teams:
+                if h != a:
+                    rows.append({"kickoff_date": date(2026, 1, 1), "home_team": h, "away_team": a,
+                                 "home_score": home_goals, "away_score": away_goals})
+    # Cup ties: the strong division wins these, which is what puts both
+    # divisions on one comparable scale.
+    for h, a in zip(strong, weak):
+        rows.append({"kickoff_date": date(2026, 2, 1), "home_team": h, "away_team": a,
+                     "home_score": 4, "away_score": 0})
+    model = DixonColesModel()
+    model.fit(pd.DataFrame(rows), half_life_days=180, shrinkage=1.0)
+    return model
+
+
+class TestPriorShrinkage:
+    def test_no_prior_is_unchanged(self):
+        # Regression safety: the default path must be bit-for-bit what it
+        # was before prior_model existed.
+        without = DixonColesModel()
+        without.fit(_round_robin_matches(), half_life_days=180, shrinkage=1.0)
+        explicit_none = DixonColesModel()
+        explicit_none.fit(_round_robin_matches(), half_life_days=180, shrinkage=1.0, prior_model=None)
+
+        assert without.attack == pytest.approx(explicit_none.attack)
+        assert without.defense == pytest.approx(explicit_none.defense)
+
+    def test_a_relegated_team_keeps_its_pedigree_instead_of_collapsing_to_average(self):
+        prior = _two_division_prior()
+        # "Alpha" drops into the weak division and plays a single match there.
+        weak_division = pd.DataFrame(
+            [{"kickoff_date": date(2026, 3, 1), "home_team": h, "away_team": a, "home_score": 1, "away_score": 1}
+             for h in ["Xray", "Yankee", "Zulu"] for a in ["Xray", "Yankee", "Zulu"] if h != a]
+            + [{"kickoff_date": date(2026, 8, 1), "home_team": "Alpha", "away_team": "Xray",
+                "home_score": 4, "away_score": 0}]
+        )
+
+        to_mean = DixonColesModel()
+        to_mean.fit(weak_division, half_life_days=180, shrinkage=5.0)
+        to_prior = DixonColesModel()
+        to_prior.fit(weak_division, half_life_days=180, shrinkage=5.0, prior_model=prior)
+
+        # Shrinking toward the league mean pulls Alpha to ~average; the
+        # cross-division prior knows they are genuinely stronger than that.
+        assert to_prior.attack["Alpha"] > to_mean.attack["Alpha"]
+        assert to_prior.predict("Alpha", "Xray").prob_home_win > to_mean.predict("Alpha", "Xray").prob_home_win
+
+    def test_a_team_absent_from_the_prior_falls_back_to_league_average(self):
+        prior = _two_division_prior()
+        matches = _round_robin_matches()  # "Strong"/"Weak" appear nowhere in the prior
+        with_prior = DixonColesModel()
+        with_prior.fit(matches, half_life_days=180, shrinkage=1.0, prior_model=prior)
+        without = DixonColesModel()
+        without.fit(matches, half_life_days=180, shrinkage=1.0)
+
+        # No prior information for these teams, so the target stays 0 and
+        # the result is identical to plain league-average shrinkage.
+        assert with_prior.attack == pytest.approx(without.attack)
+
+    def test_probabilities_stay_valid_with_a_prior(self):
+        prior = _two_division_prior()
+        model = DixonColesModel()
+        model.fit(_round_robin_matches(), half_life_days=180, shrinkage=1.0, prior_model=prior)
+        pred = model.predict("Strong", "Weak")
+        assert pred.prob_home_win + pred.prob_draw + pred.prob_away_win == pytest.approx(1.0, abs=1e-6)
+
+
 class TestPathologicalRho:
     """
     predict() applies tau to four low-score cells, and tau goes negative for

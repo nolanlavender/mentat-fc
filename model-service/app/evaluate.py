@@ -23,6 +23,7 @@ Usage: python -m app.evaluate
 
 from __future__ import annotations
 
+import os
 import sys
 
 import numpy as np
@@ -128,6 +129,38 @@ SHRINKAGE: dict[str, float] = {
     "FA Cup": 10.0,
 }
 
+# WHAT the shrinkage above pulls each team toward.
+#
+# False (today's deployed behaviour): league average. Fine as a default,
+# but a genuinely poor prior for the case shrinkage exists to fix. A club
+# relegated into this competition has three seasons of top-flight results
+# saying they are well ABOVE this division's average -- pulling them to
+# 1.0 discards all of it and trades an overrating for an underrating.
+#
+# True: pull each team toward the JOINT fit's rating for them instead,
+# re-centred onto this competition's own scale (see
+# DixonColesModel.fit()'s prior_model note for the re-centring, which is
+# the fiddly part -- the joint fit centres its attack mean across ~800
+# teams, so its raw numbers mean nothing here until shifted). The joint
+# fit spans every competition and is calibrated across divisions by the
+# cup ties connecting them, so a relegated club's joint rating is
+# effectively "their top-flight strength on a common scale". Standard
+# hierarchical partial pooling: the shrinkage target becomes
+# team-specific rather than global.
+#
+# Synthetic check of the three options on a relegated-club shape gave
+# P(beat a mid-table side in the new division) of 98.2% unshrunk, 63.4%
+# shrunk to league average, 84.3% shrunk to the joint fit -- i.e. the
+# prior keeps real pedigree that shrinking to the mean throws away. That
+# is a plausible ordering, NOT evidence it predicts better; only a real
+# backtest against held-out matches can say that, which is what this
+# constant exists to run.
+#
+# SHRINK_TOWARD_JOINT_OVERRIDE (env var, "1"/"0") lets the backtest
+# workflow A/B this without editing the file. Temporary, same as the
+# SHRINKAGE sweep's override was -- delete both once a verdict is in.
+SHRINK_TOWARD_JOINT: bool = os.environ.get("SHRINK_TOWARD_JOINT_OVERRIDE", "0") == "1"
+
 
 def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
     """Mean squared error between predicted probability vectors and one-hot actual outcomes.
@@ -214,7 +247,10 @@ def main() -> None:
         if len(matches) < MIN_MATCHES_FOR_BACKTEST:
             print(f"Only {len(matches)} matches across {FIT_COMPETITIONS}, not enough for a meaningful backtest, skipping.")
             return
-        print(f"HALF_LIFE_DAYS={HALF_LIFE_DAYS}  SHOTS_ON_TARGET_BLEND_WEIGHT={SHOTS_ON_TARGET_BLEND_WEIGHT}  SHRINKAGE={SHRINKAGE}")
+        print(
+            f"HALF_LIFE_DAYS={HALF_LIFE_DAYS}  SHOTS_ON_TARGET_BLEND_WEIGHT={SHOTS_ON_TARGET_BLEND_WEIGHT}  "
+            f"SHRINKAGE={SHRINKAGE}  SHRINK_TOWARD_JOINT={SHRINK_TOWARD_JOINT}"
+        )
 
         # One global date cutoff across the joint dataset, not a separate
         # per-competition split -- matches came back ordered by kickoff_date
@@ -232,11 +268,24 @@ def main() -> None:
         # for the actual held-out outcomes, must stay real scores
         # untouched, or the backtest would be scoring the model against a
         # distorted version of what really happened instead of reality.
+        # Joint fit first, not last as it used to be: it is used for FA Cup
+        # predictions AND, when SHRINK_TOWARD_JOINT is on, as the shrinkage
+        # prior for the two single-competition fits below -- so it has to
+        # exist before they are fitted. Its own fit never uses a prior;
+        # there is nothing broader to pull it toward.
+        joint_model = DixonColesModel()
+        joint_model.fit(
+            blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
+            half_life_days=HALF_LIFE_DAYS,
+            shrinkage=SHRINKAGE["FA Cup"],
+        )
+        prior = joint_model if SHRINK_TOWARD_JOINT else None
+
         pl_train = blend_shots_on_target_into_scores(
             train_matches[train_matches["competition_name"] == "Premier League"], SHOTS_ON_TARGET_BLEND_WEIGHT["Premier League"]
         )
         pl_model = DixonColesModel()
-        pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Premier League"])
+        pl_model.fit(pl_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Premier League"], prior_model=prior)
         print(f"Premier League fit on {pl_model.fitted_on} matches, {len(pl_model.teams)} teams, cutoff {cutoff_date}")
         _predict_and_score(
             pl_model, conn, "Premier League", test_matches[test_matches["competition_name"] == "Premier League"], len(pl_train)
@@ -246,7 +295,7 @@ def main() -> None:
             train_matches[train_matches["competition_name"] == "Championship"], SHOTS_ON_TARGET_BLEND_WEIGHT["Championship"]
         )
         championship_model = DixonColesModel()
-        championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Championship"])
+        championship_model.fit(championship_train, half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["Championship"], prior_model=prior)
         print(f"Championship fit on {championship_model.fitted_on} matches, {len(championship_model.teams)} teams, cutoff {cutoff_date}")
         _predict_and_score(
             championship_model,
@@ -256,15 +305,10 @@ def main() -> None:
             len(championship_train),
         )
 
-        # Joint fit -- all three competitions' pre-cutoff matches -- used
-        # only for FA Cup, the one competition that actually needs
-        # cross-league comparability. See app.train's 2026-08-15 note.
-        joint_model = DixonColesModel()
-        joint_model.fit(
-            blend_shots_on_target_into_scores(train_matches, SHOTS_ON_TARGET_BLEND_WEIGHT["FA Cup"]),
-            half_life_days=HALF_LIFE_DAYS,
-            shrinkage=SHRINKAGE["FA Cup"],
-        )
+        # Fitted above, before the two single-competition models that may
+        # use it as their prior. Used here for FA Cup, the one competition
+        # that actually needs cross-league comparability (see app.train's
+        # 2026-08-15 note).
         print(
             f"Joint fit (for FA Cup) on {joint_model.fitted_on} matches across {', '.join(FIT_COMPETITIONS)}, "
             f"{len(joint_model.teams)} teams, cutoff {cutoff_date}"
