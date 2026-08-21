@@ -6052,3 +6052,44 @@ keep, and may earn its place somewhere other than team-strength fitting
 `app.compare` is reset to a neutral state (A == B) rather than left
 pointed at a settled question, so the next run of it is a self-check
 whose intervals should collapse to exactly zero.
+
+## 2026-08-21 -- Reopening shot location: the rejection test wasn't a fair fight
+
+Caught on re-reading my own work, and it's a methodology error worth
+naming: shot location was rejected by comparing **shots-on-target at its
+tuned weight** (0.75 Premier League / 0.25 Championship / 1.0 FA Cup,
+each chosen from a five-value sweep) against **location at a flat 1.0**,
+a value that was never tuned at all. The incumbent got to play its best
+card and the challenger got whatever was convenient.
+
+The structural argument against location still stands -- inside + outside
+sums to total shots, so it discards the on-target filter, and every goal
+is by definition an on-target shot. But that argument predicts location
+is a *weaker* signal, not that it's worthless at every mixing weight, and
+the Premier League (the one competition at 97% coverage) leaned positive
+at -0.00626. Rejecting on an untuned comparison was premature.
+
+`app.compare` is now a **sweep**: one baseline, several candidate weights,
+every candidate paired against the same baseline on the same held-out
+fixtures, with its own bootstrapped interval. That is strictly better
+tooling than the original shots-on-target sweep had -- those weights were
+chosen from point estimates with no confidence intervals at all, which
+means "0.75 is the Premier League optimum" has never actually been shown
+to be distinguishable from 0.5 or 1.0. Worth revisiting on the same
+machinery later.
+
+**A real bug fell out of building the fair comparison**, and it was the
+same failure mode as the one this whole thread started with. The
+fallback-aware blend overrides covered rows with the primary proxy -- but
+at `primary_weight = 0` the primary blend returns the ORIGINAL scores, so
+the override stripped the fallback's smoothing from precisely the
+best-covered rows. The boundary case silently produced *less* smoothing
+than the baseline it was supposed to equal. Caught by asserting the
+property that should obviously hold (primary weight 0 == pure fallback)
+rather than by reading the code, which is the second time that exact
+class of bug has appeared and the reason it now has three tests around it.
+
+Also worth noting what didn't change: `blend_shot_proxies_with_fallback`
+is a general replacement for the function removed in the previous entry,
+not a revival of it. It takes any two signal sets rather than hardcoding
+location-versus-shots-on-target, so the next proxy comparison reuses it.
