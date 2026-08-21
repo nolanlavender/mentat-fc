@@ -4,6 +4,7 @@ import { apiUrl } from '../api/client';
 import type { FixtureDetail, FixtureLineupPlayer, FixtureOdds } from '../api/types';
 import { Crest, PlayerPhoto } from '../components/Crest';
 import { shortCode } from '../lib/teamDisplay';
+import { useOddsFormat } from '../odds/OddsFormatContext';
 
 const TOP_SCORERS_SHOWN = 5;
 
@@ -36,10 +37,6 @@ function formatKickoff(iso: string): string {
     hour: 'numeric',
     minute: '2-digit',
   });
-}
-
-function formatPercent(value: number): string {
-  return `${(value * 100).toFixed(1)}%`;
 }
 
 // A stat comparison row only worth rendering once at least one side has a
@@ -117,6 +114,7 @@ function TeamLineup({ title, lineup, teamId }: { title: string; lineup: FixtureL
 }
 
 export function FixturePage() {
+  const { formatProbability } = useOddsFormat();
   const { id } = useParams<{ id: string }>();
   const { data, loading, error } = useFetch<FixtureDetail>(id ? apiUrl(`/api/fixtures/${id}`) : null);
 
@@ -166,8 +164,8 @@ export function FixturePage() {
         <section>
           <h2>Model vs. market</h2>
           <p>
-            Model: {shortCode(data.homeTeam)} {formatPercent(data.prediction.probHomeWin)} · Draw{' '}
-            {formatPercent(data.prediction.probDraw)} · {shortCode(data.awayTeam)} {formatPercent(data.prediction.probAwayWin)}
+            Model: {shortCode(data.homeTeam)} {formatProbability(data.prediction.probHomeWin)} · Draw{' '}
+            {formatProbability(data.prediction.probDraw)} · {shortCode(data.awayTeam)} {formatProbability(data.prediction.probAwayWin)}
             {data.prediction.predictedHomeGoals !== null && data.prediction.predictedAwayGoals !== null && (
               <>
                 {' '}
@@ -177,8 +175,8 @@ export function FixturePage() {
           </p>
           {marketProbability && (
             <p>
-              Market (closing, vig removed): {shortCode(data.homeTeam)} {formatPercent(marketProbability.home)} · Draw{' '}
-              {formatPercent(marketProbability.draw)} · {shortCode(data.awayTeam)} {formatPercent(marketProbability.away)}
+              Market (closing, vig removed): {shortCode(data.homeTeam)} {formatProbability(marketProbability.home)} · Draw{' '}
+              {formatProbability(marketProbability.draw)} · {shortCode(data.awayTeam)} {formatProbability(marketProbability.away)}
             </p>
           )}
         </section>
@@ -195,7 +193,7 @@ export function FixturePage() {
                   {s.playerName}
                   <span className="fixture-meta">({s.teamId === data.homeTeam.id ? shortCode(data.homeTeam) : shortCode(data.awayTeam)})</span>
                 </Link>
-                <span className="fixture-lineup-stats">{formatPercent(s.probScores)}</span>
+                <span className="fixture-lineup-stats">{formatProbability(s.probScores)}</span>
               </li>
             ))}
           </ol>

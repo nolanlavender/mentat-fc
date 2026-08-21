@@ -5459,3 +5459,60 @@ commit's git history rather than reinventing it.
 All 72 tests still pass (the shrinkage mechanism itself, `TestFitShrinkage`,
 was already covered by #80 and is unchanged -- only the promoted values
 and how they're threaded through changed here).
+
+## 2026-08-21 -- Odds format toggle: percent / decimal / American
+
+Requested directly ("a toggle to switch between decimal odds on
+predictions vs American odds (-100, +120, etc) ... across anything with
+predictions odds on it"). Every prediction surface had been rendering
+raw percentages, via **three separate copies** of the same
+`formatPercent` helper (PredictionsPage, FixturePage, TeamDashboardPage)
+that had quietly drifted apart -- FixturePage's used one decimal place
+where the others used two. Consolidating them behind one shared
+formatter fixed that inconsistency as a side effect, settling on the
+2dp the rest of the app already used.
+
+**The conversion, and one thing worth being precise about.** Probability
+to decimal is just `1 / p`. Decimal to American pivots at even money
+(2.00): above it the number is profit on a 100 stake (+150), below it the
+stake needed to profit 100 (-150). Verified against real values before
+wiring any UI: 50% -> 2.00 -> +100, 40% -> 2.50 -> +150, and a
+round-trip through the pre-existing `americanToDecimal` (which the bets
+form already used for input) returns the original American number
+exactly for -250/-110/+100/+150/+900.
+
+The thing worth naming, since the app shows these next to real bookmaker
+lines: converting a probability straight to odds gives **fair** odds,
+with no margin. A real sportsbook's price on the same outcome is always
+somewhat worse than its own implied probability implies -- that gap is
+the vig. So the model's odds looking "better" than a book's is partly
+just this, not pure edge. Written into `lib/odds.ts` rather than left as
+folklore.
+
+**Two formatters, not one**, because there are genuinely two kinds of
+number on screen: `formatOdds(probability, format)` for model
+probabilities, and `formatPrice(decimal, format)` for a real bookmaker's
+already-decimal price (the Bets page's `@ 2.50`). They differ in what
+"percent" means -- an implied probability that, for a real price,
+includes the book's margin. Both return an em dash for anything with no
+finite price (probability of exactly 0 or 1, a decimal <= 1.00)
+deliberately, rather than a fake-looking "+99900" that would read as a
+real prediction.
+
+State lives in one app-wide context (`odds/OddsFormatContext`), mirroring
+`auth/AuthContext`, persisted to localStorage behind try/catch -- reading
+localStorage *throws* (not returns null) in a browser set to block site
+data, which would take the whole app down on load rather than just losing
+a preference. Global rather than per-page on purpose: the same fixture's
+numbers appear on the Predictions list, its own detail page and a team
+dashboard, and having those disagree would be actively misleading.
+
+Deliberately NOT toggled: predicted goals (2.10 - 1.10 is a scoreline,
+not a price), ROI and edge percentages on the Bets page, and "your
+implied probability" -- that one is explicitly the probability reading of
+a price already shown as odds a few characters earlier on the same line.
+
+Verified in a real browser across all three formats: 55% renders as
+55.00% / 1.82 / -122 and 25% as 25.00% / 4.00 / +300, the choice survives
+a full reload, and it carries across to the fixture detail page and its
+scorer picks.

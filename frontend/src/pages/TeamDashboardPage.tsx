@@ -5,14 +5,11 @@ import type { SquadPlayer, TeamDashboard } from '../api/types';
 import { TeamSwitcher } from '../components/TeamSwitcher';
 import { Crest, PlayerPhoto } from '../components/Crest';
 import { shortCode } from '../lib/teamDisplay';
+import { useOddsFormat } from '../odds/OddsFormatContext';
 import { POSITION_GROUPS, positionGroup, type PositionGroup } from '../lib/positions';
 
 function resultClass(result: 'W' | 'D' | 'L'): string {
   return `form-badge form-badge-${result.toLowerCase()}`;
-}
-
-function formatPercent(value: number): string {
-  return `${(value * 100).toFixed(2)}%`;
 }
 
 function groupSquadByPosition(squad: SquadPlayer[]): Array<[PositionGroup, SquadPlayer[]]> {
@@ -29,6 +26,7 @@ function groupSquadByPosition(squad: SquadPlayer[]): Array<[PositionGroup, Squad
 }
 
 export function TeamDashboardPage() {
+  const { formatProbability } = useOddsFormat();
   const { id } = useParams<{ id: string }>();
   const { data, loading, error } = useFetch<TeamDashboard>(id ? apiUrl(`/api/teams/${id}/dashboard`) : null);
 
@@ -103,7 +101,7 @@ export function TeamDashboardPage() {
                     {data.nextMatch.prediction.predictedHomeGoals !== null && data.nextMatch.prediction.predictedAwayGoals !== null
                       ? `${shortCode(data.nextMatch.homeTeam)} ${data.nextMatch.prediction.predictedHomeGoals.toFixed(2)} - ${shortCode(data.nextMatch.awayTeam)} ${data.nextMatch.prediction.predictedAwayGoals.toFixed(2)}`
                       : '?'}{' '}
-                    (home win {formatPercent(data.nextMatch.prediction.probHomeWin)})
+                    (home win {formatProbability(data.nextMatch.prediction.probHomeWin)})
                   </p>
                 ) : (
                   <p>No prediction available for this fixture yet.</p>
