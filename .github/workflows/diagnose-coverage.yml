@@ -1,0 +1,48 @@
+name: Diagnose prediction coverage
+
+# Manual-only (never scheduled): runs app.diagnose_coverage against the
+# real database and prints, per upcoming fixture, whether it has a
+# match-outcome prediction and goal-scorer picks -- and when scorers are
+# missing, which of the several genuinely different causes it is (see that
+# module's own docstring). Read-only, writes nothing, safe to run any time.
+#
+# Kept (not temporary, unlike the SHRINKAGE sweep workflow) because "why
+# does this fixture have no scorer picks?" is a recurring question worth
+# being able to answer from a phone without a laptop or a local DATABASE_URL.
+#
+# Actions > "Diagnose prediction coverage" > Run workflow. Optionally pass
+# a team-name substring to narrow the output to just that team's fixtures.
+#
+# Requires the DATABASE_URL secret the other workflows already use.
+on:
+  workflow_dispatch:
+    inputs:
+      team:
+        description: 'Optional team-name substring to filter to (e.g. Arsenal)'
+        required: false
+        default: ''
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+
+      - name: Diagnose coverage
+        working-directory: model-service
+        # Passed through env, NOT interpolated straight into the run: line --
+        # `${{ inputs.team }}` inline would let a dispatch input inject shell
+        # commands. Quoted "$TEAM" is inert; an empty value is handled as
+        # "no filter" by diagnose_coverage itself.
+        env:
+          TEAM: ${{ inputs.team }}
+        run: python -m app.diagnose_coverage "$TEAM"
