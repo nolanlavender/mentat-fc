@@ -584,12 +584,22 @@ else ever scores. The implied coverage is remarkably stable across
 competitions — **0.73 days ahead, 0.79 with a squad** — which is the real
 quantity that was missing.
 
-Hence a third mode, `expected`: divide by the team's whole per-match
-open-play expectation summed over *every* player, fringe ones included. The
-reliable pool then receives exactly its historical share, recovering the
-coverage from data rather than assuming it, and with no new tuned constant.
-Ships off (`ALLOCATION_MODE = "none"`) until the backtest scores all three
-on the same fixtures.
+A third mode, `expected`, divides by the team's whole per-match open-play
+expectation summed over *every* player, fringe ones included — on the
+theory that the missing coverage was the fringe players the reliability
+filter drops. **Measured, that theory was wrong**: `expected` landed at
+1.326, because fringe players only account for ~5% of the historical pool
+while the gap to close was 28%.
+
+The other 23% turned out to be an artifact of the *measurement*, not the
+model. The backtest froze `player_shares` at one cutoff and scored a year
+of matches after it — so every summer signing, academy debut and January
+arrival in the test window was invisible to the model, and their goals
+counted against it. Production retrains daily and has no such blind spot.
+The scorer backtest is now walk-forward, rebuilding shares at each fold
+boundary, so staleness is bounded by the fold width instead of the whole
+test window. All three modes still ship off (`ALLOCATION_MODE = "none"`)
+until that corrected measurement runs.
 
 **The units are the trap.** The weights are `non_penalty_goal_share ×
 minutes_share` — a normalised share, not a goals-per-match rate. Building

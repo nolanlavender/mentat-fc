@@ -36,6 +36,26 @@ Two prediction modes, because production runs in both:
     fixture_lineups is populated. Players not named are dropped; starters
     and bench get their role-specific minutes.
 
+WALK-FORWARD (2026-08-22), and here it fixes a bias rather than just
+tightening an interval. The first version froze player_shares at a single
+cutoff and scored every match after it -- more than a full season. But a
+player only enters the shares pool once he has MIN_PLAYER_MATCHES
+appearances, so with a frozen cutoff every summer signing, every academy
+debut and every January arrival in the test window is invisible to the
+model and their goals count against it. Production retrains daily and has
+no such blind spot.
+
+That inflated exactly the quantity the allocation decision turns on. The
+2026-08-22 run measured reliable players covering ~72% of goals; the
+"expected" mode, which withholds the share of players below the
+reliability threshold, only found 5% to withhold. The missing ~23% was not
+fringe players at all -- it was players who did not exist in the training
+data yet, an artifact of the frozen cutoff.
+
+Now each fold recomputes the shares as of its own boundary, so staleness
+is bounded by the fold width instead of by the whole test window, which is
+much closer to what production actually does.
+
 Reads only. Usage: python -m app.evaluate_scorers
 """
 
@@ -56,11 +76,14 @@ from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.evaluate import (
     FIT_COMPETITIONS,
+    FOLD_FRACTION,
+    FOLDS,
     HALF_LIFE_DAYS,
     MIN_MATCHES_FOR_BACKTEST,
     SHRINKAGE,
-    TEST_FRACTION,
     _blend,
+    _fold_frames,
+    walk_forward_folds,
 )
 from app.goal_scorer import ALLOCATION_MODES, allocate_team_goals, compute_player_shares
 
@@ -189,6 +212,25 @@ def _attach_outcomes(predictions: pd.DataFrame, actual_goals: pd.DataFrame) -> p
     return merged
 
 
+def _fit_fold(train_matches: pd.DataFrame) -> tuple[dict[str, DixonColesModel], DixonColesModel]:
+    """The three fits app.train builds, from one fold's training window."""
+    joint = DixonColesModel()
+    joint.fit(_blend(train_matches, "FA Cup"), half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["FA Cup"])
+    models: dict[str, DixonColesModel] = {"FA Cup": joint}
+    for competition in ("Premier League", "Championship"):
+        competition_matches = train_matches[train_matches["competition_name"] == competition]
+        if len(competition_matches) < MIN_MATCHES_FOR_BACKTEST:
+            continue
+        model = DixonColesModel()
+        model.fit(
+            _blend(competition_matches, competition),
+            half_life_days=HALF_LIFE_DAYS,
+            shrinkage=SHRINKAGE[competition],
+        )
+        models[competition] = model
+    return models, joint
+
+
 def main() -> None:
     conn = get_connection()
     try:
@@ -197,61 +239,37 @@ def main() -> None:
             print(f"Only {len(matches)} matches, not enough for a meaningful backtest.")
             return
 
-        split_idx = int(len(matches) * (1 - TEST_FRACTION))
-        cutoff_date = matches.iloc[split_idx]["kickoff_date"]
-        train_matches = matches[matches["kickoff_date"] < cutoff_date]
-        test_matches = matches[matches["kickoff_date"] >= cutoff_date]
-        print(f"Goal-scorer backtest, held-out matches from {cutoff_date} ({len(test_matches)} fixtures)\n")
-
-        joint_model = DixonColesModel()
-        joint_model.fit(
-            _blend(train_matches, "FA Cup"), half_life_days=HALF_LIFE_DAYS, shrinkage=SHRINKAGE["FA Cup"]
-        )
-        models: dict[str, DixonColesModel] = {"FA Cup": joint_model}
-        for competition in ("Premier League", "Championship"):
-            competition_matches = train_matches[train_matches["competition_name"] == competition]
-            if len(competition_matches) < MIN_MATCHES_FOR_BACKTEST:
-                continue
-            model = DixonColesModel()
-            model.fit(
-                _blend(competition_matches, competition),
-                half_life_days=HALF_LIFE_DAYS,
-                shrinkage=SHRINKAGE[competition],
-            )
-            models[competition] = model
-
-        # as_of=cutoff_date is the whole reason this is a backtest and not a
-        # description of the past: shares built from appearances the model
-        # could not have seen would be scoring itself on its own answers.
-        appearances = load_player_squad_appearances(conn, FIT_COMPETITIONS, as_of=cutoff_date)
-        player_shares = compute_player_shares(appearances, cutoff_date, half_life_days=HALF_LIFE_DAYS)
+        folds = walk_forward_folds(matches)
+        if not folds:
+            print("Not enough date spread to build walk-forward folds.")
+            return
+        first_cutoff = folds[0][0]
         print(
-            f"Player shares from {len(appearances)} pre-cutoff appearances: "
-            f"{player_shares['player_id'].nunique()} reliable players across "
-            f"{player_shares['team_id'].nunique()} teams."
+            f"Goal-scorer backtest, {len(folds)} walk-forward windows from {first_cutoff}\n"
+            f"  each scored by models AND player shares built only from matches before it"
         )
 
         actual_goals = load_fixture_player_goals(conn, FIT_COMPETITIONS)
-        actual_goals = actual_goals[actual_goals["kickoff_date"] >= cutoff_date]
+        actual_goals = actual_goals[actual_goals["kickoff_date"] >= first_cutoff]
 
         # Same loader production uses on matchday, so "starting" here means
         # exactly what it means live. Note these lineups are the one thing
         # in this backtest that genuinely IS from the future -- which is
         # correct, because by the time production allocates with them they
         # are the present. That's what separates the two modes below.
-        lineups = load_confirmed_lineups(conn, test_matches["fixture_id"].tolist())
+        held_out = matches[matches["kickoff_date"] >= first_cutoff]
+        lineups = load_confirmed_lineups(conn, held_out["fixture_id"].tolist())
         print(f"Confirmed lineup rows for held-out fixtures: {len(lineups)}")
 
-        # The optimism this mode carries, made visible rather than assumed
-        # away. Held-out fixtures are FINISHED, so their lineup rows were
-        # almost all written by the post-match backfill -- the same
-        # announced XI, but retrieved after the fact. Scoring the
-        # "confirmed lineup" mode on them silently assumes we would have
-        # had every one of those lineups before kickoff, which is exactly
-        # the assumption that fails for fixtures where pre-match capture
-        # doesn't work. Not corrected for -- there is nothing to correct
-        # with until pre-match captures accumulate (see migration
-        # 1701000000027) -- but a run that reports 0% here is reporting a
+        # The optimism the matchday mode carries, made visible rather than
+        # assumed away. Held-out fixtures are FINISHED, so their lineup
+        # rows were almost all written by the post-match backfill -- the
+        # same announced XI, but retrieved after the fact. Scoring that
+        # mode on them silently assumes we would have had every one of
+        # those lineups before kickoff, which is exactly the assumption
+        # that fails where pre-match capture doesn't work. Nothing to
+        # correct with until pre-match captures accumulate (see migration
+        # 1701000000027) -- but a run reporting 0% here is reporting a
         # ceiling on the matchday mode, not its real performance.
         if "pre_match_captured_at" in lineups.columns and len(lineups) > 0:
             pre_match = int(lineups["pre_match_captured_at"].notna().sum())
@@ -260,6 +278,31 @@ def main() -> None:
                 f"({pre_match / len(lineups):.0%}) -- the rest were backfilled after the final whistle,\n"
                 f"  so the matchday mode below is an upper bound on what was actually knowable in time."
             )
+
+        # One pass over the folds, accumulating predictions per (mode,
+        # normalization). Each fold refits the models AND recomputes the
+        # player shares as of its own boundary, so a player who becomes
+        # reliable mid-window is invisible to the folds before him and
+        # visible to the ones after -- which is what production does, and
+        # what a single frozen cutoff got wrong.
+        collected: dict[tuple[bool, str], list[pd.DataFrame]] = {}
+        for fold_number, (start, end) in enumerate(folds, start=1):
+            train, test = _fold_frames(matches, start, end)
+            models, joint_model = _fit_fold(train)
+            appearances = load_player_squad_appearances(conn, FIT_COMPETITIONS, as_of=start)
+            player_shares = compute_player_shares(appearances, start, half_life_days=HALF_LIFE_DAYS)
+            print(
+                f"  fold {fold_number}: train < {start}, {len(test)} held-out fixtures, "
+                f"{player_shares['player_id'].nunique()} reliable players from "
+                f"{len(appearances)} appearances"
+            )
+            for use_confirmed_lineup in (False, True):
+                for normalization in ALLOCATION_MODES:
+                    predictions = _predict_fixtures(
+                        test, models, joint_model, player_shares, lineups, use_confirmed_lineup, normalization
+                    )
+                    if not predictions.empty:
+                        collected.setdefault((use_confirmed_lineup, normalization), []).append(predictions)
         print()
 
         for use_confirmed_lineup, mode in ((False, "no lineup (days ahead)"), (True, "confirmed lineup (matchday)")):
@@ -270,12 +313,9 @@ def main() -> None:
             # three are monotone rescales and therefore share an AUC.
             variants = {}
             for normalization in ALLOCATION_MODES:
-                predictions = _predict_fixtures(
-                    test_matches, models, joint_model, player_shares, lineups, use_confirmed_lineup, normalization
-                )
-                name = f"model ({normalization})"
-                if not predictions.empty:
-                    variants[name] = _attach_outcomes(predictions, actual_goals)
+                frames = collected.get((use_confirmed_lineup, normalization), [])
+                if frames:
+                    variants[f"model ({normalization})"] = _attach_outcomes(pd.concat(frames), actual_goals)
             if not variants:
                 print(f"--- {mode} --- no predictions produced.\n")
                 continue

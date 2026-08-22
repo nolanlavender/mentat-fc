@@ -316,6 +316,57 @@ SHRINKAGE: dict[str, float] = {
 SHRINK_TOWARD_JOINT: bool = False
 
 
+# Walk-forward shape, shared by app.compare and app.evaluate_scorers: the
+# last FOLDS x FOLD_FRACTION of matches (by date) are held out, in FOLDS
+# disjoint consecutive windows, each predicted by a model fitted only on
+# what came before it. Lives here rather than in either tool because both
+# need identical folds for their numbers to be comparable.
+FOLDS = 4
+FOLD_FRACTION = 0.1
+
+
+def walk_forward_folds(matches: pd.DataFrame) -> list[tuple[object, object]]:
+    """
+    Date boundaries for the held-out windows: FOLDS pairs of
+    (window_start_date, window_end_date), chronological, covering the last
+    FOLDS * FOLD_FRACTION of matches. A fold's training set is everything
+    with kickoff_date strictly before window_start; its test set is
+    [window_start, window_end). The last window's end is None (open).
+
+    Boundaries are DATES, not row indices, so matches sharing a kickoff
+    date can never be split across the train/test line -- a same-day
+    fixture in the training set of the model predicting its twin would be
+    a subtle leak.
+    """
+    n = len(matches)
+    boundaries = []
+    for fold in range(FOLDS):
+        start_index = int(n * (1 - (FOLDS - fold) * FOLD_FRACTION))
+        boundaries.append(matches.iloc[start_index]["kickoff_date"])
+    folds = []
+    for fold in range(FOLDS):
+        end = boundaries[fold + 1] if fold + 1 < FOLDS else None
+        folds.append((boundaries[fold], end))
+    # Duplicate boundaries (tiny datasets) would make empty or overlapping
+    # windows -- collapse to unique, preserving order.
+    seen = set()
+    unique = []
+    for start, end in folds:
+        if start not in seen and start != end:
+            unique.append((start, end))
+            seen.add(start)
+    return unique
+
+
+def _fold_frames(matches: pd.DataFrame, start, end) -> tuple[pd.DataFrame, pd.DataFrame]:
+    train = matches[matches["kickoff_date"] < start]
+    if end is None:
+        test = matches[matches["kickoff_date"] >= start]
+    else:
+        test = matches[(matches["kickoff_date"] >= start) & (matches["kickoff_date"] < end)]
+    return train, test
+
+
 def _blend(matches: pd.DataFrame, competition_name: str) -> pd.DataFrame:
     """This competition's two blend weights, applied. Mirrors app.train._blend."""
     return blend_fitting_signals(

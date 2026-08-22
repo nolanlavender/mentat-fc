@@ -53,13 +53,17 @@ from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.evaluate import (
     FIT_COMPETITIONS,
+    FOLD_FRACTION,
+    FOLDS,
     HALF_LIFE_DAYS,
     MIN_MATCHES_FOR_BACKTEST,
     SHOT_LOCATION_BLEND_WEIGHT,
     SHOTS_ON_TARGET_BLEND_WEIGHT,
     SHRINKAGE,
     SHRINK_TOWARD_JOINT,
+    _fold_frames,
     _outcome_one_hot,
+    walk_forward_folds,
 )
 
 BOOTSTRAP_SAMPLES = 5000
@@ -94,12 +98,6 @@ FALLBACK_SIGNALS = ["shots_on_target"]
 
 BASELINE_LABEL = "deployed config (per-competition location weights)"
 CANDIDATE_WEIGHTS = [0.0, 0.5, 1.0]
-
-# Walk-forward shape: the last FOLDS x FOLD_FRACTION of matches (by date)
-# are held out, in FOLDS disjoint consecutive windows, each predicted by a
-# model fitted only on what came before it.
-FOLDS = 4
-FOLD_FRACTION = 0.1
 
 
 def _blend(matches: pd.DataFrame, competition: str, location_weight: float | None) -> pd.DataFrame:
@@ -186,48 +184,6 @@ def _bootstrap_ci(differences: np.ndarray) -> tuple[float, float]:
     means = np.array([differences[rng.integers(0, n, n)].mean() for _ in range(BOOTSTRAP_SAMPLES)])
     tail = (100 - CONFIDENCE) / 2
     return float(np.percentile(means, tail)), float(np.percentile(means, 100 - tail))
-
-
-def walk_forward_folds(matches: pd.DataFrame) -> list[tuple[object, object]]:
-    """
-    Date boundaries for the held-out windows: FOLDS pairs of
-    (window_start_date, window_end_date), chronological, covering the last
-    FOLDS * FOLD_FRACTION of matches. A fold's training set is everything
-    with kickoff_date strictly before window_start; its test set is
-    [window_start, window_end). The last window's end is None (open).
-
-    Boundaries are DATES, not row indices, so matches sharing a kickoff
-    date can never be split across the train/test line -- a same-day
-    fixture in the training set of the model predicting its twin would be
-    a subtle leak.
-    """
-    n = len(matches)
-    boundaries = []
-    for fold in range(FOLDS):
-        start_index = int(n * (1 - (FOLDS - fold) * FOLD_FRACTION))
-        boundaries.append(matches.iloc[start_index]["kickoff_date"])
-    folds = []
-    for fold in range(FOLDS):
-        end = boundaries[fold + 1] if fold + 1 < FOLDS else None
-        folds.append((boundaries[fold], end))
-    # Duplicate boundaries (tiny datasets) would make empty or overlapping
-    # windows -- collapse to unique, preserving order.
-    seen = set()
-    unique = []
-    for start, end in folds:
-        if start not in seen and start != end:
-            unique.append((start, end))
-            seen.add(start)
-    return unique
-
-
-def _fold_frames(matches: pd.DataFrame, start, end) -> tuple[pd.DataFrame, pd.DataFrame]:
-    train = matches[matches["kickoff_date"] < start]
-    if end is None:
-        test = matches[matches["kickoff_date"] >= start]
-    else:
-        test = matches[(matches["kickoff_date"] >= start) & (matches["kickoff_date"] < end)]
-    return train, test
 
 
 def _score_config_walk_forward(
