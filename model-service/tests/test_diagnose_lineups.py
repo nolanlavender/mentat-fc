@@ -25,6 +25,7 @@ def _fixture(**overrides):
         "lineup_rows": 0,
         "starters": 0,
         "predicted_at": None,
+        "lineup_captured_at": None,
         "scorer_picks": 0,
     }
     row.update(overrides)
@@ -75,25 +76,54 @@ class TestStateClassification:
         assert "STATE 2" in out
         assert "1.0h ago" in out
 
-    def test_captured_lineup_with_stale_predictions(self, monkeypatch, capsys):
-        # More scorer picks than players in the squad can only happen when
-        # allocate_team_goals ran without the confirmed squad.
+    def test_predictions_older_than_the_capture_are_stale(self, monkeypatch, capsys):
         out = _run(
             monkeypatch,
             capsys,
-            [_fixture(lineup_rows=20, starters=11, predicted_at=NOW - timedelta(hours=6), scorer_picks=42)],
+            [_fixture(lineup_rows=20, starters=11, lineup_captured_at=NOW - timedelta(hours=1),
+                      predicted_at=NOW - timedelta(hours=6), scorer_picks=42)],
         )
         assert "STATE 3" in out
-        assert "Re-run app.train" in out
+        assert "apply_lineups" in out
 
-    def test_captured_lineup_that_was_applied(self, monkeypatch, capsys):
+    def test_predictions_newer_than_the_capture_are_applied(self, monkeypatch, capsys):
         out = _run(
             monkeypatch,
             capsys,
-            [_fixture(lineup_rows=20, starters=11, predicted_at=NOW, scorer_picks=14)],
+            [_fixture(lineup_rows=20, starters=11, lineup_captured_at=NOW - timedelta(hours=1),
+                      predicted_at=NOW, scorer_picks=14)],
         )
         assert "STATE 4" in out
         assert "API or the frontend" in out
+
+    def test_a_high_pick_count_does_not_override_the_timestamp(self, monkeypatch, capsys):
+        """
+        The exact 2026-08-22 misdiagnosis. Hull vs Manchester United was
+        predicted 56 seconds AFTER its lineup landed, yet carried 105 picks
+        against a 40-player squad -- orphans from the days-ahead run that
+        nothing deleted. The old count heuristic called that STATE 3 with
+        full confidence. Where a timestamp exists, it decides.
+        """
+        out = _run(
+            monkeypatch,
+            capsys,
+            [_fixture(lineup_rows=40, starters=22, lineup_captured_at=NOW - timedelta(minutes=9),
+                      predicted_at=NOW - timedelta(minutes=8), scorer_picks=105)],
+        )
+        assert "STATE 4" in out
+        assert "STATE 3" not in out
+
+    def test_without_a_timestamp_the_count_guess_is_labelled_a_guess(self, monkeypatch, capsys):
+        # Pre-migration rows and post-match backfills have no capture time,
+        # so the count is all there is -- and must not be stated as fact.
+        out = _run(
+            monkeypatch,
+            capsys,
+            [_fixture(lineup_rows=20, starters=11, lineup_captured_at=None,
+                      predicted_at=NOW, scorer_picks=42)],
+        )
+        assert "STATE 3 (probable)" in out
+        assert "confirm before acting" in out
 
     def test_captured_lineup_with_no_prediction_at_all(self, monkeypatch, capsys):
         out = _run(monkeypatch, capsys, [_fixture(lineup_rows=20, starters=11, predicted_at=None)])

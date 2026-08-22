@@ -297,6 +297,43 @@ def upsert_player_goal_prediction(conn, fixture_id: int, team_id: int, predictio
         )
 
 
+def delete_stale_player_goal_predictions(conn, fixture_id: int, keep_player_ids: set[int]) -> int:
+    """
+    Removes scorer picks for players this fixture no longer predicts.
+
+    Real production bug, found 2026-08-22 via app.diagnose_lineups: Hull
+    City vs Manchester United had a confirmed 40-player squad, was
+    re-predicted AFTER that squad landed, and still carried 105 scorer
+    picks. upsert_player_goal_prediction only ever INSERTs or UPDATEs, so
+    the ~65 players who were predicted days ahead and then left out of the
+    matchday squad kept their stale rows forever. The app reads whatever
+    player_goal_predictions holds, so it was showing scorer odds for
+    players who were not even named -- the exact failure the
+    confirmed-squad filter exists to prevent, reintroduced one layer down
+    by the write path rather than the allocation.
+
+    Deleting by "not in the set we just wrote" rather than clearing the
+    fixture first: a delete-then-insert would leave the fixture with no
+    picks at all if the insert half failed, and this runs inside the same
+    transaction as the upserts either way.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM player_goal_predictions
+            WHERE fixture_id = %(fixture_id)s
+              AND model_version = %(model_version)s
+              AND NOT (player_id = ANY(%(keep)s))
+            """,
+            {
+                "fixture_id": fixture_id,
+                "model_version": GOAL_SCORER_MODEL_VERSION,
+                "keep": list(keep_player_ids) or [-1],
+            },
+        )
+        return cur.rowcount
+
+
 def _predict_fixture(model: DixonColesModel, fixture, home_availability: float, away_availability: float):
     """
     Shared by the primary and fallback paths below so the two can't drift
@@ -341,6 +378,7 @@ def predict_for_competition(
     goal_scorer_predictions = 0
     availability_adjusted = 0
     fell_back = 0
+    stale_removed = 0
     for _, fixture in upcoming.iterrows():
         fixture_lineup = confirmed[confirmed["fixture_id"] == fixture["fixture_id"]]
         if only_with_confirmed_lineups and fixture_lineup.empty:
@@ -420,6 +458,7 @@ def predict_for_competition(
         # whether a specific reliable player is even in the squad, and
         # whether he's starting or on the bench for this one fixture --
         # see allocate_team_goals for why that changes his own scorer odds.
+        predicted_player_ids: set[int] = set()
         for team_id, team_expected_goals, team_confirmed in (
             (fixture["home_team_id"], prediction.predicted_home_goals, home_confirmed),
             (fixture["away_team_id"], prediction.predicted_away_goals, away_confirmed),
@@ -436,13 +475,23 @@ def predict_for_competition(
                 coverage=(coverage or {}).get("confirmed" if team_confirmed else "no_lineup", 1.0),
             ):
                 upsert_player_goal_prediction(conn, fixture["fixture_id"], team_id, player_prediction)
+                predicted_player_ids.add(int(player_prediction.player_id))
                 goal_scorer_predictions += 1
+
+        # Only meaningful once a squad is confirmed, since that is the only
+        # time the predicted set SHRINKS. Run unconditionally anyway: a
+        # player who drops below MIN_PLAYER_MATCHES, or transfers away,
+        # leaves the same kind of orphan.
+        stale_removed += delete_stale_player_goal_predictions(
+            conn, fixture["fixture_id"], predicted_player_ids
+        )
 
     conn.commit()
     print(
         f"{competition_name}: wrote {predicted} predictions ({availability_adjusted} availability-adjusted, "
         f"{fell_back} with a rating imputed from the joint fit for a team new to this competition), "
-        f"skipped {skipped} (team not in any training data), {goal_scorer_predictions} player goal-scorer predictions."
+        f"skipped {skipped} (team not in any training data), {goal_scorer_predictions} player goal-scorer "
+        f"predictions, {stale_removed} stale picks removed."
     )
 
 

@@ -86,6 +86,8 @@ def main() -> None:
                      WHERE fl.fixture_id = f.id AND fl.is_starting) AS starters,
                    (SELECT max(mp.predicted_at) FROM model_predictions mp
                      WHERE mp.fixture_id = f.id) AS predicted_at,
+                   (SELECT max(fl.pre_match_captured_at) FROM fixture_lineups fl
+                     WHERE fl.fixture_id = f.id) AS lineup_captured_at,
                    (SELECT count(*) FROM player_goal_predictions pgp
                      WHERE pgp.fixture_id = f.id) AS scorer_picks
             FROM fixtures f
@@ -151,21 +153,47 @@ def main() -> None:
                 print("  -> STATE 3: lineup captured, but this fixture has NO prediction at all. Run app.train.\n")
                 continue
 
-            # The lineup has no timestamp of its own, so "was the prediction
-            # made with it?" is inferred from the check that actually
-            # matters downstream: a lineup-aware run drops unnamed players,
-            # so the scorer-pick count should not exceed the squad size.
             print(f"  predicted_at {row.predicted_at}, {row.scorer_picks} scorer picks")
+
+            # Compare TIMESTAMPS, not counts. The original version inferred
+            # staleness from "more scorer picks than squad players", which
+            # was wrong in both directions and said so confidently: on
+            # 2026-08-22 it reported Hull vs Manchester United as STATE 3
+            # when the prediction had in fact run 56 seconds AFTER the
+            # lineup landed. The extra picks were orphaned rows from the
+            # days-ahead run that nothing ever deleted -- a separate real
+            # bug (see train.delete_stale_player_goal_predictions), which
+            # the count heuristic could not distinguish from the thing it
+            # claimed to detect.
+            captured_at = row.lineup_captured_at
+            if not pd.isna(captured_at) and row.predicted_at is not None:
+                if row.predicted_at > captured_at:
+                    print(
+                        f"  -> STATE 4: lineup captured {captured_at}, predictions written after it.\n"
+                        f"     These predictions ARE lineup-aware. If it still isn't on screen, the\n"
+                        f"     problem is the API or the frontend, not the data.\n"
+                    )
+                else:
+                    print(
+                        f"  -> STATE 3: lineup captured {captured_at}, but the newest prediction\n"
+                        f"     predates it. Re-run app.apply_lineups (or Daily data refresh) to apply it.\n"
+                    )
+                continue
+
+            # No capture timestamp: either a pre-migration row or a
+            # post-match backfill, so the comparison above is impossible.
+            # Fall back to the count, explicitly labelled as a guess.
             if row.scorer_picks > row.lineup_rows:
                 print(
-                    "  -> STATE 3: predictions predate the lineup. There are more scorer picks than\n"
-                    "     players in the squad, which only happens when allocate_team_goals ran\n"
-                    "     WITHOUT the confirmed squad. Re-run app.train (Daily data refresh) to apply it.\n"
+                    "  -> STATE 3 (probable): no capture timestamp to compare against, and there are\n"
+                    "     more scorer picks than squad players. That USUALLY means the prediction ran\n"
+                    "     without the confirmed squad -- but orphaned picks from an earlier run look\n"
+                    "     identical, so confirm before acting.\n"
                 )
             else:
                 print(
-                    "  -> STATE 4: lineup captured and predictions look lineup-aware.\n"
-                    "     If it still isn't on screen, the problem is the API or the frontend, not the data.\n"
+                    "  -> STATE 4 (probable): no capture timestamp, but the pick count is consistent\n"
+                    "     with a lineup-aware run.\n"
                 )
         report_capture_rate(conn)
     finally:

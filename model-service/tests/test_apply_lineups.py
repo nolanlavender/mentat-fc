@@ -13,6 +13,9 @@ from app.dixon_coles import DixonColesModel  # noqa: E402
 class _FakeCursor:
     def __init__(self, sink):
         self.sink = sink
+        # delete_stale_player_goal_predictions reads rowcount to report how
+        # many orphans it removed.
+        self.rowcount = 0
 
     def __enter__(self):
         return self
@@ -245,3 +248,74 @@ class TestCoverageReachesPredictions:
             assert values["confirmed"] >= values["no_lineup"], (
                 f"{competition}: knowing the squad should never cover LESS of the team's goals"
             )
+
+
+class TestStalePickCleanup:
+    """
+    Real production bug, 2026-08-22: Hull City vs Manchester United had a
+    confirmed 40-player squad, was re-predicted 56 seconds AFTER that squad
+    landed, and still carried 105 scorer picks.
+    upsert_player_goal_prediction only INSERTs or UPDATEs, so the ~65
+    players predicted days ahead and then left out of the matchday squad
+    kept their rows forever -- and the app reads whatever the table holds,
+    so it showed scorer odds for players who were not even named.
+    """
+
+    @staticmethod
+    def _wire(monkeypatch, confirmed_player_ids):
+        upcoming = pd.DataFrame([
+            {"fixture_id": 40, "home_team": "Arsenal", "away_team": "Coventry City",
+             "home_team_id": 1, "away_team_id": 2},
+        ])
+        rows = [
+            {"fixture_id": 40, "team_id": t, "player_id": p, "is_starting": True}
+            for t in (1, 2) for p in confirmed_player_ids(t)
+        ]
+        monkeypatch.setattr(train_module, "load_upcoming_fixtures", lambda conn, competition: upcoming)
+        monkeypatch.setattr(
+            train_module, "load_confirmed_lineups",
+            lambda conn, ids: pd.DataFrame(rows, columns=["fixture_id", "team_id", "player_id", "is_starting"]),
+        )
+
+    def test_a_delete_is_issued_keeping_exactly_the_predicted_players(self, monkeypatch):
+        # Squad of two per team out of four reliable -- so two players per
+        # team must be cleaned up rather than left behind.
+        self._wire(monkeypatch, lambda t: [t * 100 + i for i in range(2)])
+        connection = _FakeConnection()
+        train_module.predict_for_competition(connection, _model(), "Premier League", _shares())
+
+        deletes = [
+            params for query, params in connection.statements
+            if "DELETE FROM player_goal_predictions" in query
+        ]
+        assert deletes, "a fixture predicted with a confirmed squad must clean up orphans"
+        kept = set(deletes[0]["keep"])
+        written = {
+            params["player_id"] for query, params in connection.statements
+            if "INSERT INTO player_goal_predictions" in query
+        }
+        assert kept == written, "the delete must keep exactly the players just written, no more and no less"
+        assert deletes[0]["fixture_id"] == 40
+
+    def test_the_delete_is_scoped_to_this_model_version(self, monkeypatch):
+        # A future second scorer model must not have its rows wiped by this
+        # one's cleanup.
+        self._wire(monkeypatch, lambda t: [t * 100 + i for i in range(2)])
+        connection = _FakeConnection()
+        train_module.predict_for_competition(connection, _model(), "Premier League", _shares())
+        query, params = next(
+            (q, p) for q, p in connection.statements if "DELETE FROM player_goal_predictions" in q
+        )
+        assert "model_version" in query
+        assert params["model_version"] == train_module.GOAL_SCORER_MODEL_VERSION
+
+    def test_an_empty_prediction_set_does_not_delete_everything_by_accident(self, monkeypatch):
+        # keep=[] would make `NOT (player_id = ANY('{}'))` true for every
+        # row. The sentinel keeps the statement well-formed; this pins that
+        # the parameter is never an empty list.
+        self._wire(monkeypatch, lambda t: [])
+        connection = _FakeConnection()
+        train_module.predict_for_competition(connection, _model(), "Premier League", _shares())
+        for query, params in connection.statements:
+            if "DELETE FROM player_goal_predictions" in query:
+                assert params["keep"], "keep must never be an empty list"

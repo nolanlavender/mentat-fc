@@ -7082,3 +7082,69 @@ is not None` does not catch pandas NaT from a LEFT-joined aggregate -- so a
 fixture that was never captured rendered as one that was captured with a
 broken number, which is precisely backwards for a diagnostic whose whole
 job is telling those two apart. `pd.isna` fixes it.
+## 2026-08-22 -- The measurement paid off immediately, twice
+
+Ran the capture-rate report I built rather than the cadence change I nearly
+shipped on a hunch. It answered the question in one line and exposed a
+production bug I was not looking for.
+
+### Capture is not broken. It is nine minutes from broken.
+
+    Of 4 fixtures with a lineup that have kicked off since the column went live:
+      4 captured pre-match (100%)
+      Lead time: median 9 min, earliest 9, latest 9
+
+100%, not 0%. The 0% was entirely the schema boundary, exactly as
+suspected -- and had I "fixed" it without measuring I would have been
+fixing a working system.
+
+But **all four at exactly nine minutes** is the real finding, and it is
+only visible because lead time was reported alongside the rate. Four
+fixtures kicking off at 11:30 were all caught by one run. The cron is
+scheduled for 11:00; GitHub delivered it at 11:21 -- scheduled workflows
+routinely run 10-20 minutes late under load. That left exactly ONE useful
+attempt, and it landed with nine minutes to spare. Ten more minutes of
+delay and every one of those lineups is missed.
+
+So the system is not healthy, it is lucky, and the raw capture rate said
+"100%, all good". **A rate can look perfect while the margin is nearly
+gone; only the distribution shows it.** Cadence raised from hourly to every
+15 minutes -- four attempts in the T-60-to-T-0 window that matters instead
+of one, at negligible cost (a run with nothing near kickoff is one DB query
+and zero API calls).
+
+### The bug I was not looking for
+
+The report flagged Hull City vs Manchester United as STATE 3, "predictions
+predate the lineup". They did not: the lineup landed at 11:21 and the
+prediction was written at 11:21:57, fifty-six seconds later. My own
+heuristic was wrong.
+
+It inferred staleness from "more scorer picks (105) than squad players
+(40)", reasoning that a lineup-aware run drops unnamed players. True -- but
+`upsert_player_goal_prediction` only ever INSERTs or UPDATEs. **Nothing has
+ever deleted a scorer pick.** The ~65 players predicted days ahead and then
+left out of the matchday squad kept their rows, and the app reads whatever
+the table holds. It was showing scorer odds for players who were not named
+-- the exact failure the confirmed-squad filter exists to prevent,
+reintroduced one layer down in the write path.
+
+Fixed with a delete scoped to the fixture and model version, keeping
+exactly the players just written.
+
+### Two lessons, one about each half
+
+**The diagnostic:** it stated a guess as a fact. "More picks than players
+*only happens* when allocate_team_goals ran without the squad" -- and there
+was a second cause it could not see. It now compares timestamps
+(`predicted_at` vs `pre_match_captured_at`), which answers the question
+directly, and falls back to the count only where no timestamp exists,
+labelled "(probable)" with "confirm before acting". A diagnostic that
+confidently names the wrong cause is worse than one that says it does not
+know, because it sends you to fix the wrong thing.
+
+**The pattern:** the write path had a filter the read path never enforced.
+`allocate_team_goals` correctly refused to predict unnamed players; the
+table happily kept yesterday's answer for them. Idempotent upserts feel
+safe because rerunning is harmless -- but "harmless to rerun" is not
+"produces the current answer" when the correct output SHRINKS.
