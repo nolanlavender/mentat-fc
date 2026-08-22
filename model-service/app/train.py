@@ -263,20 +263,40 @@ def predict_for_competition(
             # opponent like Arsenal sitting on 42 reliable players. One
             # side's missing history was suppressing the other side's.
             #
-            # The joint fit is exactly the right fallback and already
-            # exists: it spans all three competitions, so a promoted club
-            # with a full Championship record is in it even when this
-            # competition's own fit has never seen them. That's the same
-            # cross-league comparability argument that makes the joint fit
-            # the right model for FA Cup ties (see this file's 2026-08-15
-            # note) -- a Premier League side against a just-promoted one is
-            # the same situation, one team's strength known only from
-            # another division.
+            # The joint fit knows the missing team: it spans all three
+            # competitions, so a promoted club with a full Championship
+            # record is in it even when this competition's own fit has
+            # never seen them.
+            #
+            # Revised 2026-08-22 after a second real production bug on this
+            # exact path. The original fallback predicted the WHOLE fixture
+            # with the joint model, and the joint model is tuned for the FA
+            # Cup, not for this: its shrinkage (10.0) flattens every team
+            # toward average -- which costs an established giant far more
+            # than a promoted club, since the giant is the one far from
+            # average -- and its home advantage (~1.5 vs the Premier
+            # League's own ~1.18, inflated by cup ties) then decides the
+            # fixture for whoever is at home. Net effect: Hull City, zero
+            # Premier League matches, picked to BEAT Manchester United at
+            # home. Every fallback fixture had the same home-side
+            # inflation; that one was just visible.
+            #
+            # Now only the missing team's rating is borrowed, translated
+            # onto this competition's own scale (see impute_team_from for
+            # the re-centring), and the fixture is predicted by this
+            # competition's own fit -- the opponent's real rating, home
+            # advantage, and rho stay in charge. The translated rating
+            # still inherits the joint fit's flattening (a known residual
+            # optimism for promoted sides, testable via app.compare once
+            # they accumulate real matches), but the fixture is no longer
+            # decided by parameters tuned for a different competition.
             if fallback_model is None:
                 skipped += 1
                 continue
             try:
-                prediction = _predict_fixture(fallback_model, fixture, home_availability, away_availability)
+                for team in (fixture["home_team"], fixture["away_team"]):
+                    model.impute_team_from(team, fallback_model)
+                prediction = _predict_fixture(model, fixture, home_availability, away_availability)
                 fell_back += 1
             except ValueError:
                 # Not in the joint fit either -- genuinely no data anywhere
@@ -315,7 +335,7 @@ def predict_for_competition(
     conn.commit()
     print(
         f"{competition_name}: wrote {predicted} predictions ({availability_adjusted} availability-adjusted, "
-        f"{fell_back} via the joint fit for a team with no history in this competition yet), "
+        f"{fell_back} with a rating imputed from the joint fit for a team new to this competition), "
         f"skipped {skipped} (team not in any training data), {goal_scorer_predictions} player goal-scorer predictions."
     )
 

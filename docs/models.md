@@ -306,6 +306,33 @@ noise in either direction. The most likely reason is that the held-out
 window contains very few promoted/relegated clubs — precisely the case it
 helps. Left in place to re-test after a season with more division changes.
 
+### Rating translation for teams with *zero* matches
+
+A prior can only shrink a team the fit has seen. A just-promoted club with
+no matches at all in a competition isn't in that competition's fit, so
+until it plays, its rating has to be **borrowed** from the joint fit — and
+borrowing across fits means translating between scales. Each fit centres
+"1.0 = average of *my* training set", and the joint fit's training set is
+~800 mostly non-league clubs, so a mid-table Premier League side sits well
+above 1.0 there while sitting below 1.0 at home. The translation is the
+same ridge move as the prior re-centring: shift log-attack down by the
+mean the joint fit assigns to this competition's teams, log-defense up by
+the same amount (`impute_team_from` in `dixon_coles.py`).
+
+Why this exists is a production story worth remembering. The first version
+of the fallback predicted the *whole fixture* with the joint model when
+either team was missing — and the joint model is tuned for the FA Cup: its
+κ=10 shrinkage flattens an established giant toward average far more than
+it flattens anyone else (the giant is the one far from average), and its
+~1.5 home advantage (inflated by cup ties, vs the Premier League's own
+~1.18) then decides the fixture for whoever is at home. Net result: Hull
+City, zero Premier League matches, picked to **beat Manchester United**.
+Every fallback fixture had the same home-side inflation; that one was just
+visible. The imputed rating still inherits the joint fit's flattening —
+promoted sides run a little optimistic until they accumulate real matches
+— but the opponent's real rating and the competition's own home advantage
+and ρ stay in charge.
+
 > **Read:** Gelman & Hill, *Data Analysis Using Regression and
 > Multilevel/Hierarchical Models* — the standard reference ·
 > McElreath, *Statistical Rethinking* — chapter 13 on multilevel models is

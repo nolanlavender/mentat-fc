@@ -129,8 +129,16 @@ def _predict_fixtures(
         try:
             prediction = model.predict(match.home_team, match.away_team)
         except ValueError:
+            # Mirrors production's fallback exactly (see app.train's
+            # 2026-08-22 note): borrow the missing team's rating from the
+            # joint fit, translated onto this competition's scale, rather
+            # than predicting the whole fixture with a model tuned for the
+            # FA Cup. A backtest that fell back differently from
+            # production would be measuring a pipeline nobody runs.
             try:
-                prediction = joint_model.predict(match.home_team, match.away_team)
+                for team in (match.home_team, match.away_team):
+                    model.impute_team_from(team, joint_model)
+                prediction = model.predict(match.home_team, match.away_team)
             except ValueError:
                 continue  # no fitted parameters anywhere -- same skip production makes
 

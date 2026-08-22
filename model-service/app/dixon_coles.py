@@ -229,6 +229,49 @@ class DixonColesModel:
         self.rho = rho
         self.fitted_on = len(matches)
 
+    def impute_team_from(self, team: str, prior_model: "DixonColesModel") -> None:
+        """
+        Adds a team this fit has never seen, carrying its attack/defense
+        over from prior_model re-centred onto THIS fit's own scale. A
+        no-op for a team already fitted here -- a real rating estimated
+        from this competition's matches always beats a translated one.
+
+        Why translation is required rather than just copying the numbers:
+        each fit centres its attack mean over its OWN teams (see the
+        identifiability note above), so "1.0" means "average of this
+        training set". In the joint fit that training set is ~800 mostly
+        non-league clubs, so a mid-table Premier League side sits well
+        above 1.0 there while sitting below 1.0 in the Premier League's
+        own fit. Copying a rating across uncorrected would smuggle in the
+        wrong baseline. The correction is the same ridge move fit() uses
+        for prior re-centring: shift every log-attack down by the mean the
+        prior assigns to THIS fit's teams, shift log-defense up by the
+        same amount -- a transformation the prior's own predictions are
+        exactly invariant to, so it changes what the numbers are relative
+        to without changing what the prior claims.
+
+        Exists for the promoted-club case (found 2026-08-22, Hull City
+        picked to beat Manchester United): a team with zero matches in
+        this competition used to send the WHOLE fixture to the joint
+        fallback model, whose FA-Cup-tuned shrinkage flattens the
+        established opponent toward average and whose inflated cross-
+        competition home advantage then decides the fixture for whoever
+        is at home. Borrowing only the missing team's rating keeps the
+        opponent's real rating and this competition's own home_advantage
+        and rho in charge.
+        """
+        if team in self.attack:
+            return
+        if team not in prior_model.attack:
+            raise ValueError(f"'{team}' has no fitted parameters in the prior model either")
+        shared = [t for t in self.teams if t in prior_model.attack]
+        if not shared:
+            raise ValueError("no teams in common with the prior model, so no shared scale to translate onto")
+        offset = float(np.mean([log(prior_model.attack[t]) for t in shared]))
+        self.attack[team] = exp(log(prior_model.attack[team]) - offset)
+        self.defense[team] = exp(log(prior_model.defense[team]) + offset)
+        self.teams = sorted(self.teams + [team])
+
     def _expected_goals(self, home_team: str, away_team: str) -> tuple[float, float]:
         if home_team not in self.attack or away_team not in self.attack:
             missing = home_team if home_team not in self.attack else away_team

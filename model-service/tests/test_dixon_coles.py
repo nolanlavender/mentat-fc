@@ -328,3 +328,107 @@ class TestPredictWithAvailability:
 
         with pytest.raises(ValueError):
             model.predict_with_availability("Strong", "NeverSeenBefore")
+
+
+def _giant_league_and_joint() -> tuple[DixonColesModel, DixonColesModel]:
+    """
+    The Hull-vs-Man-U shape (real production bug, 2026-08-22): a top
+    division containing a genuine giant, a second division whose best side
+    is promoted into it with ZERO top-division matches, and a joint fit
+    across both, connected by cup ties and flattened by FA-Cup-level
+    shrinkage -- exactly what app.train's fallback has to work with.
+    """
+    top = ["Giant", "Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+    second = ["Promoted", "Xray", "Yankee", "Zulu", "Quebec", "Tango"]
+    rows = []
+    for round_number, (teams, strong) in enumerate(((top, "Giant"), (second, "Promoted"))):
+        for h in teams:
+            for a in teams:
+                if h == a:
+                    continue
+                home_goals = 3 if h == strong else 1
+                away_goals = 3 if a == strong else 1
+                rows.append({"kickoff_date": date(2026, 1, 10 + round_number), "home_team": h,
+                             "away_team": a, "home_score": home_goals, "away_score": away_goals})
+    for h, a in zip(top, second):  # cup ties put the divisions on one scale
+        rows.append({"kickoff_date": date(2026, 2, 1), "home_team": h, "away_team": a,
+                     "home_score": 3, "away_score": 0})
+
+    joint = DixonColesModel()
+    joint.fit(pd.DataFrame(rows), half_life_days=180, shrinkage=10.0)
+
+    top_only = DixonColesModel()
+    top_only.fit(
+        pd.DataFrame([r for r in rows if r["home_team"] in top and r["away_team"] in top]),
+        half_life_days=180,
+        shrinkage=1.0,
+    )
+    return top_only, joint
+
+
+class TestImputeTeamFrom:
+    def test_adds_the_missing_team_on_the_local_scale(self):
+        top_only, joint = _giant_league_and_joint()
+        assert "Promoted" not in top_only.attack
+        top_only.impute_team_from("Promoted", joint)
+        assert "Promoted" in top_only.attack
+        assert "Promoted" in top_only.teams
+        # The best side of a weaker division must not import as a top-flight
+        # powerhouse: below the giant, on the top division's own scale.
+        assert top_only.attack["Promoted"] < top_only.attack["Giant"]
+
+    def test_the_giant_stays_favourite_against_a_promoted_home_side(self):
+        # The regression itself. The old fallback predicted this fixture
+        # entirely with the joint fit, whose flattened ratings and inflated
+        # home advantage picked the promoted club at home over the giant.
+        top_only, joint = _giant_league_and_joint()
+        old_way = joint.predict("Promoted", "Giant")
+
+        top_only.impute_team_from("Promoted", joint)
+        new_way = top_only.predict("Promoted", "Giant")
+
+        assert new_way.prob_away_win > old_way.prob_away_win, (
+            "imputation should recover confidence in the established side"
+        )
+        assert new_way.prob_away_win > new_way.prob_home_win, (
+            "a top-division giant away to a just-promoted side should be the favourite"
+        )
+
+    def test_translation_is_invariant_to_the_priors_ridge_position(self):
+        # The prior's own scale is arbitrary along (attack+c, defense-c).
+        # Sliding it must not change what gets imputed -- if it did, the
+        # imputed rating would depend on an accident of centring.
+        top_only_a, joint = _giant_league_and_joint()
+        top_only_b = DixonColesModel()
+        top_only_b.fit(
+            pd.DataFrame([{"kickoff_date": date(2026, 1, 10), "home_team": h, "away_team": a,
+                           "home_score": 3 if h == "Giant" else 1, "away_score": 3 if a == "Giant" else 1}
+                          for h in ["Giant", "Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+                          for a in ["Giant", "Alpha", "Bravo", "Charlie", "Delta", "Echo"] if h != a]),
+            half_life_days=180,
+            shrinkage=1.0,
+        )
+        shifted = DixonColesModel(
+            teams=joint.teams,
+            attack={t: v * 2.0 for t, v in joint.attack.items()},
+            defense={t: v / 2.0 for t, v in joint.defense.items()},
+            home_advantage=joint.home_advantage,
+            rho=joint.rho,
+        )
+        top_only_a.impute_team_from("Promoted", joint)
+        top_only_b.impute_team_from("Promoted", shifted)
+        assert top_only_a.attack["Promoted"] == pytest.approx(top_only_b.attack["Promoted"])
+        assert top_only_a.defense["Promoted"] == pytest.approx(top_only_b.defense["Promoted"])
+
+    def test_never_overwrites_a_fitted_rating(self):
+        # A real rating estimated from this competition's own matches beats
+        # a translated one -- imputing an existing team must be a no-op.
+        top_only, joint = _giant_league_and_joint()
+        before = top_only.attack["Giant"]
+        top_only.impute_team_from("Giant", joint)
+        assert top_only.attack["Giant"] == before
+
+    def test_unknown_everywhere_still_raises(self):
+        top_only, joint = _giant_league_and_joint()
+        with pytest.raises(ValueError, match="prior model"):
+            top_only.impute_team_from("Narnia", joint)
