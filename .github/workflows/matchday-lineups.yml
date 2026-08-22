@@ -67,7 +67,26 @@ name: Matchday lineup check
 # API_FOOTBALL_KEY, JWT_SECRET.
 on:
   schedule:
-    - cron: '0 * * * *' # every hour, on the hour (see architecture.md's note on Actions cron delay tolerance)
+    # Every 15 minutes, not hourly -- measured, not guessed. On 2026-08-22
+    # app.diagnose_lineups reported the first four real pre-match captures
+    # at a median lead of NINE MINUTES before kickoff, all four identical
+    # because a single hourly run happened to catch them. The 11:00 cron
+    # was delivered at 11:21 (GitHub's scheduled-workflow delay, routinely
+    # 10-20 minutes under load), which left exactly one useful attempt for
+    # an 11:30 kickoff. Ten more minutes of delay and every one of those
+    # lineups would have been missed.
+    #
+    # Lineups publish around an hour before kickoff, so the window that
+    # matters is roughly T-60 to T-0. Hourly sampling gets one shot at it
+    # and sometimes none; every 15 minutes gets four, which is what turns
+    # capture from luck into routine.
+    #
+    # Cost stays negligible: a run with nothing near kickoff is one cheap
+    # DB query and zero API calls, and a fixture stops being checked the
+    # moment its lineup lands (the query skips fixtures that already have
+    # rows). Worst case is a handful of extra calls per fixture against a
+    # 7500/day budget.
+    - cron: '*/15 * * * *'
   workflow_dispatch: {} # manual "Run workflow" button, for testing or catching up on demand
 
 jobs:
