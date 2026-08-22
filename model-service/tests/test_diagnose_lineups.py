@@ -37,7 +37,13 @@ def _run(monkeypatch, capsys, rows, argv=("app.diagnose_lineups",)):
             pass
 
     monkeypatch.setattr(module, "get_connection", lambda: _FakeConnection())
-    monkeypatch.setattr(module, "_query_df", lambda conn, query, params: pd.DataFrame(rows))
+    # params defaults because report_capture_rate's first query takes none.
+    def _query(conn, query, params=None):
+        if "min(pre_match_captured_at)" in query:
+            return pd.DataFrame([{"first_capture": None}])
+        return pd.DataFrame(rows)
+
+    monkeypatch.setattr(module, "_query_df", _query)
     monkeypatch.setattr(module.sys, "argv", list(argv))
     module.main()
     return capsys.readouterr().out
@@ -123,3 +129,84 @@ class TestFraming:
         # values have to be the ones actually used.
         out = _run(monkeypatch, capsys, [_fixture()])
         assert f"now -{module.MATCHDAY_LOOKBACK_HOURS}h to now +{module.MATCHDAY_LOOKAHEAD_HOURS}h" in out
+
+
+class TestCaptureRateReport:
+    """
+    The retrospective answer to "is pre-match capture working?".
+
+    Exists because the raw 40/57,316 from the goal-scorer backtest cannot
+    distinguish failure from not-yet-measured: pre_match_captured_at only
+    exists since migration 1701000000027, so every earlier row is NULL by
+    construction. Reading that as "capture is broken" would repeat the
+    matchday log's original sin -- a number that looks like evidence and
+    is not.
+    """
+
+    @staticmethod
+    def _run(monkeypatch, capsys, first_capture, fixture_rows):
+        class _FakeConnection:
+            def close(self):
+                pass
+
+        calls = {"n": 0}
+
+        def _query(conn, query, params=None):
+            calls["n"] += 1
+            if "min(pre_match_captured_at)" in query:
+                return pd.DataFrame([{"first_capture": first_capture}])
+            return pd.DataFrame(fixture_rows)
+
+        monkeypatch.setattr(module, "_query_df", _query)
+        module.report_capture_rate(_FakeConnection())
+        return capsys.readouterr().out
+
+    @staticmethod
+    def _fixture(lead_minutes, captured=True, name="Arsenal"):
+        return {
+            "fixture_id": 1, "home_team": name, "away_team": "Coventry",
+            "kickoff_at": NOW,
+            "captured_at": NOW - timedelta(minutes=lead_minutes) if captured else None,
+            "lead_minutes": lead_minutes if captured else None,
+        }
+
+    def test_never_captured_says_so_without_blaming_the_pipeline(self, monkeypatch, capsys):
+        out = self._run(monkeypatch, capsys, None, [])
+        assert "No lineup has EVER been captured pre-match" in out
+        assert "before concluding" in out
+
+    def test_column_live_but_nothing_kicked_off_is_not_a_failure(self, monkeypatch, capsys):
+        out = self._run(monkeypatch, capsys, NOW, [])
+        assert "Nothing to measure yet" in out
+        assert "not a failure" in out
+
+    def test_reports_a_rate_and_lead_time(self, monkeypatch, capsys):
+        rows = [self._fixture(75), self._fixture(60), self._fixture(45)]
+        out = self._run(monkeypatch, capsys, NOW, rows)
+        assert "3 were captured pre-match (100%)" in out
+        assert "median 60 min" in out
+
+    def test_a_tiny_sample_is_flagged_rather_than_dressed_as_a_percentage(self, monkeypatch, capsys):
+        out = self._run(monkeypatch, capsys, NOW, [self._fixture(60)])
+        assert "far too small" in out
+
+    def test_a_late_median_recommends_a_faster_cadence(self, monkeypatch, capsys):
+        # The number that decides whether the hourly cron is the problem:
+        # lineups publish ~60 min out, so catching them at ~10 min means we
+        # are sampling too slowly, not that the data is missing.
+        rows = [self._fixture(12), self._fixture(8), self._fixture(15),
+                self._fixture(6), self._fixture(11)]
+        out = self._run(monkeypatch, capsys, NOW, rows)
+        assert "faster check cadence" in out
+
+    def test_a_healthy_lead_does_not_recommend_anything(self, monkeypatch, capsys):
+        rows = [self._fixture(75), self._fixture(65), self._fixture(80),
+                self._fixture(70), self._fixture(60)]
+        out = self._run(monkeypatch, capsys, NOW, rows)
+        assert "faster check cadence" not in out
+
+    def test_uncaptured_fixtures_are_listed_not_hidden(self, monkeypatch, capsys):
+        rows = [self._fixture(60), self._fixture(0, captured=False, name="Leeds")]
+        out = self._run(monkeypatch, capsys, NOW, rows)
+        assert "1 were captured pre-match (50%)" in out
+        assert "Leeds" in out and "NOT captured pre-match" in out
