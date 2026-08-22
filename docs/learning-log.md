@@ -6500,3 +6500,53 @@ prediction if it ever matters.
 Nice confirmation the maths is right: -1 and -1.5 return the identical cover
 probability (both need a 2+ win). The difference between them isn't the
 chance of covering, it's that -1 can push and refund.
+
+## 2026-08-22 -- Hull City to beat Manchester United
+
+Opening weekend, and the model picked a just-promoted club to beat one of
+the biggest sides in the country. Nolan asked whether we need better data
+or better maths. The honest answer is neither: **the maths was fine and the
+data was fine, but a correct component was being used outside its design
+envelope.** Third bug on the promoted-team path, and the most instructive.
+
+The chain: Hull have zero finished Premier League matches, so the PL fit
+has no parameters for them, so the fallback (added 2026-08-21 to stop
+promoted-team fixtures vanishing entirely) predicted the fixture with the
+joint fit. Each link defensible. But the joint fit is tuned FOR THE FA CUP:
+
+- **kappa = 10 shrinkage** flattens every team toward average -- which
+  costs Manchester United far more than Hull, because United are the ones
+  far from average. Shrinkage takes most from those who have most.
+- **home advantage ~1.5** (vs the PL fit's own 1.184), inflated by cup
+  ties, then decides the flattened fixture for whoever is at home.
+
+So every one of the ~74 fallback fixtures this season quietly favoured the
+home side; Hull-United was merely the one absurd enough to notice. A
+synthetic reconstruction flipped exactly as predicted: whole-fixture joint
+fallback 41.3% home / 38.0% away, imputation 32.2% / 45.1%.
+
+The fix (`DixonColesModel.impute_team_from`): borrow ONLY the missing
+team's rating, translated onto the competition's own scale, and let that
+competition's fit -- the opponent's real rating, its own home advantage
+and rho -- predict the fixture. The translation is the identifiability
+ridge move again (docs/models.md section 3): each fit centres "1.0 =
+average of my own training set", and the joint fit's average is ~800
+mostly non-league clubs, so raw numbers mean nothing across fits until
+shifted. Third time that ridge has been the crux of a real change, which
+is a strong argument for having written it down properly the first time.
+
+Pinned by a regression test encoding the exact scenario (giant away to a
+promoted side: imputation must recover the giant as favourite, verified to
+fail under the old fallback) and a ridge-invariance test (sliding the
+prior's arbitrary centring must not change what gets imputed).
+app.evaluate_scorers' fallback now mirrors production exactly, for the
+same reason the backtest exists at all.
+
+Two honest residuals. The imputed rating inherits the joint fit's kappa=10
+compression, so promoted sides will run somewhat optimistic until they
+accumulate real matches -- measurable via app.compare once they have some.
+And the deeper lesson generalises: **a model tuned for one job was silently
+load-bearing for another.** The FA Cup shrinkage sweep never evaluated
+"how well does this joint fit backstop a Premier League fixture", because
+that role didn't exist when the sweep ran. When a component grows a second
+consumer, its tuning is unvalidated for the new one by default.

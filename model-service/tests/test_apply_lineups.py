@@ -145,3 +145,52 @@ class TestOnlyWithConfirmedLineups:
         assert scorer_players, "a confirmed fixture should still get scorer picks"
         # Only players named in the squad -- all 8 are, here.
         assert scorer_players <= {t * 100 + i for t in (1, 2) for i in range(4)}
+
+
+class TestFallbackImputation:
+    """
+    The production path for a promoted team (Hull-vs-Man-U regression,
+    2026-08-22): predict_for_competition must impute the missing team into
+    the competition's own model rather than handing the whole fixture to
+    the joint fit.
+    """
+
+    @staticmethod
+    def _joint_with_hull():
+        rng = __import__("numpy").random.default_rng(9)
+        teams = ["Arsenal", "Coventry City", "Chelsea", "Fulham", "Hull", "Leeds"]
+        rows = []
+        for round_ in range(6):
+            for home in teams:
+                for away in teams:
+                    if home != away:
+                        rows.append({
+                            "kickoff_date": date(2026, 1, 1 + round_),
+                            "home_team": home, "away_team": away,
+                            "home_score": int(rng.poisson(1.4)), "away_score": int(rng.poisson(1.1)),
+                        })
+        joint = DixonColesModel()
+        joint.fit(pd.DataFrame(rows), half_life_days=180, shrinkage=10.0)
+        return joint
+
+    def test_missing_team_is_imputed_not_delegated(self, monkeypatch):
+        upcoming = pd.DataFrame([
+            {"fixture_id": 20, "home_team": "Hull", "away_team": "Arsenal", "home_team_id": 3, "away_team_id": 1},
+        ])
+        monkeypatch.setattr(train_module, "load_upcoming_fixtures", lambda conn, competition: upcoming)
+        monkeypatch.setattr(
+            train_module,
+            "load_confirmed_lineups",
+            lambda conn, ids: pd.DataFrame(columns=["fixture_id", "team_id", "player_id", "is_starting"]),
+        )
+        model = _model()  # fitted without Hull
+        assert "Hull" not in model.attack
+        connection = _FakeConnection()
+        train_module.predict_for_competition(
+            connection, model, "Premier League", _shares(), fallback_model=self._joint_with_hull()
+        )
+        assert _predicted_fixture_ids(connection) == {20}
+        assert "Hull" in model.attack, (
+            "the missing team must be imputed into the competition's own model -- "
+            "if this fails, the fixture was predicted by the joint fit instead"
+        )
