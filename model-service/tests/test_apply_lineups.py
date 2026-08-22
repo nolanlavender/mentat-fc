@@ -194,3 +194,54 @@ class TestFallbackImputation:
             "the missing team must be imputed into the competition's own model -- "
             "if this fails, the fixture was predicted by the joint fit instead"
         )
+
+
+class TestCoverageReachesPredictions:
+    """
+    The deployed constant has to actually arrive at allocate_team_goals.
+    A coverage factor wired up but never passed would look completely
+    correct and silently change nothing -- the same shape as the `xg`
+    column that was plumbed in and touched no data.
+    """
+
+    def test_scorer_picks_shrink_by_the_coverage_factor(self, monkeypatch):
+        import app.train as train
+
+        upcoming = pd.DataFrame([
+            {"fixture_id": 30, "home_team": "Arsenal", "away_team": "Coventry City",
+             "home_team_id": 1, "away_team_id": 2},
+        ])
+        monkeypatch.setattr(train, "load_upcoming_fixtures", lambda conn, competition: upcoming)
+        monkeypatch.setattr(
+            train, "load_confirmed_lineups",
+            lambda conn, ids: pd.DataFrame(columns=["fixture_id", "team_id", "player_id", "is_starting"]),
+        )
+
+        def _total(coverage):
+            connection = _FakeConnection()
+            train.predict_for_competition(
+                connection, _model(), "Premier League", _shares(), coverage=coverage
+            )
+            return sum(
+                float(params["expected_goals"])
+                for query, params in connection.statements
+                if "INSERT INTO player_goal_predictions" in query
+            )
+
+        full = _total({"no_lineup": 1.0, "confirmed": 1.0})
+        reduced = _total({"no_lineup": 0.8, "confirmed": 1.0})
+        assert full > 0
+        assert reduced == pytest.approx(0.8 * full), "the no_lineup coverage must reach the allocation"
+
+    def test_the_deployed_constant_is_used_by_default(self, monkeypatch):
+        # Guards the wiring in main(): every predicted competition must
+        # have an entry, so a new competition cannot silently default to 1.0.
+        import app.train as train
+
+        assert set(train.ALLOCATION_COVERAGE) == set(train.PREDICT_COMPETITIONS)
+        for competition, values in train.ALLOCATION_COVERAGE.items():
+            assert set(values) == {"no_lineup", "confirmed"}, competition
+            assert 0 < values["no_lineup"] <= 1 and 0 < values["confirmed"] <= 1, competition
+            assert values["confirmed"] >= values["no_lineup"], (
+                f"{competition}: knowing the squad should never cover LESS of the team's goals"
+            )

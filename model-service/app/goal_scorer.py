@@ -81,12 +81,30 @@ from app.dixon_coles import time_weight
 #                rather than assuming it -- and with no new tuned
 #                constant. Predicted to land near 1.0 in both modes.
 #
-# Still "none" here: "expected" is a prediction until app.evaluate_scorers
-# scores all three on the same held-out player-fixtures, which is one
-# workflow run. Note the backtest already ruled out the obvious move --
-# flipping to "allocated" would have made the days-ahead path (what the
-# Predictions page shows) WORSE, 0.391 off calibration versus 0.264.
-ALLOCATION_MODE = "none"
+# "allocated" as of 2026-08-22, paired with ALLOCATION_COVERAGE below --
+# see app.train. The walk-forward backtest settled this in three rounds
+# and each round moved the answer, so the reasoning is worth keeping:
+#
+#   round 1 (frozen cutoff)  "none" 0.736, "allocated" 1.391 -- flipping
+#     to "allocated" would have made the days-ahead path WORSE, which is
+#     why it did not ship on the arithmetic alone.
+#   round 2  "expected" was built to withhold the fringe players'
+#     share and predicted to land near 1.0. It landed at 1.326: fringe
+#     players are only ~5% of the pool where 28% needed withholding.
+#   round 3 (walk-forward)  the missing 23% was mostly the HARNESS -- a
+#     frozen cutoff made a year of signings and debuts invisible.
+#     Rebuilding shares per fold moved coverage 0.716 -> 0.794.
+#
+# What survives all three: "allocated" is the structurally right rule,
+# because it renormalises over exactly the players being predicted --
+# every reliable player days ahead, the named squad on matchday. What it
+# gets wrong is only the LEVEL, and it gets that wrong by a single factor
+# (goals scored by players outside the predicted set: those still under
+# the appearance threshold, and own goals). That factor is
+# ALLOCATION_COVERAGE, measured rather than derived -- structurally
+# deriving it is impossible, since the players it accounts for are by
+# definition not in the data yet.
+ALLOCATION_MODE = "allocated"
 
 ALLOCATION_MODES = ("none", "allocated", "expected")
 
@@ -365,6 +383,7 @@ def allocate_team_goals(
     confirmed_squad: set[int] = frozenset(),
     confirmed_starting: set[int] = frozenset(),
     normalization: str = ALLOCATION_MODE,
+    coverage: float = 1.0,
 ) -> list[PlayerGoalPrediction]:
     """
     player_shares: compute_player_shares's output. Returns one prediction
@@ -466,9 +485,14 @@ def allocate_team_goals(
 
     predictions = []
     for player_id, weight in weights:
-        lambda_player = open_play_expected_goals * weight / divisor
+        # coverage scales the whole allocation down to the share of a
+        # team's goals the predicted players actually account for. Applied
+        # here rather than to team_expected_goals so the penalty portion
+        # below is scaled by it too -- a penalty taker who is not in our
+        # pool is exactly as absent as any other scorer.
+        lambda_player = coverage * open_play_expected_goals * weight / divisor
         if player_id == primary_taker_id:
-            lambda_player += penalty_expected_goals
+            lambda_player += coverage * penalty_expected_goals
 
         predictions.append(
             PlayerGoalPrediction(player_id=player_id, expected_goals=lambda_player, prob_scores=1 - exp(-lambda_player))

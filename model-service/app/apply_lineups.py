@@ -45,6 +45,7 @@ from app.data import load_finished_matches, load_player_squad_appearances
 from app.db import get_connection
 from app.goal_scorer import MIN_PLAYER_MATCHES, compute_player_shares
 from app.train import (
+    ALLOCATION_COVERAGE,
     HALF_LIFE_DAYS,
     JOINT_FIT_COMPETITIONS,
     MIN_MATCHES_TO_FIT,
@@ -104,6 +105,7 @@ def main() -> None:
                 player_shares,
                 fallback_model=None if model is joint_model else joint_model,
                 only_with_confirmed_lineups=True,
+                coverage=ALLOCATION_COVERAGE[competition_name],
             )
     finally:
         conn.close()

@@ -566,53 +566,53 @@ allocation settings at all**, by construction: normalising is a monotone
 rescale, so the ranking is identical and only the level changes. That
 separation is the point of reporting them apart.
 
-**The allocation is miscalibrated, and the obvious fix overshoots.** The
-first real backtest (2026-08-22, 68,591 held-out player-fixtures) measured
-both candidate configurations and neither is right:
+**The allocation is now calibrated, after three rounds that each moved the
+answer.** Worth reading as a sequence, because two of the three rounds were
+wrong:
 
-| mode | days ahead | with a confirmed squad |
+| round | `none` | `allocated` | `expected` |
+|---|---|---|---|
+| 1 — frozen cutoff | 0.736 | 1.391 | — |
+| 2 — added `expected` | 0.739 | 1.397 | **1.326** |
+| 3 — walk-forward | 0.689 | **1.259** | 1.224 |
+
+Round 1 said "don't ship `allocated`" — it would have made the days-ahead
+path worse than doing nothing. Round 2 tested a theory that the missing
+coverage was the fringe players below `MIN_PLAYER_MATCHES`; that theory was
+wrong, since they're only ~5% of the pool where 28% needed withholding.
+Round 3 found the other 23% was mostly **the harness**: a frozen cutoff
+made a year of signings and debuts invisible to the model while counting
+their goals against it. Rebuilding shares per fold moved coverage from
+0.716 to 0.794.
+
+What survived all three: **`allocated` is the structurally right rule.** It
+renormalises over exactly the players being predicted — every reliable
+player days ahead, the named squad on matchday. It gets only the *level*
+wrong, by a single factor: goals scored by players outside the predicted
+set at all. That's `ALLOCATION_COVERAGE`, and it is **measured, not
+derived** — deriving it structurally is impossible, because the players it
+accounts for are by definition not in the data yet.
+
+| | days ahead | confirmed squad |
 |---|---|---|
-| `none` (shipped) | 0.736 | 0.399 |
-| `allocated` | 1.391 | 1.268 |
-| *perfect* | 1.00 | 1.00 |
+| Premier League | 0.810 | 0.864 |
+| Championship | 0.799 | 0.859 |
+| FA Cup | 0.670 | 0.814 |
 
-`none` under-calls every scorer, badly — and *worse once a lineup lands*,
-which is backwards: our numbers should improve when we learn who's playing.
-`allocated` fixes the arithmetic and then overshoots, because forcing 100%
-of a team's expected goals onto its reliable players asserts that nobody
-else ever scores. The implied coverage is remarkably stable across
-competitions — **0.73 days ahead, 0.79 with a squad** — which is the real
-quantity that was missing.
+Trustworthy in a way the shot-location weight never was: 2,740 actual
+scorers put the pooled estimate ~11 standard errors from 1.0, and the two
+leagues agree to within 0.011 despite being fitted independently. The FA
+Cup sits lower exactly as it should — non-league entrants have no reliable
+players at all.
 
-A third mode, `expected`, divides by the team's whole per-match open-play
-expectation summed over *every* player, fringe ones included — on the
-theory that the missing coverage was the fringe players the reliability
-filter drops. **Measured, that theory was wrong**: `expected` landed at
-1.326, because fringe players only account for ~5% of the historical pool
-while the gap to close was 28%.
+**The backtest deliberately does not apply coverage**, so its `allocated`
+row stays the estimator: `1 / calibration` is the constant. Applying it
+there would make the report say 1.0 by construction and destroy the very
+number it exists to produce.
 
-The other 23% turned out to be an artifact of the *measurement*, not the
-model. The backtest froze `player_shares` at one cutoff and scored a year
-of matches after it — so every summer signing, academy debut and January
-arrival in the test window was invisible to the model, and their goals
-counted against it. Production retrains daily and has no such blind spot.
-The scorer backtest is now walk-forward, rebuilding shares at each fold
-boundary, so staleness is bounded by the fold width instead of the whole
-test window. All three modes still ship off (`ALLOCATION_MODE = "none"`)
-until that corrected measurement runs.
-
-**The units are the trap.** The weights are `non_penalty_goal_share ×
-minutes_share` — a normalised share, not a goals-per-match rate. Building
-the divisor from `goals_per_90` instead is off by the team's total scoring
-rate and under-allocates by roughly 4×.
-
-**Ranking is not the problem.** AUC came back at **0.78** days ahead and
-0.76 on matchday against a 0.50 baseline — the per-player machinery picks
-the right players comfortably. But **log loss is worse than a constant
-base rate everywhere** (0.137 vs 0.112), which is exactly what
-miscalibration does to a proper scoring rule: the ordering is right and the
-numbers attached to it are not. All three modes are monotone rescales, so
-they share an AUC by construction and only calibration separates them.
+**Ranking was never the problem.** AUC came back at **0.785** days ahead
+and 0.764 on matchday against a 0.50 baseline. Coverage is a scalar and
+can't reorder anyone, which is why calibration is the only column it moves.
 
 **Player position is loaded from the database and used nowhere.** A
 defender and a striker with identically thin histories get identical

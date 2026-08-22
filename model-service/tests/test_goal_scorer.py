@@ -682,3 +682,63 @@ class TestExpectedAllocationMode:
         shares = compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
         predictions = allocate_team_goals(1.5, 1, shares, normalization="expected")
         assert all(p.expected_goals == 0 for p in predictions)
+
+
+class TestAllocationCoverage:
+    """
+    The measured factor that scales an allocation down to the share of a
+    team's goals its predicted players actually account for. The rest go
+    to players outside the pool -- ones still under MIN_PLAYER_MATCHES,
+    plus own goals -- and no rule can hand those to anyone, which is why
+    this is measured (from app.evaluate_scorers' "allocated" row) rather
+    than derived.
+    """
+
+    @staticmethod
+    def _shares():
+        return TestExpectedAllocationMode._shares()
+
+    def test_default_is_a_no_op(self):
+        shares = self._shares()
+        plain = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated"))
+        explicit = sum(
+            p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated", coverage=1.0)
+        )
+        assert plain == pytest.approx(explicit)
+
+    def test_scales_the_allocation_by_exactly_the_factor(self):
+        # The property the measured constant relies on: calibration is
+        # linear in coverage, so 1/measured-calibration is the right
+        # correction. If this were nonlinear the estimator would be wrong.
+        shares = self._shares()
+        full = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated"))
+        scaled = sum(
+            p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated", coverage=0.81)
+        )
+        assert scaled == pytest.approx(0.81 * full)
+
+    def test_covers_the_penalty_portion_too(self):
+        # A penalty taker outside our pool is exactly as absent as any
+        # other scorer, so coverage must scale the carved-out penalty
+        # share as well -- not just open play.
+        appearances = []
+        for day in range(10):
+            appearances.append(_appearance(1, 100, day, 90, 1, rating=7.2, penalties_scored=1 if day < 4 else 0))
+            appearances.append(_appearance(1, 101, day, 90, 1 if day % 3 == 0 else 0, rating=7.0))
+        shares = compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
+        full = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated"))
+        scaled = sum(
+            p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated", coverage=0.8)
+        )
+        assert full == pytest.approx(2.0), "without coverage the allocation should still conserve the team total"
+        assert scaled == pytest.approx(1.6), "coverage must scale penalties as well as open play"
+
+    def test_ranking_is_untouched(self):
+        # Coverage is a scalar, so it cannot reorder anyone -- which is
+        # why AUC in the backtest is unaffected by it and calibration is
+        # the only column it moves.
+        shares = self._shares()
+        order = lambda ps: [p.player_id for p in sorted(ps, key=lambda p: -p.expected_goals)]  # noqa: E731
+        assert order(allocate_team_goals(2.0, 1, shares, normalization="allocated")) == order(
+            allocate_team_goals(2.0, 1, shares, normalization="allocated", coverage=0.7)
+        )
