@@ -6834,3 +6834,76 @@ in place; the values can follow when they earn it.
 Effect on the fixture that started all this, Hull at home to Manchester
 United: 41.3% Hull under the original whole-fixture fallback, 32.2% after
 yesterday's imputation fix, **13.1% now** with United at 70.4%.
+
+## 2026-08-22 -- The goal-scorer model's first score, and why the fix was wrong too
+
+68,591 held-out player-fixtures. Three findings, in order of how much they
+changed my mind.
+
+### 1. The ranking is good. The numbers are not.
+
+AUC **0.78** days ahead, 0.76 on matchday, against 0.50 for a constant.
+The per-player machinery genuinely picks the right players.
+
+And yet **log loss is WORSE than the base rate everywhere** (0.137 vs
+0.112 pooled). That combination is only possible one way: the ordering is
+right and the probabilities attached to it are wrong. Splitting
+discrimination from calibration was the design decision that made this
+legible -- a single Brier number would have shown "slightly better than
+base rate" and hidden both halves.
+
+### 2. Neither configuration was calibrated -- including my fix
+
+| mode | days ahead | confirmed squad |
+|---|---|---|
+| `none` (shipped) | 0.736 | 0.399 |
+| `allocated` (the "fix") | 1.391 | 1.268 |
+
+**Flipping the flag would have made the Predictions page worse.** Days
+ahead -- the path almost every displayed number comes from -- `none` is
+0.264 off calibration and `allocated` is 0.391 off. I built that fix
+yesterday, documented it as correcting a real leak, and it does correct the
+leak; it just lands further from the truth. Had I shipped it on the
+arithmetic alone, every scorer probability in the app would have moved 30%
+in the wrong direction and looked more principled while doing it.
+
+That is the entire argument for measuring before shipping, in one number.
+
+### 3. The over-call names the missing quantity
+
+`allocated` forces 100% of a team's expected goals onto its reliable
+players -- asserting nobody else ever scores. Invert the over-call and you
+get the coverage that assumption is wrong by, and it is strikingly stable:
+
+    Premier League  0.738 days ahead   0.792 confirmed squad
+    Championship    0.731              0.796
+    FA Cup          0.525              0.704
+
+Reliable players account for ~73% of goals days ahead, ~79% once a squad
+is known (a confirmed squad captures more of the real scorers). FA Cup is
+lower, as expected -- non-league entrants have no reliable players at all.
+
+So the correct divisor is not "the players being allocated" but "every
+player, including the fringe ones the reliability filter drops". That is
+mode `expected`, and it needs no tuned constant: the coverage falls out of
+data the model already has.
+
+### 4. `none` gets WORSE when a lineup lands (0.736 -> 0.399)
+
+Backwards, and worth calling out as its own defect. Learning who is
+actually playing should sharpen a prediction, not halve it. Two causes
+compound: unnamed players' share is dropped without redistribution, and
+bench players get their (small) bench-specific minutes. Both are artifacts
+of not normalising, so `expected` should fix this too -- its divisor is
+fixed, so a squad that excludes fringe players genuinely receives a larger
+share rather than being renormalised back to everything.
+
+### The units bug, in passing
+
+First implementation of the `expected` divisor summed
+`goals_per_90 * minutes_share` while the weights it divides are
+`goal_share * minutes_share` -- a rate versus a normalised share. Off by
+the team's total scoring rate, under-allocating ~4x. Caught immediately by
+a unit test asserting `expected` sits between `none` and `allocated`, which
+is a property worth asserting precisely because it pins the units without
+pinning a magic number.

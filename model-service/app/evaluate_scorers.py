@@ -62,7 +62,7 @@ from app.evaluate import (
     TEST_FRACTION,
     _blend,
 )
-from app.goal_scorer import allocate_team_goals, compute_player_shares
+from app.goal_scorer import ALLOCATION_MODES, allocate_team_goals, compute_player_shares
 
 MIN_PREDICTIONS_TO_REPORT = 200
 EPSILON = 1e-9  # log-loss guard; probabilities can legitimately reach 0 for a zero-share player
@@ -120,7 +120,7 @@ def _predict_fixtures(
     player_shares: pd.DataFrame,
     lineups: pd.DataFrame,
     use_confirmed_lineup: bool,
-    normalize_shares: bool,
+    normalization: str,
 ) -> pd.DataFrame:
     """One row per (fixture, player) predicted, with the probability we'd have shown."""
     predictions = []
@@ -161,7 +161,7 @@ def _predict_fixtures(
                 player_shares,
                 confirmed_squad=confirmed_squad,
                 confirmed_starting=confirmed_starting,
-                normalize_shares=normalize_shares,
+                normalization=normalization,
             ):
                 predictions.append(
                     {
@@ -263,15 +263,17 @@ def main() -> None:
         print()
 
         for use_confirmed_lineup, mode in ((False, "no lineup (days ahead)"), (True, "confirmed lineup (matchday)")):
-            # Both allocation settings scored on the SAME held-out
-            # player-fixtures, so the shipped behaviour and the candidate
-            # fix are read off one run rather than two. See
-            # app.goal_scorer.NORMALIZE_ALLOCATION for what differs.
+            # Every allocation mode scored on the SAME held-out
+            # player-fixtures, so they are read off one run rather than
+            # three. See app.goal_scorer.ALLOCATION_MODE for what differs;
+            # calibration is the column that separates them, since all
+            # three are monotone rescales and therefore share an AUC.
             variants = {}
-            for normalize_shares, name in ((False, "model (shipped)"), (True, "model (normalized)")):
+            for normalization in ALLOCATION_MODES:
                 predictions = _predict_fixtures(
-                    test_matches, models, joint_model, player_shares, lineups, use_confirmed_lineup, normalize_shares
+                    test_matches, models, joint_model, player_shares, lineups, use_confirmed_lineup, normalization
                 )
+                name = f"model ({normalization})"
                 if not predictions.empty:
                     variants[name] = _attach_outcomes(predictions, actual_goals)
             if not variants:

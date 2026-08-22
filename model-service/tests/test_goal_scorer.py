@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from app.goal_scorer import (
+    ALLOCATION_MODES,
     MIN_PENALTY_ATTEMPTS,
     MIN_PLAYER_MATCHES,
     allocate_team_goals,
@@ -118,6 +119,7 @@ class TestComputePlayerShares:
             "avg_minutes_when_starting",
             "avg_minutes_when_benched",
             "non_penalty_goal_share",
+            "open_play_allocation_denominator",
             "penalty_attempts",
             "penalty_goal_fraction",
         ]
@@ -505,7 +507,7 @@ class TestComputeTeamAvailability:
 
 class TestAllocationNormalization:
     """
-    The ~24% leak and its fix. Two causes, both arithmetic:
+    The ~24% leak and the two candidate fixes. Two causes, both arithmetic:
     goal_share is normalised before the MIN_PLAYER_MATCHES filter drops
     fringe players, and a per-90 RATE share is then multiplied by a
     minutes share (< 1), discounting a second time.
@@ -532,12 +534,12 @@ class TestAllocationNormalization:
 
     def test_shipped_allocation_leaks(self):
         shares = self._shares()
-        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalize_shares=False))
+        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="none"))
         assert allocated < 2.0 * 0.95, f"expected a visible shortfall, allocated {allocated:.3f} of 2.0"
 
     def test_normalized_allocation_conserves_the_team_total(self):
         shares = self._shares()
-        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalize_shares=True))
+        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated"))
         assert allocated == pytest.approx(2.0)
 
     def test_normalization_preserves_the_ranking(self):
@@ -545,8 +547,8 @@ class TestAllocationNormalization:
         # is why AUC in the backtest cannot distinguish the two settings
         # and calibration is the number that decides it.
         shares = self._shares()
-        shipped = allocate_team_goals(2.0, 1, shares, normalize_shares=False)
-        normalized = allocate_team_goals(2.0, 1, shares, normalize_shares=True)
+        shipped = allocate_team_goals(2.0, 1, shares, normalization="none")
+        normalized = allocate_team_goals(2.0, 1, shares, normalization="allocated")
         order = lambda ps: [p.player_id for p in sorted(ps, key=lambda p: -p.expected_goals)]  # noqa: E731
         assert order(shipped) == order(normalized)
 
@@ -559,14 +561,14 @@ class TestAllocationNormalization:
         shares = self._shares()
         squad = {101, 102, 103}  # 100, the top scorer, is out
         without_top = allocate_team_goals(
-            2.0, 1, shares, confirmed_squad=squad, confirmed_starting=squad, normalize_shares=True
+            2.0, 1, shares, confirmed_squad=squad, confirmed_starting=squad, normalization="allocated"
         )
         assert sum(p.expected_goals for p in without_top) == pytest.approx(2.0)
 
     def test_no_division_by_zero_when_nobody_has_a_scoring_history(self):
         appearances = [_appearance(1, 200, day, 90, 0, rating=6.5) for day in range(8)]
         shares = compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
-        predictions = allocate_team_goals(1.5, 1, shares, normalize_shares=True)
+        predictions = allocate_team_goals(1.5, 1, shares, normalization="allocated")
         assert all(p.expected_goals == 0 for p in predictions)
         assert all(p.prob_scores == 0 for p in predictions)
 
@@ -581,5 +583,102 @@ class TestAllocationNormalization:
             )
             appearances.append(_appearance(1, 101, day, 90, 1 if day % 3 == 0 else 0, rating=7.0))
         shares = compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
-        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalize_shares=True))
+        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated"))
         assert allocated == pytest.approx(2.0), "open play + penalties must still add back to the team total"
+
+
+class TestExpectedAllocationMode:
+    """
+    The third mode, added after the 2026-08-22 backtest showed neither of
+    the first two is calibrated: "none" under-called by 26% days ahead,
+    "allocated" over-called by 39%. "expected" divides by the team's whole
+    per-match open-play expectation across EVERY player, so the reliable
+    pool receives its historical share instead of all of it.
+    """
+
+    @staticmethod
+    def _shares():
+        # Four reliable players plus a fringe one who is filtered out --
+        # the fringe player is exactly the coverage that "allocated"
+        # wrongly redistributes and "expected" correctly withholds.
+        appearances = []
+        for day in range(12):
+            appearances.append(_appearance(1, 100, day, 90, 1 if day % 2 == 0 else 0, rating=7.2))
+            appearances.append(_appearance(1, 101, day, 90, 1 if day % 3 == 0 else 0, rating=7.0))
+            appearances.append(_appearance(1, 102, day, 60, 1 if day % 4 == 0 else 0, rating=6.8))
+            appearances.append(_appearance(1, 103, day, 30, 0, rating=6.5, is_starting=False))
+        for day in range(3):  # below MIN_PLAYER_MATCHES -- real goals, dropped from the pool
+            appearances.append(_appearance(1, 104, day, 90, 1, rating=7.5))
+        return compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
+
+    def test_allocates_less_than_the_full_team_total(self):
+        # The defining property: reliable players do not score 100% of a
+        # team's goals, so they must not be handed 100% of its expected
+        # goals. "allocated" hands over everything; "expected" withholds
+        # the fringe player's historical share.
+        shares = self._shares()
+        allocated = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="allocated"))
+        expected = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="expected"))
+        assert allocated == pytest.approx(2.0)
+        assert expected < allocated
+        assert expected > 0.5 * allocated, "withholding the fringe share should be a trim, not a halving"
+
+    def test_beats_the_shipped_mode_on_total_allocated(self):
+        # Both under-allocate relative to the team total, but "expected"
+        # under-allocates for a defensible reason (coverage) rather than
+        # by double-discounting, so it should sit strictly higher.
+        shares = self._shares()
+        none_total = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="none"))
+        expected_total = sum(p.expected_goals for p in allocate_team_goals(2.0, 1, shares, normalization="expected"))
+        assert expected_total > none_total
+
+    def test_a_confirmed_squad_receives_more_not_the_same(self):
+        # The behavioural difference from "allocated" that matters most.
+        # Under "allocated" any squad is renormalised back to the full
+        # team total, so a squad missing players scores the same as a full
+        # one. Under "expected" the divisor is fixed, so dropping players
+        # genuinely reduces what is allocated.
+        shares = self._shares()
+        full = {100, 101, 102, 103}
+        partial = {101, 102, 103}  # top scorer left out
+        allocated_full = sum(
+            p.expected_goals
+            for p in allocate_team_goals(2.0, 1, shares, confirmed_squad=full, confirmed_starting=full, normalization="allocated")
+        )
+        allocated_partial = sum(
+            p.expected_goals
+            for p in allocate_team_goals(2.0, 1, shares, confirmed_squad=partial, confirmed_starting=partial, normalization="allocated")
+        )
+        expected_full = sum(
+            p.expected_goals
+            for p in allocate_team_goals(2.0, 1, shares, confirmed_squad=full, confirmed_starting=full, normalization="expected")
+        )
+        expected_partial = sum(
+            p.expected_goals
+            for p in allocate_team_goals(2.0, 1, shares, confirmed_squad=partial, confirmed_starting=partial, normalization="expected")
+        )
+        assert allocated_full == pytest.approx(allocated_partial), "allocated mode is blind to who is missing"
+        assert expected_partial < expected_full, "expected mode must notice the missing scorer"
+
+    def test_ranking_is_identical_across_all_three_modes(self):
+        # Every mode is a monotone rescale, which is why AUC cannot tell
+        # them apart in the backtest and calibration is the number that
+        # decides. If this ever failed, the backtest's AUC column would
+        # silently start meaning something different.
+        shares = self._shares()
+        order = lambda ps: [p.player_id for p in sorted(ps, key=lambda p: -p.expected_goals)]  # noqa: E731
+        orders = [order(allocate_team_goals(2.0, 1, shares, normalization=mode)) for mode in ALLOCATION_MODES]
+        assert orders[0] == orders[1] == orders[2]
+
+    def test_an_unknown_mode_is_refused(self):
+        # A typo must not silently fall through to "no normalisation",
+        # which is a real config and would look like a deliberate choice.
+        shares = self._shares()
+        with pytest.raises(ValueError, match="normalization must be one of"):
+            allocate_team_goals(2.0, 1, shares, normalization="normalised")
+
+    def test_no_division_by_zero_without_scoring_history(self):
+        appearances = [_appearance(1, 200, day, 90, 0, rating=6.5) for day in range(8)]
+        shares = compute_player_shares(pd.DataFrame(appearances), AS_OF, half_life_days=180)
+        predictions = allocate_team_goals(1.5, 1, shares, normalization="expected")
+        assert all(p.expected_goals == 0 for p in predictions)

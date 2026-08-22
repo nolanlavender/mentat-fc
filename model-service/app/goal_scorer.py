@@ -52,34 +52,43 @@ import pandas as pd
 
 from app.dixon_coles import time_weight
 
-# Whether allocate_team_goals normalises its open-play weights so the
-# allocated expected goals actually sum back to the team's expected goals.
+# How allocate_team_goals scales each player's slice of the team's
+# expected goals. Three modes, because the 2026-08-22 backtest measured
+# the first two and found NEITHER is calibrated:
 #
-# False is the shipped behaviour, and it leaks. Two separate causes, both
-# arithmetic rather than data:
+#   "none"       shipped until now. goal_share sums to 1 across a team's
+#                players, then each is multiplied by minutes_share (< 1),
+#                discounting a second time -- and the MIN_PLAYER_MATCHES
+#                filter is applied AFTER the share is normalised, so the
+#                survivors sum to under 1 to begin with. Measured
+#                calibration 0.736 days ahead and 0.399 once a lineup is
+#                confirmed: it under-calls every scorer, badly.
 #
-#   1. goal_share is normalised across ALL of a team's players and the
-#      MIN_PLAYER_MATCHES filter is applied afterwards, so the shares that
-#      survive sum to less than 1 by construction.
-#   2. goal_share is a share of the team's per-90 RATE. Multiplying it by
-#      minutes_share (always < 1) discounts a second time, so the total is
-#      a weighted average of numbers below 1 -- always short. Measured at
-#      roughly 0.76 of the team's expected goals.
+#   "allocated"  divide by the summed weights of the players actually
+#                being allocated, so the total comes back to the team's
+#                expected goals exactly. Fixes the arithmetic and then
+#                overshoots: 1.391 and 1.268. Forcing 100% of a team's
+#                goals onto its reliable players asserts that no goal is
+#                ever scored by anyone else, and measured across three
+#                competitions reliable players account for roughly 73%
+#                (days ahead) to 79% (confirmed squad).
 #
-# True fixes both at once by dividing each weight by the sum of the
-# weights actually being allocated. It also fixes a third thing that was
-# never the point: when a player is confirmed out, his share currently
-# vanishes into nothing, and under normalisation the remaining players
-# absorb it -- which is correct, because compute_team_availability has
-# already reduced the team's expected goals for his absence, so whatever
-# is left really is going to be scored by whoever is playing.
+#   "expected"   divide by this team's whole expected open-play output
+#                per match summed over EVERY player, fringe ones included
+#                (compute_player_shares' open_play_allocation_denominator).
+#                The reliable pool then receives exactly its historical
+#                share, recovering the coverage the data already knows
+#                rather than assuming it -- and with no new tuned
+#                constant. Predicted to land near 1.0 in both modes.
 #
-# Defaults False so production behaviour is unchanged until measured.
-# app.evaluate_scorers reports both settings side by side; flip this only
-# once that run says to. The fix raises every scorer probability by
-# roughly 1/0.76, and until the backtest existed there was no way to know
-# whether that moves us toward the truth or past it.
-NORMALIZE_ALLOCATION = False
+# Still "none" here: "expected" is a prediction until app.evaluate_scorers
+# scores all three on the same held-out player-fixtures, which is one
+# workflow run. Note the backtest already ruled out the obvious move --
+# flipping to "allocated" would have made the days-ahead path (what the
+# Predictions page shows) WORSE, 0.391 off calibration versus 0.264.
+ALLOCATION_MODE = "none"
+
+ALLOCATION_MODES = ("none", "allocated", "expected")
 
 MIN_PLAYER_MATCHES = 5  # raw (unweighted) squad-appearance count -- below this, shares are too noisy to trust
 MIN_PENALTY_ATTEMPTS = 2  # raw (unweighted) penalty attempts (scored + missed) -- below this, don't trust anyone as "the taker"
@@ -135,6 +144,7 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
         "avg_minutes_when_starting",
         "avg_minutes_when_benched",
         "non_penalty_goal_share",
+        "open_play_allocation_denominator",
         "penalty_attempts",
         "penalty_goal_fraction",
     ]
@@ -228,12 +238,37 @@ def compute_player_shares(appearances: pd.DataFrame, as_of: date, half_life_days
     team_totals = grouped.groupby("team_id")["goals_per_90"].transform("sum")
     grouped["goal_share"] = np.where(team_totals > 0, grouped["goals_per_90"] / team_totals, 0.0)
 
+    # The denominator the "expected" allocation mode divides by: this
+    # team's whole expected open-play goal output per match, summed over
+    # EVERY player -- including the fringe ones the MIN_PLAYER_MATCHES
+    # filter is about to drop.
+    #
+    # Why over everyone rather than over the players being allocated. The
+    # 2026-08-22 backtest measured both alternatives and neither was
+    # calibrated: allocating nothing extra under-called by 26%, while
+    # normalising over the allocated players over-called by 39%. The
+    # over-call is the informative one -- forcing the team's entire
+    # expected goals onto the reliable pool asserts that reliable players
+    # score 100% of a team's goals, and measured across three competitions
+    # they score about 73% (days ahead) to 79% (with a confirmed squad).
+    # Dividing by the all-player total reproduces that coverage from the
+    # data instead of assuming it away, with no new tuned constant.
     non_penalty_team_totals = grouped.groupby("team_id")["non_penalty_goals_per_90"].transform("sum")
     grouped["non_penalty_goal_share"] = np.where(
         non_penalty_team_totals > 0, grouped["non_penalty_goals_per_90"] / non_penalty_team_totals, 0.0
     )
 
     team_goal_totals = grouped.groupby("team_id")["weighted_goals"].transform("sum")
+
+    # Units matter here and cost a debugging round the first time: the
+    # weights allocate_team_goals builds are non_penalty_goal_share *
+    # minutes_share -- a normalised share, not a goals-per-match rate --
+    # so this divisor has to be the sum of exactly that product, over
+    # EVERY player including the ones MIN_PLAYER_MATCHES is about to drop.
+    # Built from goals_per_90 instead, it is off by the team's total
+    # scoring rate and silently under-allocates by a factor of ~4.
+    grouped["open_play_expectation"] = grouped["non_penalty_goal_share"] * grouped["minutes_share"]
+    grouped["open_play_allocation_denominator"] = grouped.groupby("team_id")["open_play_expectation"].transform("sum")
     team_penalty_goal_totals = grouped.groupby("team_id")["weighted_penalty_goals"].transform("sum")
     grouped["penalty_goal_fraction"] = np.where(
         team_goal_totals > 0, np.clip(team_penalty_goal_totals / team_goal_totals, 0.0, 1.0), 0.0
@@ -329,7 +364,7 @@ def allocate_team_goals(
     player_shares: pd.DataFrame,
     confirmed_squad: set[int] = frozenset(),
     confirmed_starting: set[int] = frozenset(),
-    normalize_shares: bool = NORMALIZE_ALLOCATION,
+    normalization: str = ALLOCATION_MODE,
 ) -> list[PlayerGoalPrediction]:
     """
     player_shares: compute_player_shares's output. Returns one prediction
@@ -407,15 +442,27 @@ def allocate_team_goals(
 
         weights.append((int(row.player_id), row.non_penalty_goal_share * minutes_share))
 
+    if normalization not in ALLOCATION_MODES:
+        raise ValueError(f"normalization must be one of {ALLOCATION_MODES}, not {normalization!r}")
+
     divisor = 1.0
-    if normalize_shares:
+    if normalization == "allocated":
         total = sum(weight for _, weight in weights)
         if total > 0:
             divisor = total
-        # total == 0 means nobody being allocated has any scoring history.
-        # Dividing would be 0/0; leaving the divisor at 1 gives every
-        # player a lambda of 0, which is the honest answer rather than an
-        # invented one.
+    elif normalization == "expected" and not team_players.empty:
+        # One value per team, so reading the first row is reading the
+        # team's. Unlike "allocated" this divisor does NOT depend on which
+        # players are being allocated, which is the whole point: a
+        # confirmed squad that excludes half the fringe should receive a
+        # LARGER share of the team's goals, not be renormalised back up to
+        # all of them.
+        total = float(team_players["open_play_allocation_denominator"].iloc[0])
+        if total > 0:
+            divisor = total
+    # A zero total means nobody has any scoring history at all. Dividing
+    # would be 0/0; leaving the divisor at 1 gives every player a lambda
+    # of 0, which is the honest answer rather than an invented one.
 
     predictions = []
     for player_id, weight in weights:

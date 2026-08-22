@@ -566,40 +566,43 @@ allocation settings at all**, by construction: normalising is a monotone
 rescale, so the ranking is identical and only the level changes. That
 separation is the point of reporting them apart.
 
-**The allocation leaks ~24% of every team's expected goals**, and it's a
-normalisation bug, not rounding. Summed over a team's players, the
-allocated goals should come back to $\lambda_{team}$. They come to about
-0.76 of it. Two separate causes, both confirmed by working the arithmetic
-through:
+**The allocation is miscalibrated, and the obvious fix overshoots.** The
+first real backtest (2026-08-22, 68,591 held-out player-fixtures) measured
+both candidate configurations and neither is right:
 
-1. **The share is normalised before the reliability filter is applied.**
-   `goal_share` is divided by the team's total per-90 rate including
-   fringe players, and *then* players below `MIN_PLAYER_MATCHES` are
-   dropped. So the shares that survive sum to less than 1 by construction.
-2. **A rate share is multiplied by a minutes share.** `goal_share` is a
-   share of the team's per-90 *rate*; multiplying it by `minutes_share`
-   (always < 1) discounts a second time. The allocated total is
-   $\sum_i \text{goal\_share}_i \cdot \text{minutes\_share}_i$, which is a
-   weighted average of numbers below 1 and therefore always below 1.
+| mode | days ahead | with a confirmed squad |
+|---|---|---|
+| `none` (shipped) | 0.736 | 0.399 |
+| `allocated` | 1.391 | 1.268 |
+| *perfect* | 1.00 | 1.00 |
 
-**Both are fixed by one change**, now implemented behind
-`NORMALIZE_ALLOCATION` in `app/goal_scorer.py`: divide each player's weight
-by the sum of the weights *actually being allocated for that fixture*.
-Normalising over the real set handles the filter, and normalising the
-minutes-weighted product handles the double discount.
+`none` under-calls every scorer, badly — and *worse once a lineup lands*,
+which is backwards: our numbers should improve when we learn who's playing.
+`allocated` fixes the arithmetic and then overshoots, because forcing 100%
+of a team's expected goals onto its reliable players asserts that nobody
+else ever scores. The implied coverage is remarkably stable across
+competitions — **0.73 days ahead, 0.79 with a squad** — which is the real
+quantity that was missing.
 
-It also fixes a third thing that was never the point. Today, when a player
-is confirmed out, his share simply vanishes into nothing. Under
-normalisation the remaining players absorb it — which is correct, because
-`compute_team_availability` has *already* reduced the team's expected goals
-for his absence, so whatever is left really is going to be scored by
-whoever is on the pitch.
+Hence a third mode, `expected`: divide by the team's whole per-match
+open-play expectation summed over *every* player, fringe ones included. The
+reliable pool then receives exactly its historical share, recovering the
+coverage from data rather than assuming it, and with no new tuned constant.
+Ships off (`ALLOCATION_MODE = "none"`) until the backtest scores all three
+on the same fixtures.
 
-**Defaults to off**, so production is unchanged until measured. The fix
-raises every scorer probability by roughly 1/0.76 ≈ 1.3×, and before the
-backtest existed there was no way to know whether that moves us toward the
-truth or straight past it. The backtest scores both settings on the same
-held-out player-fixtures in one run; flip the flag when it says to.
+**The units are the trap.** The weights are `non_penalty_goal_share ×
+minutes_share` — a normalised share, not a goals-per-match rate. Building
+the divisor from `goals_per_90` instead is off by the team's total scoring
+rate and under-allocates by roughly 4×.
+
+**Ranking is not the problem.** AUC came back at **0.78** days ahead and
+0.76 on matchday against a 0.50 baseline — the per-player machinery picks
+the right players comfortably. But **log loss is worse than a constant
+base rate everywhere** (0.137 vs 0.112), which is exactly what
+miscalibration does to a proper scoring rule: the ordering is right and the
+numbers attached to it are not. All three modes are monotone rescales, so
+they share an AUC by construction and only calibration separates them.
 
 **Player position is loaded from the database and used nowhere.** A
 defender and a striker with identically thin histories get identical
