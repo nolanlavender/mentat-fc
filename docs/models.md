@@ -377,15 +377,40 @@ distorted version of reality.
 
 | Competition | shots on target | shot location (in/out of box) |
 |---|---|---|
-| Premier League | 0.75 | **0.75** |
+| Premier League | 0.75 | 0 |
 | Championship | 0.25 | 0 |
 | FA Cup (joint) | 1.00 | 0 |
 
-Shot location was measured as *significantly worse* in the Championship at
-all four weights tested, which is why those zeros are firm rather than
-merely untried. The Premier League's 0.75 was promoted on expected loss
-rather than strict significance — the caveats are in the constant's comment
-in `app/train.py` and in the learning log.
+**Shot location is off everywhere**, and the Premier League's journey there
+is the most instructive result in this document.
+
+A single 80/20 split measured PL 0.75 as better than 0 by **0.00693** Brier,
+CI `[-0.01384, +0.00001]`. Not significant — the interval touched zero — but
+promoted anyway, on the argument that deployment is a symmetric-loss choice
+rather than a hypothesis test and ~97.5% of the bootstrap mass sat below
+zero. The caveat recorded at the time was that the dose-response curve was
+not clean: 0.25 came back slightly *positive* when a smooth real effect
+should have shown about a third of 0.75's gain.
+
+That caveat was the tell. Re-measured **walk-forward** with roughly double
+the held-out matches, the same comparison came back at **+0.00129 in favour
+of 0.75**, CI `[-0.00359, +0.00606]` — the effect shrank 5.4× and sits well
+inside noise. The interval tightened by a factor of 0.697, almost exactly
+the 1/√2 the extra data predicts, so the machinery was working; the effect
+simply wasn't there. Weight 0.5 was indistinguishable from 0.75; 1.0 was
+worse.
+
+So the choice was between options that can't be told apart — and among
+indistinguishable options, take the one with fewer moving parts. At 0 the
+fit depends only on shots on target, with no operational dependency on the
+location columns staying backfilled.
+
+Championship and FA Cup were never promoted. FA Cup is still *measurably*
+worse with location at 0.5 and 1.0 (interval excluding zero both times),
+which is a firmer reason for a zero than an untested one.
+
+**The lesson worth carrying: an effect that needs a symmetric-loss argument
+to justify shipping is an effect that hasn't been measured yet.**
 
 **One trap worth knowing:** `inside_box + outside_box` equals *total* shots,
 not shots on target. Using location alone silently discards the accuracy

@@ -183,27 +183,137 @@ SHRINKAGE: dict[str, float] = {
 # the constant to edit" convention as HALF_LIFE_DAYS.
 SHRINK_TOWARD_JOINT: bool = False
 
-# Shot location (inside vs outside the box) as a fitting signal, per
-# competition. Kept in sync with app.train.SHOT_LOCATION_BLEND_WEIGHT by
-# hand -- see that constant's comment for the full sweep table and for why
-# Premier League ships at 0.75 while the other two ship at 0.
+# Same idea, but the proxy is built from shots INSIDE and OUTSIDE the box
+# regressed separately, so the fit can learn that a shot from six yards is
+# worth several from thirty. Where these columns exist this replaces the
+# shots-on-target proxy for that match; where they don't, that match keeps
+# the shots-on-target blend above (see app.data.blend_fitting_signals).
 #
-# Worth knowing how close this came to being thrown away: the first test,
-# on 2026-08-21, compared shots on target at its TUNED per-competition
-# weight against location at a flat 1.0 that had never been tuned at all,
-# and rejected location on the result. That was not a fair fight. Sweeping
-# the weight properly found the Premier League's best value nowhere near
-# 1.0. The lesson is a general one -- when a new signal loses to an
-# incumbent that has been tuned and the challenger has not, the comparison
-# is measuring tuning, not signal.
+# ZERO EVERYWHERE as of 2026-08-22, including the Premier League, whose
+# 0.75 was deployed for one day. The story is worth keeping in full,
+# because the mistake is more useful than the setting.
 #
-# Edit these to try a candidate; app.compare is the tool that answers
-# whether the difference is real.
+# A single 80/20 split (2026-08-21) measured Premier League 0.75 as better
+# than 0.0 by 0.00693 Brier, CI [-0.01384, +0.00001]. Not significant --
+# the interval touched zero -- but promoted anyway on the argument that
+# deployment is a symmetric-loss choice rather than a hypothesis test, and
+# ~97.5% of the bootstrap mass sat below zero. The recorded caveat was
+# that the dose-response curve was not clean: 0.25 came back slightly
+# POSITIVE when a smooth real effect should have shown about a third of
+# 0.75's gain.
+#
+# That caveat was the tell. Re-measured walk-forward (four consecutive
+# held-out windows, ~2x the matches) the same comparison came back at
+# +0.00129 in favour of 0.75, CI [-0.00359, +0.00606] -- the effect shrank
+# 5.4x and now sits well inside noise. The interval tightened by 0.697,
+# almost exactly the 1/sqrt(2) the extra data predicts, so the machinery
+# was working; the effect simply was not there. Weight 0.5 came back
+# indistinguishable from 0.75 (+0.00029), and 1.0 worse (+0.00316).
+#
+# So the choice is between options that cannot be told apart, and the
+# argument that justified the promotion no longer holds -- what remains is
+# a 0.00129 point estimate, an order of magnitude below anything else this
+# model has adopted (the shots-on-target blend was worth 0.015). Among
+# indistinguishable options, take the one with fewer moving parts: at 0.0
+# the fit depends only on shots on target, with no operational dependency
+# on shots_inside_box/shots_outside_box staying backfilled and current.
+#
+# Championship and FA Cup were never promoted and stay at 0. FA Cup is
+# still measurably WORSE with location at 0.5 and 1.0 (CI excluding zero
+# both times), which is a firmer reason for a 0 than an untested one.
+#
+# The columns stay populated and app.compare still sweeps them -- re-run
+# "Paired model comparison" once the season adds matches. The lesson to
+# carry: an effect that needs a symmetric-loss argument to justify shipping
+# is an effect that has not been measured yet.
 SHOT_LOCATION_BLEND_WEIGHT: dict[str, float] = {
-    "Premier League": 0.75,
+    "Premier League": 0.0,
     "Championship": 0.0,
     "FA Cup": 0.0,
 }
+
+# L2 shrinkage on every team's fitted attack/defense toward league average
+# -- see DixonColesModel.fit()'s own docstring for the full mechanism (why
+# a single fixed-size penalty naturally shrinks a sparse-data team more
+# than an established one, no per-team logic needed). Real production bug
+# this targets, found 2026-08-20: West Ham, relegated into the
+# Championship, had one single finished match in that competition's
+# fit -- and with zero regularization anywhere in the optimizer, that one
+# result alone pushed their fitted attack high enough to predict a 97.1%
+# win probability and a 6.62-1.13 scoreline for their very next match.
+# MIN_MATCHES_TO_FIT (app.train) only guards the competition's total
+# match count, never any individual team's own sample size within it, so
+# nothing else in the pipeline catches this.
+#
+# Validated 2026-08-21 via .github/workflows/backtest-shrinkage-temp.yml
+# (run from a phone, no laptop available) across 0.0/0.02/0.05/0.1/0.2/
+# 0.5/1.0/2.0/3.0/5.0/10.0. Per competition, like
+# SHOTS_ON_TARGET_BLEND_WEIGHT above -- real, not noise: Premier League's
+# Brier score improves steadily up to 1.0 (0.6248 -> 0.6226) then gets
+# worse past it (0.6253 at 5.0, 0.6303 at 10.0). Championship follows the
+# same shape but peaks much further out, at 5.0 (0.6495 -> 0.6456, worse
+# again at 10.0's 0.6466). FA Cup was STILL improving at 10.0 (0.6464 ->
+# 0.6258, the largest gain of the three) with no peak found yet -- the
+# real optimum is higher than what's been tested. Not chasing it further
+# right now: FA Cup predictions aren't surfaced in the app yet (see
+# docs/CLAUDE.md's "Data scope vs. app scope"), so 10.0 is promoted as
+# the best-tested-so-far value, honestly flagged as under-tested rather
+# than converged -- same spirit as SHOTS_ON_TARGET_BLEND_WEIGHT's FA Cup
+# entry being "the least trustworthy of the three" when it was promoted.
+# Worth another sweep (20/50/100) if FA Cup predictions ever ship.
+#
+# See docs/learning-log.md's 2026-08-21 entry for the full 11-value
+# table. If retesting, this is the dict to edit -- change just one
+# competition's entry and rerun via the temp workflow (recreate it from
+# git history if it's been deleted per its own note).
+SHRINKAGE: dict[str, float] = {
+    "Premier League": 1.0,
+    "Championship": 5.0,
+    "FA Cup": 10.0,
+}
+
+# WHAT the shrinkage above pulls each team toward.
+#
+# False (today's deployed behaviour): league average. Fine as a default,
+# but a genuinely poor prior for the case shrinkage exists to fix. A club
+# relegated into this competition has three seasons of top-flight results
+# saying they are well ABOVE this division's average -- pulling them to
+# 1.0 discards all of it and trades an overrating for an underrating.
+#
+# True: pull each team toward the JOINT fit's rating for them instead,
+# re-centred onto this competition's own scale (see
+# DixonColesModel.fit()'s prior_model note for the re-centring, which is
+# the fiddly part -- the joint fit centres its attack mean across ~800
+# teams, so its raw numbers mean nothing here until shifted). The joint
+# fit spans every competition and is calibrated across divisions by the
+# cup ties connecting them, so a relegated club's joint rating is
+# effectively "their top-flight strength on a common scale". Standard
+# hierarchical partial pooling: the shrinkage target becomes
+# team-specific rather than global.
+#
+# TESTED 2026-08-21, and the answer was "no measurable difference".
+# A paired comparison (app.compare -- both configurations scored on the
+# same held-out fixtures, bootstrapped over matches) came back:
+#
+#   Premier League: mean Brier difference -0.00171, 95% CI [-0.00468, +0.00141]
+#   Championship:   mean Brier difference +0.00108, 95% CI [-0.00165, +0.00394]
+#
+# Both intervals span zero, so neither direction is distinguishable from
+# noise. The raw aggregates did look like a Premier League win (0.6226 ->
+# 0.6209) and a Championship loss, and going per-competition on that basis
+# -- the way SHOTS_ON_TARGET_BLEND_WEIGHT legitimately did -- would have
+# been fitting sampling error. That earlier split was backed by a large,
+# monotonic trend across five values; this was two numbers a third the
+# size.
+#
+# Left False and left in place rather than deleted: the mechanism is
+# sound, well-tested, and the most likely reason it doesn't show up is
+# that the held-out window contains very few newly-promoted/relegated
+# clubs, which is exactly the case it helps. Worth re-running via
+# app.compare after a season with more division changes in the test set,
+# or with a better prior. Flip this to True to re-test -- same "this is
+# the constant to edit" convention as HALF_LIFE_DAYS.
+SHRINK_TOWARD_JOINT: bool = False
 
 
 def _blend(matches: pd.DataFrame, competition_name: str) -> pd.DataFrame:
