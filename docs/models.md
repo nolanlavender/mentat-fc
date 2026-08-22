@@ -620,16 +620,38 @@ tripwire that would have caught West Ham 97.1%, the 6.62-goal scoreline,
 and Hull-over-Man-U within a day each, instead of waiting for a human to
 notice. A red run of that workflow is it working.
 
-**Promoted-club imputation has a measurable bias with a knob but no
-measurement yet.** `PROMOTION_PENALTY` (`app/train.py`) can weaken an
-imputed rating (attack × s, defense ÷ s — deliberately *not* a ridge
-move, so it genuinely changes predictions), and
-`app/estimate_promotion_penalty.py` measures what s should be from every
-club that already changed divisions in our data: the rating we would have
-imputed on day one versus what their season actually earned. Ships at 1.0
-(no-op) until the estimator has been run against real data — with ~6
-club-seasons per direction, expect a noisy answer, and treat anything
-within a few percent of 1.0 as "no measurable bias".
+**~~Promoted-club imputation has a measurable bias with no measurement~~ —
+measured 2026-08-22.** `PROMOTION_PENALTY` now ships at **0.725** for the
+Premier League: across all six promoted club-seasons in our data the
+imputed rating overstated what the club went on to earn, every single time
+(mean log-strength gap −0.643, se 0.169, t −3.8). Southampton imputed at
+1.145 and realized 0.395; Leicester 1.103 → 0.395; Ipswich 1.098 → 0.450.
+
+Caveats kept next to the number: the two cohorts disagree substantially
+(2024/25's historically poor intake gives 0.608, 2025/26's gives 0.864, and
+0.725 is the pooled mean), and the correction folds together two mechanisms
+it can't separate — the joint fit's κ=10 compression and genuine promoted-
+club underperformance. Re-estimate each season.
+
+**The Championship stays at 1.0, and why is the more interesting result.**
+Pooled over its 12 club-seasons the estimator said 1.025 — apparently no
+bias. Split by *where the club came from*, that's two opposite effects
+cancelling:
+
+| intake route | penalty | n | t |
+|---|---|---|---|
+| relegated from the Premier League | 1.146 | 6 | +1.2 |
+| arrived from League One | 0.918 | 6 | −2.2 |
+
+Clubs dropping from the top flight are *stronger* than the translation
+says; clubs arriving from League One — a division this database doesn't
+track at all, so their imputed rating rests on a handful of FA Cup ties —
+are weaker. Neither clears a convincing bar alone, and a single
+per-competition number can't express both, so 1.0 stands. Acting on it
+would need `PROMOTION_PENALTY` keyed by `(competition, origin)`.
+
+**The Premier League has exactly one intake route, which is precisely why
+its signal is clean and the Championship's isn't.**
 
 **No opponent-adjustment on the shot proxies.** Shots against a bad defense
 are worth less than shots against a good one, and we treat them alike.

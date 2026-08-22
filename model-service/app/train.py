@@ -162,21 +162,45 @@ SHRINKAGE: dict[str, float] = {
 # rating used as-is; below 1.0 = the imputed team scores less and concedes
 # more than the translation says.
 #
-# Why anything but 1.0 would ever be right: the translated rating carries
-# two known biases in the same direction for a promoted club. The joint
-# fit's kappa=10 shrinkage compresses everyone toward its own average, so
-# a side that was merely good-for-the-Championship reads as closer to
-# Premier League average than it is; and promoted clubs historically
-# underperform their old-division form on top of that. Both fold into one
-# measurable net factor.
+# MEASURED 2026-08-22 by app.estimate_promotion_penalty, which reconstructs
+# what production WOULD have imputed on day one for every club that has
+# changed divisions in our data, and compares it against the rating their
+# actual season went on to earn.
 #
-# 1.0 (a no-op) until app.estimate_promotion_penalty has been run against
-# real data -- same sandbox-then-promote discipline as every other
-# constant here. The estimator measures the two directions separately
-# (promoted into the Premier League, relegated into the Championship)
-# because there is no reason the biases should be symmetric.
+# Premier League: 0.725, from 6 club-seasons, gap mean -0.643 (se 0.169,
+# t -3.8), and every single one negative. Promoted clubs are
+# systematically and substantially weaker than their translated
+# Championship rating claims -- Southampton imputed at 1.145 and realized
+# at 0.395, Leicester 1.103 -> 0.395, Ipswich 1.098 -> 0.450. This is the
+# bias the Hull-over-Manchester-United fix left behind, now sized.
+#
+# Two honest caveats on that number. The cohorts disagree a lot: 2024/25's
+# intake (Ipswich, Leicester, Southampton -- a historically bad trio) gives
+# 0.608, while 2025/26's (Burnley, Leeds, Sunderland) gives 0.864. 0.725 is
+# the pooled mean, which is the right point estimate under squared loss but
+# is not a converged one, and it should be re-estimated every season. And
+# the correction folds together two mechanisms it cannot separate: the
+# joint fit's kappa=10 shrinkage compressing everyone toward its own mean,
+# and genuine promoted-club underperformance. That is fine for correcting
+# the prediction and would matter if either mechanism were changed.
+#
+# Championship: 1.0, and the reason is the more interesting half of the
+# result. Pooled across its 12 club-seasons the estimator suggested 1.025 --
+# apparently "no measurable bias". Split by where the club came FROM, that
+# turns out to be two opposite effects cancelling:
+#     relegated from the Premier League   1.146  (n=6, t +1.2)
+#     arrived from League One             0.918  (n=6, t -2.2)
+# Neither clears a convincing bar on its own and they point opposite ways,
+# so a single per-competition number cannot express what is happening here
+# and 1.0 stays. Acting on either would need PROMOTION_PENALTY keyed by
+# (competition, origin) rather than competition alone -- worth building
+# only once the per-origin estimates are strong enough to be worth
+# applying, which they are not yet.
+#
+# The Premier League has exactly one intake route (from the Championship),
+# which is precisely why its signal is clean and the Championship's is not.
 PROMOTION_PENALTY: dict[str, float] = {
-    "Premier League": 1.0,
+    "Premier League": 0.725,
     "Championship": 1.0,
     "FA Cup": 1.0,
 }
