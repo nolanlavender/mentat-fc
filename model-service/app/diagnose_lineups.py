@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import sys
 
+import pandas as pd
+
 from app.data import _query_df
 from app.db import get_connection
 
@@ -54,6 +56,9 @@ from app.db import get_connection
 # below rather than assumed.
 MATCHDAY_LOOKBACK_HOURS = 3
 MATCHDAY_LOOKAHEAD_HOURS = 3
+
+# How far back the retrospective capture-rate report looks.
+CAPTURE_REPORT_DAYS = 30
 
 
 def main() -> None:
@@ -162,8 +167,102 @@ def main() -> None:
                     "  -> STATE 4: lineup captured and predictions look lineup-aware.\n"
                     "     If it still isn't on screen, the problem is the API or the frontend, not the data.\n"
                 )
+        report_capture_rate(conn)
     finally:
         conn.close()
+
+
+def report_capture_rate(conn) -> None:
+    """
+    Is pre-match capture actually working? -- answered retrospectively
+    rather than by watching one fixture and guessing.
+
+    The 2026-08-22 goal-scorer backtest reported 40 pre-match rows out of
+    57,316, and that 0% is genuinely ambiguous: fixture_lineups.
+    pre_match_captured_at only exists since migration 1701000000027, so
+    every row seeded before it is NULL BY CONSTRUCTION and not evidence of
+    anything. Reading that 0% as "capture is broken" would be the same
+    mistake as reading the matchday log's "0 had a confirmed lineup" as
+    "nothing was found" -- a number that cannot distinguish failure from
+    not-yet-measured.
+
+    So this reports only on fixtures kicking off AFTER the first pre-match
+    capture on record, which is the earliest point the column could have
+    been populated, and states the sample size next to the rate. It also
+    reports the LEAD TIME distribution, which is the number that decides
+    whether the hourly cadence is fast enough: lineups are published around
+    an hour before kickoff, so a median lead time near zero means we are
+    catching them at the last possible moment and a faster check would help,
+    while a healthy lead means the cadence is fine and any gap is elsewhere.
+    """
+    live_since = _query_df(
+        conn, "SELECT min(pre_match_captured_at) AS first_capture FROM fixture_lineups"
+    )["first_capture"].iloc[0]
+
+    print("\n=== Pre-match capture rate ===")
+    if live_since is None:
+        print(
+            "  No lineup has EVER been captured pre-match. Either the matchday check has not\n"
+            "  run inside a fixture's window since migration 1701000000027 added the column,\n"
+            "  or it runs and API-Football never has anything in time. Run the check during a\n"
+            "  window (app.diagnose_lineups shows which fixtures qualify) before concluding."
+        )
+        return
+
+    rows = _query_df(
+        conn,
+        """
+        SELECT f.id AS fixture_id, ht.name AS home_team, at.name AS away_team,
+               f.kickoff_at,
+               max(fl.pre_match_captured_at) AS captured_at,
+               EXTRACT(EPOCH FROM (f.kickoff_at - max(fl.pre_match_captured_at))) / 60 AS lead_minutes
+        FROM fixtures f
+        JOIN teams ht ON ht.id = f.home_team_id
+        JOIN teams at ON at.id = f.away_team_id
+        JOIN fixture_lineups fl ON fl.fixture_id = f.id
+        WHERE f.kickoff_at >= %(live_since)s::timestamptz
+          AND f.kickoff_at < now()
+          AND f.kickoff_at > now() - (%(days)s || ' days')::interval
+        GROUP BY f.id, ht.name, at.name, f.kickoff_at
+        ORDER BY f.kickoff_at DESC
+        """,
+        {"live_since": live_since, "days": CAPTURE_REPORT_DAYS},
+    )
+
+    if rows.empty:
+        print(
+            f"  The column has been live since {live_since}, but no fixture with a lineup has\n"
+            f"  kicked off since then. Nothing to measure yet -- not a failure."
+        )
+        return
+
+    captured = rows[rows["captured_at"].notna()]  # notna handles NaT the same way
+    print(
+        f"  Column live since {live_since}. Of {len(rows)} fixture(s) with a lineup that have\n"
+        f"  kicked off since: {len(captured)} were captured pre-match ({len(captured) / len(rows):.0%})."
+    )
+    if len(rows) < 5:
+        print("  Sample far too small to read as a rate -- treat these as individual cases, not a percentage.")
+
+    if not captured.empty:
+        leads = captured["lead_minutes"].astype(float)
+        print(
+            f"  Lead time before kickoff: median {leads.median():.0f} min, "
+            f"earliest {leads.max():.0f}, latest {leads.min():.0f}."
+        )
+        if leads.median() < 20:
+            print(
+                "  -> Median lead under 20 minutes: we are catching lineups at the last moment.\n"
+                "     A faster check cadence would very likely raise the capture rate."
+            )
+    for row in rows.head(10).itertuples():
+        # pd.isna, not `is None`: a missing capture arrives as NaT/NaN
+        # from the LEFT-joined aggregate and printed "nan min before
+        # kickoff" -- which reads like a captured fixture with a broken
+        # number rather than one that was never captured at all.
+        captured = not pd.isna(row.captured_at)
+        when = f"{float(row.lead_minutes):.0f} min before kickoff" if captured else "NOT captured pre-match"
+        print(f"    {row.home_team} vs {row.away_team}  ({row.kickoff_at})  {when}")
 
 
 if __name__ == "__main__":

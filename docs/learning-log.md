@@ -7035,3 +7035,50 @@ before kickoff, not a measurement of it. Coverage 0.864 is real arithmetic
 on lineups we mostly obtained after the final whistle. Until lineups
 actually land pre-kickoff, the matchday path cannot be trusted in
 production no matter how well it backtests.
+
+## 2026-08-22 -- Measuring the pre-match capture gap before fixing it
+
+The goal-scorer backtest reported pre-match lineup capture at **40 out of
+57,316 rows (0%)**, and I called it the biggest open item. Then almost
+changed the check's cadence on the strength of that number, which would
+have been the third time today I debugged a mechanism before checking the
+measurement.
+
+**That 0% cannot distinguish failure from not-yet-measured.**
+`fixture_lineups.pre_match_captured_at` only exists since migration
+1701000000027, added yesterday. Every row seeded before it is NULL *by
+construction*. The denominator is three seasons of backfilled history; the
+numerator can only ever count fixtures since yesterday. A rate computed
+across that boundary is not a rate.
+
+Same shape as the matchday log's original sin -- a number that looks like
+evidence and is not. Third instance today, which is why it is written down
+rather than just fixed.
+
+### What actually needs measuring
+
+`app.diagnose_lineups` now reports retrospectively, over fixtures kicking
+off **after the first pre-match capture on record** -- the earliest point
+the column could have been populated, so the boundary problem disappears.
+Two numbers:
+
+- **capture rate**, with the sample size stated next to it, and an explicit
+  "far too small to read as a rate" below five fixtures.
+- **lead time before kickoff**, which is the number that decides the
+  question. Lineups publish around an hour out. A median lead near zero
+  means we are catching them at the last possible moment and the hourly
+  cron is the bottleneck; a healthy lead means cadence is fine and any
+  remaining gap is elsewhere (a wrong external id, a coverage hole). Those
+  need opposite fixes, and the raw capture rate cannot tell them apart.
+
+It also refuses to blame the pipeline when there is nothing to measure:
+"no lineup has EVER been captured" and "the column is live but nothing has
+kicked off since" print as distinct, non-accusatory states.
+
+### A real bug, caught by its own test
+
+Listing uncaptured fixtures printed `nan min before kickoff`. `row.captured_at
+is not None` does not catch pandas NaT from a LEFT-joined aggregate -- so a
+fixture that was never captured rendered as one that was captured with a
+broken number, which is precisely backwards for a diagnostic whose whole
+job is telling those two apart. `pd.isna` fixes it.
