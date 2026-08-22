@@ -90,34 +90,45 @@ SHOTS_ON_TARGET_BLEND_WEIGHT: dict[str, float] = {
 # shots-on-target proxy for that match; where they don't, that match keeps
 # the shots-on-target blend above (see app.data.blend_fitting_signals).
 #
-# Zero for two of three competitions, and that split is measured, not a
-# guess. A paired sweep over 0.25/0.5/0.75/1.0 (app.compare, 2026-08-21 --
-# both configurations scored on the SAME held-out fixtures, bootstrapped
-# over matches) found:
+# ZERO EVERYWHERE as of 2026-08-22, including the Premier League, whose
+# 0.75 was deployed for one day. The story is worth keeping in full,
+# because the mistake is more useful than the setting.
 #
-#   Premier League (97% coverage)  0.75 -> Brier -0.00693, CI [-0.01384, +0.00001]
-#   Championship   (83% coverage)  WORSE at all four weights, monotonically,
-#                                  CI excluding zero every time (+0.0014 -> +0.0092)
-#   FA Cup          (4% coverage)  no resolvable effect until 1.0, where it is WORSE
+# A single 80/20 split (2026-08-21) measured Premier League 0.75 as better
+# than 0.0 by 0.00693 Brier, CI [-0.01384, +0.00001]. Not significant --
+# the interval touched zero -- but promoted anyway on the argument that
+# deployment is a symmetric-loss choice rather than a hypothesis test, and
+# ~97.5% of the bootstrap mass sat below zero. The recorded caveat was
+# that the dose-response curve was not clean: 0.25 came back slightly
+# POSITIVE when a smooth real effect should have shown about a third of
+# 0.75's gain.
 #
-# Championship and FA Cup are therefore not "unproven, left off" -- they
-# are a detected effect in the wrong direction, which is a much firmer
-# reason for a 0 than an absent one.
+# That caveat was the tell. Re-measured walk-forward (four consecutive
+# held-out windows, ~2x the matches) the same comparison came back at
+# +0.00129 in favour of 0.75, CI [-0.00359, +0.00606] -- the effect shrank
+# 5.4x and now sits well inside noise. The interval tightened by 0.697,
+# almost exactly the 1/sqrt(2) the extra data predicts, so the machinery
+# was working; the effect simply was not there. Weight 0.5 came back
+# indistinguishable from 0.75 (+0.00029), and 1.0 worse (+0.00316).
 #
-# Premier League at 0.75 is the honest weak spot: its interval still
-# touches zero, so this is not significant at 95% in the strict sense.
-# Promoted anyway because the deployment question is not "is it
-# significant" but "which value has the better expected loss", and ~97.5%
-# of the bootstrap mass sits below zero with the largest effect of
-# anything tested this season. Caveat recorded rather than buried: the
-# curve is not clean (0.25 came back slightly positive, +0.00104, when a
-# smooth real effect should have shown about a third of 0.75's gain), and
-# the whole sweep's baseline used least-squares shots-on-target
-# calibration rather than the pooled-mean-ratio one this file actually
-# ships, so a small unmeasured delta separates the tested baseline from
-# the live one. Re-run app.compare once the season adds held-out matches.
+# So the choice is between options that cannot be told apart, and the
+# argument that justified the promotion no longer holds -- what remains is
+# a 0.00129 point estimate, an order of magnitude below anything else this
+# model has adopted (the shots-on-target blend was worth 0.015). Among
+# indistinguishable options, take the one with fewer moving parts: at 0.0
+# the fit depends only on shots on target, with no operational dependency
+# on shots_inside_box/shots_outside_box staying backfilled and current.
+#
+# Championship and FA Cup were never promoted and stay at 0. FA Cup is
+# still measurably WORSE with location at 0.5 and 1.0 (CI excluding zero
+# both times), which is a firmer reason for a 0 than an untested one.
+#
+# The columns stay populated and app.compare still sweeps them -- re-run
+# "Paired model comparison" once the season adds matches. The lesson to
+# carry: an effect that needs a symmetric-loss argument to justify shipping
+# is an effect that has not been measured yet.
 SHOT_LOCATION_BLEND_WEIGHT: dict[str, float] = {
-    "Premier League": 0.75,
+    "Premier League": 0.0,
     "Championship": 0.0,
     "FA Cup": 0.0,
 }

@@ -6695,3 +6695,69 @@ default. I had "verified" that module with tests that monkeypatch
 The rule worth keeping: **when a test replaces the thing that talks to the
 outside world, it has stopped testing the part most likely to be wrong.**
 At least one test per integration point has to touch the real thing.
+
+## 2026-08-22 -- Walk-forward's first verdict: revert my own promotion
+
+The tool built this morning immediately overturned a decision made
+yesterday, which is the best possible thing it could have done.
+
+**Premier League shot location, single 80/20 split (2026-08-21):**
+0.75 better than 0 by 0.00693, CI [-0.01384, +0.00001]. Promoted.
+
+**Same comparison, walk-forward (2026-08-22):**
+0.75 better than 0 by 0.00129, CI [-0.00359, +0.00606]. Noise.
+
+The effect shrank **5.4x**. Reverted to 0; the whole
+SHOT_LOCATION_BLEND_WEIGHT dict is now zero.
+
+### The machinery validated itself
+
+CI width went 0.01385 -> 0.00965, a ratio of **0.697** against the
+theoretical 1/sqrt(2) = 0.707 that doubling the held-out sample predicts.
+So the intervals tightened exactly as designed and the effect still
+evaporated -- it was never there, rather than the test being weaker.
+
+The two `unchanged (control)` rows are the other half of that
+confirmation: Championship and FA Cup deploy at 0, so candidate 0 must be
+byte-identical to baseline, and it reported exactly +0.00000 with a
+zero-width interval. The null self-check built after the calibration
+confound still holds.
+
+### What I got wrong, precisely
+
+Not the arithmetic -- the argument. I justified promoting on: "the
+deployment question is not 'is it significant' but 'which value has the
+better expected loss', and ~97.5% of the bootstrap mass sits below zero."
+
+That reasoning is *correct in general* and was *misapplied here*. The
+symmetric-loss framing is right when the estimate is unbiased and you must
+choose today. It says nothing about whether the estimate is stable, and a
+single-split estimate at the edge of the noise floor is exactly the case
+where it is not. I even wrote down the evidence of instability -- the
+non-monotone 0.25 point -- and then reasoned past it.
+
+**Generalised: an effect that needs a symmetric-loss argument to justify
+shipping is an effect that has not been measured yet.** If the interval
+comfortably excluded zero you would not need the argument. Reaching for it
+is the signal to get more data, not to ship.
+
+Second-order lesson: the tie-break. With 0.0, 0.5 and 0.75 mutually
+indistinguishable, expected loss alone cannot choose. Parsimony can --
+0 removes an operational dependency on shot-location columns staying
+backfilled, for a benefit an order of magnitude below anything else this
+model has adopted. Fewer moving parts is a real criterion when the
+measurements are tied, not an aesthetic one.
+
+### A near-miss in the edit itself
+
+Reverting the constant, an index-based string edit anchored on the wrong
+occurrence (the module docstring mentions the constant by name) and left
+**two** definitions of SHOT_LOCATION_BLEND_WEIGHT in app.evaluate.py --
+the second, stale one silently winning. Production would have been 0 while
+the backtest sandbox still ran 0.75, so every future comparison would have
+been measured against a configuration nobody was running.
+
+Caught in seconds by `test_the_two_weight_dicts_are_in_sync`, written a
+day earlier for exactly this: the two files duplicate constants
+deliberately, and "deliberate" and "unverified" are different things. That
+test justified itself the first time the duplication was touched.
