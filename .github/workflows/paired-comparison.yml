@@ -1,0 +1,38 @@
+name: Paired model comparison
+
+# Runs app.compare against production data: one baseline configuration,
+# several candidates, all scored on the SAME held-out fixtures with a
+# bootstrapped confidence interval per candidate -- the tool that decides
+# whether a model change ships. Since 2026-08-22 it evaluates walk-forward
+# (several consecutive held-out windows, each predicted by a model fitted
+# only on earlier matches), which roughly doubles the held-out sample and
+# tightens the intervals accordingly.
+#
+# What question it currently asks lives IN app/compare.py (see the
+# "What this run compares" section there) -- edit that file to ask a
+# different one; this workflow just runs it. Read the intervals, not the
+# raw Brier numbers: a candidate is only worth acting on when its interval
+# clears zero, or when the module itself explains why a judgment call is
+# warranted.
+#
+# Read-only. Expect a run to take a while -- fits scale with folds x
+# candidates. Actions > "Paired model comparison" > Run workflow.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+      - name: Compare
+        working-directory: model-service
+        run: python -m app.compare

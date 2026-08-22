@@ -1,0 +1,64 @@
+name: Market divergence check
+
+# The tripwire for pipeline bugs. Every embarrassing prediction so far --
+# West Ham at 97.1%, a 6.62-goal scoreline, Hull City picked to beat
+# Manchester United -- sat in model_predictions until a person happened to
+# look at a screen, and every one of them disagreed with the betting
+# market by 25+ points. This job would have caught each of them within a
+# day, automatically.
+#
+# Two steps: seed fresh pre-match 1X2 odds for fixtures in the next few
+# days (API-Football, match_winner only -- see seedUpcomingOdds), then
+# compare the model's probabilities against the de-vigged market consensus
+# (app.check_market_divergence). A fixture diverging by more than 15
+# points on any outcome makes the check EXIT NONZERO.
+#
+# That failing exit code is the whole alerting mechanism: the run goes
+# red, GitHub sends its normal failed-workflow email, no extra
+# infrastructure. Which means a red run here is WORKING AS INTENDED --
+# read the log, find the flagged fixture, and investigate (start with
+# app.diagnose_coverage) before trusting or re-running anything. Do not
+# "fix" a red run by re-running it.
+#
+# Scheduled after the daily refresh (06:45 UTC start, typically done well
+# inside an hour) so it always checks the predictions that refresh just
+# wrote. Also runnable by hand before placing a bet.
+#
+# Requires the DATABASE_URL and API_FOOTBALL_KEY secrets the other
+# workflows already use.
+on:
+  schedule:
+    - cron: '30 8 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  divergence:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Seed fresh pre-match odds for upcoming fixtures
+        working-directory: backend
+        run: npm run db:seed:upcoming-odds
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+      - name: Compare model predictions against the market
+        working-directory: model-service
+        run: python -m app.check_market_divergence

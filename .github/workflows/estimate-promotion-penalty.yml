@@ -1,0 +1,39 @@
+name: Estimate promotion penalty
+
+# Measures what app.train.PROMOTION_PENALTY should be, from the clubs that
+# already changed divisions in our data: for each one, the rating we WOULD
+# have imputed on day one (joint fit + translation, exactly what
+# production does for a promoted club with zero matches) against the
+# rating their actual season then earned. The mean gap, per direction
+# (promoted into the Premier League / relegated into the Championship), is
+# the bias the penalty exists to remove.
+#
+# Read the caveats in the output seriously: ~3 clubs change divisions per
+# competition per season, so n is small, and the module itself refuses to
+# suggest a value from fewer than 3 club-seasons. A suggestion within a
+# few percent of 1.0 means "no measurable bias", not signal.
+#
+# To promote a value: edit PROMOTION_PENALTY in model-service/app/train.py
+# (same sandbox-then-promote discipline as every other constant there).
+#
+# Read-only, manual-only. Fits several models per season boundary, so
+# expect a run to take a while. Requires the DATABASE_URL secret.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  estimate:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+      - name: Estimate
+        working-directory: model-service
+        run: python -m app.estimate_promotion_penalty

@@ -17,6 +17,8 @@ import {
   upsertPlayerForTeamRoster,
   clearStaleTeamRoster,
   markFixturesLineupsChecked,
+  upsertFixtureOddsBatch,
+  type FixtureOddsInput,
   type FixturePlayerStatsInput,
   upsertFixtureShotLocation,
 } from '../lib/db.js';
@@ -409,6 +411,101 @@ export async function seedTodaysLineups(pool: Pool): Promise<MatchdayLineupsResu
     }
   }
   return { checked: toCheck.length, announced, stoppedOnBudget: false, alreadyCaptured, outcomes };
+}
+
+
+interface ApiFootballOddsResponse {
+  response: Array<{
+    fixture: { id: number };
+    bookmakers: Array<{
+      name: string;
+      bets: Array<{ name: string; values: Array<{ value: string; odd: string }> }>;
+    }>;
+  }>;
+}
+
+export interface UpcomingOddsResult {
+  checked: number;
+  withOdds: number;
+  stoppedOnBudget: boolean;
+}
+
+/**
+ * Pre-match 1X2 odds for upcoming fixtures, so the model's predictions can
+ * be sanity-checked against the market BEFORE kickoff. Until this existed,
+ * fixture_odds only ever held football-data.co.uk's historical CSVs --
+ * odds for matches already played -- which is fine for backtesting and
+ * useless for catching a bad live prediction (the Hull-to-beat-Man-U
+ * class of bug, which three times running was spotted by a human looking
+ * at a screen rather than by anything automated).
+ *
+ * Deliberately match_winner only. The divergence check that consumes this
+ * (model-service/app/check_market_divergence.py) compares the three
+ * outcome probabilities, and every extra market seeded here is budget
+ * spent on data nothing reads.
+ *
+ * snapshot_type 'live' -- the current pre-match price, re-upserted (the
+ * ON CONFLICT updates price + recorded_at) each run, distinct from the
+ * historical 'opening'/'closing' rows the CSVs own. skipCache for the
+ * same reason the lineup check uses it: a price that moves must never be
+ * served from a permanent disk cache.
+ */
+export async function seedUpcomingOdds(pool: Pool, lookaheadDays: number): Promise<UpcomingOddsResult> {
+  const { rows } = await pool.query<{ id: number; external_api_football_id: number }>(
+    `SELECT f.id, f.external_api_football_id
+     FROM fixtures f
+     WHERE f.status != 'finished'
+       AND f.external_api_football_id IS NOT NULL
+       AND f.kickoff_at BETWEEN now() AND now() + ($1 || ' days')::interval
+     ORDER BY f.kickoff_at ASC`,
+    [lookaheadDays],
+  );
+
+  let withOdds = 0;
+  let checked = 0;
+  for (const row of rows) {
+    let data: ApiFootballOddsResponse;
+    try {
+      data = await callApiFootball<ApiFootballOddsResponse>(
+        `/odds?fixture=${row.external_api_football_id}&bet=1`, // bet 1 = Match Winner
+        `odds/${row.external_api_football_id}.json`,
+        { skipCache: true },
+      );
+    } catch (err) {
+      if (err instanceof BudgetExhaustedError) {
+        return { checked, withOdds, stoppedOnBudget: true };
+      }
+      throw err;
+    }
+    checked++;
+
+    const oddsRows: FixtureOddsInput[] = [];
+    for (const entry of data.response) {
+      for (const bookmaker of entry.bookmakers ?? []) {
+        const matchWinner = bookmaker.bets?.find((b) => b.name === 'Match Winner');
+        for (const { value, odd } of matchWinner?.values ?? []) {
+          const outcome = value === 'Home' ? 'home' : value === 'Away' ? 'away' : value === 'Draw' ? 'draw' : null;
+          const price = Number(odd);
+          if (outcome === null || !Number.isFinite(price) || price <= 1) continue;
+          oddsRows.push({
+            fixtureId: row.id,
+            bookmaker: bookmaker.name,
+            market: 'match_winner',
+            outcome,
+            line: 0,
+            price,
+            snapshotType: 'live',
+            source: 'api_football',
+          });
+        }
+      }
+    }
+    if (oddsRows.length > 0) {
+      await upsertFixtureOddsBatch(pool, oddsRows);
+      withOdds++;
+    }
+  }
+  return { checked, withOdds, stoppedOnBudget: false };
 }
 
 interface ApiFootballPlayerStatsResponse {

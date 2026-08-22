@@ -6550,3 +6550,89 @@ load-bearing for another.** The FA Cup shrinkage sweep never evaluated
 "how well does this joint fit backstop a Premier League fixture", because
 that role didn't exist when the sweep ran. When a component grows a second
 consumer, its tuning is unvalidated for the new one by default.
+
+## 2026-08-22 -- Three improvements, one theme: stop needing a human to notice
+
+The Hull incident's postmortem listed three improvements. All three built
+in one pass, and they share a root: every serious model bug so far was
+caught by a person looking at a screen, and every measurement that
+mattered was starved for held-out data. These attack both.
+
+### 1. The market divergence tripwire
+
+New workflow "Market divergence check", daily after the refresh. Seeds
+fresh pre-match 1X2 odds from API-Football for fixtures in the next 4 days
+(fixture_odds previously held ONLY historical football-data.co.uk CSVs --
+odds for matches already played, useless for catching a bad live
+prediction), de-vigs them (divide each implied probability by their sum,
+removing the bookmaker's margin), averages across bookmakers, and compares
+against the model. More than 15 points of disagreement on any outcome ->
+the process exits nonzero.
+
+**The failing exit code is the entire alerting mechanism.** The run goes
+red, GitHub sends its standard failed-workflow email, no new
+infrastructure. A red run of this workflow is it WORKING -- the log names
+the fixture and both probability vectors. Corollary worth writing down: do
+not "fix" a red run of this workflow by re-running it.
+
+Two design points that matter more than they look:
+- The threshold is deliberately loose (15 points). This is a tripwire for
+  pipeline bugs, not a value-betting signal -- the bugs it exists for
+  diverged by 25+ points, a real edge is a few. If it fires constantly,
+  raise the threshold rather than learning to ignore it; an ignored alarm
+  is worse than none.
+- A run that skipped more fixtures than it compared says so explicitly
+  ("mostly blind"). A divergence check that quietly checks nothing reads
+  as a green light, which is worse than no check.
+
+### 2. The promotion penalty, with its estimator
+
+The Hull fix's honest residual: an imputed rating inherits the joint fit's
+kappa=10 compression, plus promoted clubs historically underperform their
+old-division form. Both fold into one multiplicative factor, and
+critically the factor is MEASURABLE from data we already have: for every
+club that changed divisions in our three seasons, reconstruct the rating
+production would have imputed on day one (fit joint + competition models
+on only the matches before that season), and compare with the rating
+their actual season earned. The gap, averaged in log-strength space, is
+the bias; s = exp(gap/2) because the penalty moves attack AND defense.
+
+One subtlety worth remembering: the penalty is deliberately the OPPOSITE
+shape from the identifiability ridge. attack*s with defense/s moves both
+against the invariant direction, so it genuinely weakens the team -- and
+there's a test asserting predictions actually change, because a penalty
+accidentally implemented as a ridge move would be a knob connected to
+nothing.
+
+Ships as PROMOTION_PENALTY = 1.0 (no-op) with a manual workflow to run
+the estimator -- sandbox-then-promote, same as every constant before it.
+The estimator refuses to suggest a value from fewer than 3 club-seasons
+and prints its own caveats next to its answer.
+
+### 3. Walk-forward evaluation in app.compare
+
+The structural fix for the noise floor. One 80/20 split gave ~350-500
+held-out matches and a ~0.003 Brier floor that the shot-location decision
+had to be made underneath. app.compare now walks forward: the last ~40%
+of matches in four consecutive windows, each predicted by a model fitted
+only on earlier data, per-match paired differences pooled across windows.
+Causal in every window, disjoint so the bootstrap never double-counts,
+roughly double the sample, intervals ~1/sqrt(2) tighter.
+
+The fold boundaries are DATES, not row indices -- two fixtures on the
+same afternoon must never end up one in training and one in test, which
+an index split silently allows.
+
+Its configured question is now the re-test this upgrade exists for: the
+Premier League shot-location 0.75 was promoted with its interval touching
+zero. Baseline = deployed config, candidate 0.0 = "revert the
+promotion", 0.5/1.0 bracket it. The temporary sweep workflow became the
+permanent "Paired model comparison" workflow, since the tool is now the
+standing way changes get decided.
+
+### What did NOT get built
+
+No new external data source. The last four bugs were all in plumbing and
+measurement, not in missing signal -- better instrumentation of what we
+have beat new inputs every time so far. That priority gets revisited once
+the market check has run quietly for a while.
