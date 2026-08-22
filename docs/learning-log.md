@@ -6907,3 +6907,68 @@ the team's total scoring rate, under-allocating ~4x. Caught immediately by
 a unit test asserting `expected` sits between `none` and `allocated`, which
 is a property worth asserting precisely because it pins the units without
 pinning a magic number.
+
+## 2026-08-22 -- The fix for the fix was also wrong, and that located the real bug
+
+Predicted `expected` would land near 1.0. It landed at **1.326**. Worth
+writing down what that taught, because being wrong twice in a row about
+the same number is where the actual problem was hiding.
+
+| mode | days ahead | confirmed squad |
+|---|---|---|
+| `none` | 0.739 | 0.401 |
+| `allocated` | 1.397 | 1.272 |
+| `expected` | **1.326** | **0.711** |
+
+### The arithmetic that gave it away
+
+`expected` withheld only **5.1%** relative to `allocated`. To be calibrated
+it needed to withhold **28.4%**.
+
+So players below `MIN_PLAYER_MATCHES` -- the ones `expected` was designed
+to account for -- make up just 5% of the historical goal-share pool. The
+other 23% was going somewhere else entirely.
+
+### Where: players who did not exist yet
+
+The backtest froze `player_shares` at a single cutoff and scored every
+match after it -- more than a full season. A player only enters the shares
+pool after `MIN_PLAYER_MATCHES` appearances, so with a frozen cutoff
+**every summer signing, academy debut and January arrival in the test
+window was invisible to the model, and their goals counted against it.**
+
+Production retrains daily and has no such blind spot. So the ~72% coverage
+the backtest measured was never a property of the model; it was mostly a
+property of the measurement, and any constant tuned to it would have
+baked in a year of roster churn that production never experiences.
+
+Two wrong predictions in a row, both about the same number, because both
+assumed the measurement was sound. The tell was there in the first run and
+I read past it: `none` gets WORSE when a lineup lands (0.739 -> 0.401),
+which is backwards, and both anomalies share the cause -- a model that
+does not know who the players are.
+
+### The fix is the same one as this morning
+
+Walk-forward, for the same reason and now for a second tool: each fold
+rebuilds the shares at its own boundary, so staleness is bounded by fold
+width rather than the whole test window. `walk_forward_folds` moved from
+`app.compare` into `app.evaluate` so both tools share identical folds and
+their numbers stay comparable.
+
+**The generalisable version: when a measurement disagrees with a mechanism
+you have checked twice, stop debugging the mechanism.** I spent two rounds
+adjusting the allocation and none checking whether the harness was asking a
+fair question. The harness had a year of staleness in it, plainly visible
+in a docstring I wrote myself.
+
+### What is still genuinely true, and not a measurement artifact
+
+- **AUC 0.78 days ahead** against 0.50. The ranking is real.
+- **Log loss worse than a constant everywhere.** Calibration is genuinely
+  off, whatever its exact size.
+- **`none` degrades on matchday.** Directionally a real defect: unnamed
+  players' share is dropped without redistribution.
+- **Pre-match lineup capture is 40/39,617 (0%).** The warning added
+  yesterday is doing its job -- the matchday column is an upper bound on
+  what was ever knowable in time, not a measurement of it.

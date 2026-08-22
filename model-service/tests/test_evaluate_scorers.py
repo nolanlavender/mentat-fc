@@ -245,25 +245,41 @@ class TestMainEndToEnd:
         matchday = next(b for b in blocks if "confirmed lineup" in b)
         assert days_ahead != matchday
 
-    def test_appearances_are_cut_off_at_the_split(self, monkeypatch):
+    def test_every_fold_rebuilds_shares_at_its_own_boundary(self, monkeypatch):
         """
-        The one assumption the whole backtest rests on: shares must be
-        built only from matches before the cutoff. If this regresses the
-        run still completes and just reports flattering nonsense, which is
-        the worst kind of failure.
+        The assumption the whole backtest rests on, and the one a single
+        frozen cutoff got wrong. Shares must be recomputed per fold: a
+        cutoff a year before the last scored match makes every summer
+        signing invisible to the model and counts their goals against it,
+        which is what inflated the measured coverage gap on 2026-08-22.
+        A regression here still completes and just reports flattering
+        nonsense, which is the worst kind of failure.
         """
         import app.evaluate_scorers as module
 
         frames = self._synthetic(monkeypatch)
-        seen = {}
+        seen: list = []
         original = module.load_player_squad_appearances
-        monkeypatch.setattr(
-            module,
-            "load_player_squad_appearances",
-            lambda conn, comps, as_of=None: seen.setdefault("as_of", as_of) and None or original(conn, comps, as_of=as_of),
-        )
+
+        def _recording(conn, comps, as_of=None):
+            seen.append(as_of)
+            return original(conn, comps, as_of=as_of)
+
+        monkeypatch.setattr(module, "load_player_squad_appearances", _recording)
         module.main()
 
+        expected = [start for start, _ in module.walk_forward_folds(frames["matches"])]
+        assert seen == expected, "shares must be rebuilt once per fold, at that fold's own boundary"
+        assert len(seen) > 1, "a single cutoff is the bias this test exists to prevent"
+        assert seen == sorted(seen), "folds must walk forward in time"
+
+    def test_no_fixture_is_scored_by_a_model_that_saw_it(self, monkeypatch):
+        # Causality across the whole run: every fold's training window must
+        # end strictly before its test window begins.
+        import app.evaluate_scorers as module
+
+        frames = self._synthetic(monkeypatch)
         matches = frames["matches"]
-        expected_cutoff = matches.iloc[int(len(matches) * (1 - module.TEST_FRACTION))]["kickoff_date"]
-        assert seen["as_of"] == expected_cutoff, "player shares must be built as of the train/test split"
+        for start, end in module.walk_forward_folds(matches):
+            train, test = module._fold_frames(matches, start, end)
+            assert train["kickoff_date"].max() < test["kickoff_date"].min()
