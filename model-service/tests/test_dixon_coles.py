@@ -432,3 +432,34 @@ class TestImputeTeamFrom:
         top_only, joint = _giant_league_and_joint()
         with pytest.raises(ValueError, match="prior model"):
             top_only.impute_team_from("Narnia", joint)
+
+
+class TestImputeStrengthPenalty:
+    def test_default_is_a_no_op(self):
+        a, joint = _giant_league_and_joint()
+        b, _ = _giant_league_and_joint()
+        a.impute_team_from("Promoted", joint)
+        b.impute_team_from("Promoted", joint, strength_penalty=1.0)
+        assert a.attack["Promoted"] == pytest.approx(b.attack["Promoted"])
+        assert a.defense["Promoted"] == pytest.approx(b.defense["Promoted"])
+
+    def test_a_penalty_genuinely_weakens_not_just_recentres(self):
+        # attack down AND defense up is deliberately the opposite shape
+        # from the (attack+c, defense-c) ridge the model is invariant to.
+        # If a penalty were accidentally implemented as a ridge move, the
+        # predictions would not change at all and the knob would be dead.
+        plain, joint = _giant_league_and_joint()
+        penalised, _ = _giant_league_and_joint()
+        plain.impute_team_from("Promoted", joint)
+        penalised.impute_team_from("Promoted", joint, strength_penalty=0.8)
+
+        p_plain = plain.predict("Promoted", "Giant")
+        p_penalised = penalised.predict("Promoted", "Giant")
+        assert p_penalised.prob_home_win < p_plain.prob_home_win
+        assert p_penalised.predicted_home_goals < p_plain.predicted_home_goals
+        assert p_penalised.predicted_away_goals > p_plain.predicted_away_goals
+
+    def test_rejects_a_nonpositive_penalty(self):
+        top_only, joint = _giant_league_and_joint()
+        with pytest.raises(ValueError, match="positive"):
+            top_only.impute_team_from("Promoted", joint, strength_penalty=0.0)

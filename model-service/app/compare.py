@@ -20,6 +20,24 @@ gives a confidence interval on the mean per-match difference, which is
 the actual question -- "would this hold up on a different sample of
 matches?" -- rather than "is number A smaller than number B."
 
+WALK-FORWARD (added 2026-08-22). Originally one 80/20 split: one fit, one
+held-out window, ~350-500 scored matches, and a noise floor around 0.003
+Brier that several real decisions have had to be made underneath -- the
+Premier League shot-location weight was promoted with its interval
+touching zero because a single split could not resolve it. Now the
+held-out region is several consecutive windows walked forward in time:
+for each fold, fit on everything strictly before the window, score the
+window, pool the per-match paired differences across folds. Every fold is
+still causal (no fixture is ever predicted by a model that saw it or
+anything after it), the windows are disjoint so pooling never
+double-counts a match, and the held-out sample roughly doubles -- which
+tightens the interval by about 1/sqrt(2), directly attacking the noise
+floor rather than working around it.
+
+The cost is honest too: fits scale with folds x configurations, so a run
+takes several times longer. That is what a manually-dispatched workflow
+is for.
+
 Reads only. Usage: python -m app.compare
 """
 
@@ -37,10 +55,10 @@ from app.evaluate import (
     FIT_COMPETITIONS,
     HALF_LIFE_DAYS,
     MIN_MATCHES_FOR_BACKTEST,
+    SHOT_LOCATION_BLEND_WEIGHT,
     SHOTS_ON_TARGET_BLEND_WEIGHT,
     SHRINKAGE,
     SHRINK_TOWARD_JOINT,
-    TEST_FRACTION,
     _outcome_one_hot,
 )
 
@@ -63,38 +81,36 @@ MIN_MATCHES_PER_COMPETITION = 50
 # match. Edit CANDIDATES and _blend to ask a different question;
 # everything below is generic.
 #
-# Current question (2026-08-21): shot location was rejected on a test
-# that compared shots-on-target at its TUNED weight (0.75 / 0.25 / 1.0,
-# picked from a five-value sweep) against location at a flat 1.0, which
-# was never tuned at all. That was not a fair fight, and the Premier
-# League -- the one competition at 97% coverage -- leaned positive. This
-# sweeps the location weight properly before the rejection stands.
-#
-# Note this reports a confidence interval per weight, which the original
-# shots-on-target sweep never had: those values were chosen from point
-# estimates alone, so "0.75 is the Premier League optimum" has never
-# actually been shown to be distinguishable from 0.5 or 1.0.
-#
-# ANSWERED, 2026-08-21: Premier League best at 0.75 (-0.00693, CI
-# [-0.01384, +0.00001]), Championship worse at every weight with the
-# interval excluding zero every time, FA Cup unresolvable below 1.0.
-# Promoted as app.train.SHOT_LOCATION_BLEND_WEIGHT -- see that constant
-# for the table and the caveats. Left pointed at this question rather than
-# reset to a placeholder: the next question is easier to write by editing
-# a working example than by reconstructing one, and re-running this as-is
-# after the season adds held-out matches is itself a useful thing to do,
-# since the Premier League verdict is the one still touching zero.
+# Current question (2026-08-22): re-test the shot-location promotion with
+# walk-forward power. The Premier League's 0.75 was promoted on 2026-08-21
+# with its interval TOUCHING zero ([-0.01384, +0.00001]) -- a judgment
+# call a single 80/20 split could not resolve. The baseline is now the
+# DEPLOYED per-competition config; candidate 0.0 asks "should the
+# promotion be reverted?", and 0.5 / 1.0 bracket the chosen value. With
+# roughly double the held-out matches, an effect the old split left
+# straddling zero should either clear it or collapse.
 LOCATION_SIGNALS = ["inside_box", "outside_box"]
 FALLBACK_SIGNALS = ["shots_on_target"]
 
-BASELINE_LABEL = "shots on target only (current)"
-CANDIDATE_WEIGHTS = [0.25, 0.5, 0.75, 1.0]
+BASELINE_LABEL = "deployed config (per-competition location weights)"
+CANDIDATE_WEIGHTS = [0.0, 0.5, 1.0]
+
+# Walk-forward shape: the last FOLDS x FOLD_FRACTION of matches (by date)
+# are held out, in FOLDS disjoint consecutive windows, each predicted by a
+# model fitted only on what came before it.
+FOLDS = 4
+FOLD_FRACTION = 0.1
 
 
 def _blend(matches: pd.DataFrame, competition: str, location_weight: float | None) -> pd.DataFrame:
-    """location_weight None = the baseline, shots on target at its tuned weight."""
+    """
+    location_weight None = the baseline, i.e. the DEPLOYED per-competition
+    location weight; a number = that flat weight for every competition.
+    """
     sot_weight = SHOTS_ON_TARGET_BLEND_WEIGHT[competition]
     if location_weight is None:
+        location_weight = SHOT_LOCATION_BLEND_WEIGHT[competition]
+    if location_weight == 0:
         # Deliberately blend_learned_shot_proxy_into_scores and NOT
         # app.data.blend_shots_on_target_into_scores, even though the latter
         # is what production runs. The two rescale shots on target to goals
@@ -172,6 +188,68 @@ def _bootstrap_ci(differences: np.ndarray) -> tuple[float, float]:
     return float(np.percentile(means, tail)), float(np.percentile(means, 100 - tail))
 
 
+def walk_forward_folds(matches: pd.DataFrame) -> list[tuple[object, object]]:
+    """
+    Date boundaries for the held-out windows: FOLDS pairs of
+    (window_start_date, window_end_date), chronological, covering the last
+    FOLDS * FOLD_FRACTION of matches. A fold's training set is everything
+    with kickoff_date strictly before window_start; its test set is
+    [window_start, window_end). The last window's end is None (open).
+
+    Boundaries are DATES, not row indices, so matches sharing a kickoff
+    date can never be split across the train/test line -- a same-day
+    fixture in the training set of the model predicting its twin would be
+    a subtle leak.
+    """
+    n = len(matches)
+    boundaries = []
+    for fold in range(FOLDS):
+        start_index = int(n * (1 - (FOLDS - fold) * FOLD_FRACTION))
+        boundaries.append(matches.iloc[start_index]["kickoff_date"])
+    folds = []
+    for fold in range(FOLDS):
+        end = boundaries[fold + 1] if fold + 1 < FOLDS else None
+        folds.append((boundaries[fold], end))
+    # Duplicate boundaries (tiny datasets) would make empty or overlapping
+    # windows -- collapse to unique, preserving order.
+    seen = set()
+    unique = []
+    for start, end in folds:
+        if start not in seen and start != end:
+            unique.append((start, end))
+            seen.add(start)
+    return unique
+
+
+def _fold_frames(matches: pd.DataFrame, start, end) -> tuple[pd.DataFrame, pd.DataFrame]:
+    train = matches[matches["kickoff_date"] < start]
+    if end is None:
+        test = matches[matches["kickoff_date"] >= start]
+    else:
+        test = matches[(matches["kickoff_date"] >= start) & (matches["kickoff_date"] < end)]
+    return train, test
+
+
+def _score_config_walk_forward(
+    matches: pd.DataFrame, folds: list[tuple[object, object]], location_weight: float | None
+) -> dict[str, dict[int, float]]:
+    """
+    Per-competition {fixture_id: Brier} pooled across every fold, each
+    fold scored by a model fitted only on matches before it. Fixture ids
+    never collide across folds because the windows are disjoint.
+    """
+    scores: dict[str, dict[int, float]] = {competition: {} for competition in FIT_COMPETITIONS}
+    for start, end in folds:
+        train, test = _fold_frames(matches, start, end)
+        models = _fit_all(train, location_weight)
+        for competition in FIT_COMPETITIONS:
+            if competition not in models:
+                continue
+            competition_test = test[test["competition_name"] == competition]
+            scores[competition].update(_per_match_brier(models[competition], competition_test))
+    return scores
+
+
 def main() -> None:
     conn = get_connection()
     try:
@@ -180,14 +258,13 @@ def main() -> None:
             print(f"Only {len(matches)} matches, not enough for a meaningful comparison.")
             return
 
-        split_idx = int(len(matches) * (1 - TEST_FRACTION))
-        cutoff_date = matches.iloc[split_idx]["kickoff_date"]
-        train_matches = matches[matches["kickoff_date"] < cutoff_date]
-        test_matches = matches[matches["kickoff_date"] >= cutoff_date]
-
-        print(f"Paired sweep on held-out matches after {cutoff_date}")
+        folds = walk_forward_folds(matches)
+        print(
+            f"Walk-forward paired sweep: {len(folds)} held-out windows from "
+            f"{folds[0][0]}, each predicted by a model fitted only on earlier matches"
+        )
         print(f"  baseline = {BASELINE_LABEL}")
-        print(f"  candidates = shot location at weight {CANDIDATE_WEIGHTS}, shots on target where uncovered")
+        print(f"  candidates = shot location at flat weight {CANDIDATE_WEIGHTS}, shots on target where uncovered")
         for competition in FIT_COMPETITIONS:
             rows = matches[matches["competition_name"] == competition]
             if rows.empty:
@@ -196,23 +273,19 @@ def main() -> None:
             print(f"  shot-location coverage, {competition}: {covered}/{len(rows)} ({covered / len(rows):.0%})")
         print()
 
-        baseline = _fit_all(train_matches, location_weight=None)
-        baseline_scores = {
-            competition: _per_match_brier(baseline[competition], test_matches[test_matches["competition_name"] == competition])
-            for competition in FIT_COMPETITIONS
-            if competition in baseline
-        }
-        skipped = [c for c in FIT_COMPETITIONS if c not in baseline]
-        if skipped:
-            print(f"Skipping (fewer than {MIN_MATCHES_PER_COMPETITION} training matches): {', '.join(skipped)}\n")
+        baseline_scores = _score_config_walk_forward(matches, folds, location_weight=None)
+        empty = [c for c in FIT_COMPETITIONS if not baseline_scores[c]]
+        if empty:
+            print(f"No scorable held-out matches for: {', '.join(empty)}\n")
 
         for weight in CANDIDATE_WEIGHTS:
-            candidate = _fit_all(train_matches, location_weight=weight)
+            candidate_scores = _score_config_walk_forward(matches, folds, location_weight=weight)
             print(f"--- location weight {weight} ---")
-            for competition in baseline_scores:
-                competition_test = test_matches[test_matches["competition_name"] == competition]
+            for competition in FIT_COMPETITIONS:
+                if not baseline_scores[competition]:
+                    continue
                 a = baseline_scores[competition]
-                b = _per_match_brier(candidate[competition], competition_test)
+                b = candidate_scores[competition]
 
                 shared = sorted(set(a) & set(b))
                 if not shared:

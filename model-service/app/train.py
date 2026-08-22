@@ -145,6 +145,31 @@ SHRINKAGE: dict[str, float] = {
     "FA Cup": 10.0,
 }
 
+# Applied to a team's rating when it is IMPUTED into a competition's fit
+# from the joint model (a promoted/relegated club with zero matches here
+# yet -- see DixonColesModel.impute_team_from). 1.0 = the translated
+# rating used as-is; below 1.0 = the imputed team scores less and concedes
+# more than the translation says.
+#
+# Why anything but 1.0 would ever be right: the translated rating carries
+# two known biases in the same direction for a promoted club. The joint
+# fit's kappa=10 shrinkage compresses everyone toward its own average, so
+# a side that was merely good-for-the-Championship reads as closer to
+# Premier League average than it is; and promoted clubs historically
+# underperform their old-division form on top of that. Both fold into one
+# measurable net factor.
+#
+# 1.0 (a no-op) until app.estimate_promotion_penalty has been run against
+# real data -- same sandbox-then-promote discipline as every other
+# constant here. The estimator measures the two directions separately
+# (promoted into the Premier League, relegated into the Championship)
+# because there is no reason the biases should be symmetric.
+PROMOTION_PENALTY: dict[str, float] = {
+    "Premier League": 1.0,
+    "Championship": 1.0,
+    "FA Cup": 1.0,
+}
+
 
 def upsert_prediction(conn, fixture_id: int, prediction) -> None:
     with conn.cursor() as cur:
@@ -220,6 +245,7 @@ def predict_for_competition(
     player_shares,
     fallback_model: DixonColesModel | None = None,
     only_with_confirmed_lineups: bool = False,
+    imputed_strength_penalty: float = 1.0,
 ) -> None:
     """
     only_with_confirmed_lineups restricts the rewrite to fixtures that
@@ -295,7 +321,7 @@ def predict_for_competition(
                 continue
             try:
                 for team in (fixture["home_team"], fixture["away_team"]):
-                    model.impute_team_from(team, fallback_model)
+                    model.impute_team_from(team, fallback_model, strength_penalty=imputed_strength_penalty)
                 prediction = _predict_fixture(model, fixture, home_availability, away_availability)
                 fell_back += 1
             except ValueError:
@@ -419,7 +445,14 @@ def main() -> None:
             # Passed as None for FA Cup, which already IS the joint fit, so
             # there'd be nothing left to fall back to.
             fallback = None if model is joint_model else joint_model
-            predict_for_competition(conn, model, competition_name, player_shares, fallback_model=fallback)
+            predict_for_competition(
+                conn,
+                model,
+                competition_name,
+                player_shares,
+                fallback_model=fallback,
+                imputed_strength_penalty=PROMOTION_PENALTY[competition_name],
+            )
     finally:
         conn.close()
 

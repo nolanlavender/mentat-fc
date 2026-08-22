@@ -229,7 +229,7 @@ class DixonColesModel:
         self.rho = rho
         self.fitted_on = len(matches)
 
-    def impute_team_from(self, team: str, prior_model: "DixonColesModel") -> None:
+    def impute_team_from(self, team: str, prior_model: "DixonColesModel", strength_penalty: float = 1.0) -> None:
         """
         Adds a team this fit has never seen, carrying its attack/defense
         over from prior_model re-centred onto THIS fit's own scale. A
@@ -264,12 +264,24 @@ class DixonColesModel:
             return
         if team not in prior_model.attack:
             raise ValueError(f"'{team}' has no fitted parameters in the prior model either")
+        if strength_penalty <= 0:
+            raise ValueError("strength_penalty must be positive -- it multiplies a rating, not a probability")
         shared = [t for t in self.teams if t in prior_model.attack]
         if not shared:
             raise ValueError("no teams in common with the prior model, so no shared scale to translate onto")
         offset = float(np.mean([log(prior_model.attack[t]) for t in shared]))
-        self.attack[team] = exp(log(prior_model.attack[team]) - offset)
-        self.defense[team] = exp(log(prior_model.defense[team]) + offset)
+        # strength_penalty is a genuine weakening (or, above 1, a
+        # strengthening), NOT a ridge move: attack and defense shift in
+        # OPPOSITE directions from the (attack+c, defense-c) invariant, so
+        # a penalised team both scores less and concedes more. It exists
+        # because a translated rating carries two known biases the
+        # translation itself cannot remove: the prior's shrinkage
+        # compresses everyone toward its own mean (flattering whichever
+        # direction the team is extreme in), and clubs changing divisions
+        # systematically deviate from their old-division form. Both are
+        # measurable as one net factor -- see app.estimate_promotion_penalty.
+        self.attack[team] = exp(log(prior_model.attack[team]) - offset) * strength_penalty
+        self.defense[team] = exp(log(prior_model.defense[team]) + offset) / strength_penalty
         self.teams = sorted(self.teams + [team])
 
     def _expected_goals(self, home_team: str, away_team: str) -> tuple[float, float]:

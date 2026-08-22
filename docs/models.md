@@ -496,11 +496,23 @@ every remaining improvement is small.**
    was a mixture of two questions. **A test that can't detect its own null
    case can't be trusted on a real one.**
 
-### The noise floor
+### The noise floor, and walk-forward evaluation
 
-With ~350–500 held-out matches, effects smaller than roughly **0.003 Brier**
-are unresolvable. That's a property of the test set, not of any change —
-and several things we'd like to know sit right underneath it.
+With ~350–500 held-out matches from a single 80/20 split, effects smaller
+than roughly **0.003 Brier** are unresolvable. That's a property of the
+test set, not of any change — and several real decisions were made
+underneath it, most visibly the shot-location promotion with its interval
+touching zero.
+
+Since 2026-08-22, `app/compare.py` evaluates **walk-forward**
+([rolling-origin](https://otexts.com/fpp3/tscv.html)): the last ~40% of
+matches are split into several consecutive windows, each predicted by a
+model fitted only on what came before it, and the per-match paired
+differences are pooled across windows. Every window is still causal, the
+windows are disjoint so nothing is double-counted, and the held-out sample
+roughly doubles — tightening intervals by about 1/√2. The cost is that a
+run takes several times longer, which is what the manually-dispatched
+"Paired model comparison" workflow is for.
 
 > **Read:** [Proper scoring rules](https://en.wikipedia.org/wiki/Scoring_rule) ·
 > [Brier score](https://en.wikipedia.org/wiki/Brier_score) ·
@@ -569,12 +581,30 @@ defender and a striker with identically thin histories get identical
 priors. Position is the obvious per-player shrinkage target — the same
 mechanism that fixed West Ham, applied one level down.
 
-**Single train/test split.** One 20% cutoff is what sets the noise floor.
-Walk-forward (rolling-origin) evaluation would give several times more
-held-out matches and could resolve effects we currently have to decide by
-judgement. It would also retroactively confirm or kill the shots-on-target
-weights, which were picked from point estimates with no confidence
-intervals at all.
+**~~Single train/test split~~ — fixed 2026-08-22.** `app/compare.py` now
+evaluates walk-forward (see §9). Its current configured question is the
+re-test of the shot-location promotion; the shots-on-target weights (picked
+from point estimates with no confidence intervals at all) are the next
+candidates for the same treatment.
+
+**Predictions are now checked against the market daily.** The
+"Market divergence check" workflow seeds fresh pre-match 1X2 odds
+(API-Football), de-vigs them, and fails loudly when the model disagrees
+with the market consensus by more than 15 points on any outcome — the
+tripwire that would have caught West Ham 97.1%, the 6.62-goal scoreline,
+and Hull-over-Man-U within a day each, instead of waiting for a human to
+notice. A red run of that workflow is it working.
+
+**Promoted-club imputation has a measurable bias with a knob but no
+measurement yet.** `PROMOTION_PENALTY` (`app/train.py`) can weaken an
+imputed rating (attack × s, defense ÷ s — deliberately *not* a ridge
+move, so it genuinely changes predictions), and
+`app/estimate_promotion_penalty.py` measures what s should be from every
+club that already changed divisions in our data: the rating we would have
+imputed on day one versus what their season actually earned. Ships at 1.0
+(no-op) until the estimator has been run against real data — with ~6
+club-seasons per direction, expect a noisy answer, and treat anything
+within a few percent of 1.0 as "no measurable bias".
 
 **No opponent-adjustment on the shot proxies.** Shots against a bad defense
 are worth less than shots against a good one, and we treat them alike.
