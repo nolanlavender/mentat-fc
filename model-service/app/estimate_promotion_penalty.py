@@ -49,7 +49,7 @@ from math import exp, log
 import numpy as np
 import pandas as pd
 
-from app.data import _query_df
+from app.data import _query_df, load_finished_matches
 from app.db import get_connection
 from app.dixon_coles import DixonColesModel
 from app.evaluate import HALF_LIFE_DAYS, SHRINKAGE, _blend
@@ -68,29 +68,31 @@ DIRECTIONS = ["Premier League", "Championship"]  # promoted into PL, relegated i
 
 
 def load_matches_with_season(conn) -> pd.DataFrame:
-    """load_finished_matches plus each fixture's season label, for boundary detection."""
-    query = """
-        SELECT f.id AS fixture_id, f.kickoff_date, c.name AS competition_name,
-               s.label AS season_label,
-               ht.name AS home_team, at.name AS away_team,
-               f.home_score, f.away_score,
-               home_stats.shots_on_target AS home_shots_on_target,
-               away_stats.shots_on_target AS away_shots_on_target,
-               home_stats.shots_inside_box AS home_shots_inside_box,
-               away_stats.shots_inside_box AS away_shots_inside_box,
-               home_stats.shots_outside_box AS home_shots_outside_box,
-               away_stats.shots_outside_box AS away_shots_outside_box
-        FROM fixtures f
-        JOIN teams ht ON ht.id = f.home_team_id
-        JOIN teams at ON at.id = f.away_team_id
-        JOIN competition_seasons cs ON cs.id = f.competition_season_id
-        JOIN competitions c ON c.id = cs.competition_id
-        JOIN seasons s ON s.id = cs.season_id
-        WHERE c.name = ANY(%(competitions)s)
-          AND f.home_score IS NOT NULL AND f.away_score IS NOT NULL
-        ORDER BY f.kickoff_date
     """
-    return _query_df(conn, query, {"competitions": FIT_COMPETITIONS})
+    load_finished_matches plus each fixture's season label, which is what
+    makes "which clubs are new to this competition this season?" answerable.
+
+    Deliberately REUSES load_finished_matches rather than reimplementing
+    its SELECT with one extra column. The first version did reimplement it,
+    copied the shot-stat columns without the two LEFT JOINs that define
+    home_stats/away_stats, and shipped -- because the end-to-end test
+    monkeypatches this whole function, so its SQL was never executed
+    anywhere except production. Same shape as the app.compare NameError:
+    a query that only runs in production is untested by default. Fetching
+    the labels separately and merging keeps the risky query in the one
+    place that is already exercised everywhere else.
+    """
+    matches = load_finished_matches(conn, FIT_COMPETITIONS)
+    seasons = _query_df(
+        conn,
+        """
+        SELECT f.id AS fixture_id, s.label AS season_label
+        FROM fixtures f
+        JOIN competition_seasons cs ON cs.id = f.competition_season_id
+        JOIN seasons s ON s.id = cs.season_id
+        """,
+    )
+    return matches.merge(seasons, on="fixture_id", how="left")
 
 
 def teams_in(matches: pd.DataFrame) -> set[str]:
