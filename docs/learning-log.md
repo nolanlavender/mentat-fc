@@ -6972,3 +6972,66 @@ in a docstring I wrote myself.
 - **Pre-match lineup capture is 40/39,617 (0%).** The warning added
   yesterday is doing its job -- the matchday column is an upper bound on
   what was ever knowable in time, not a measurement of it.
+
+## 2026-08-22 -- Third round on the allocation, and the one that held
+
+Walk-forward moved the numbers exactly where the diagnosis said it would.
+
+    coverage (1 / allocated's calibration)      frozen -> walk-forward
+      Premier League   days ahead  0.730 -> 0.810   squad  0.784 -> 0.864
+      Championship                 0.732 -> 0.799          0.796 -> 0.859
+      FA Cup                       0.525 -> 0.670          0.704 -> 0.814
+
+So roster staleness was about half the gap, as suspected. The rest is real:
+even with shares rebuilt every fold, the players we predict account for
+only ~79% of goals days ahead and ~86% once a squad is named.
+
+### Why that residual cannot be engineered away
+
+The missing goals belong to players who have not reached
+MIN_PLAYER_MATCHES yet, plus own goals. **No allocation rule can hand
+those to anyone, because the players concerned are not in the data.** Two
+rounds were spent trying to derive the number structurally -- `expected`
+was exactly that attempt -- and it cannot be done, for a reason that is
+obvious in hindsight: you are trying to estimate the contribution of
+people your dataset has never seen.
+
+So it is measured. Which is fine; every other constant here is
+(HALF_LIFE_DAYS, SHRINKAGE, PROMOTION_PENALTY). The distinction that
+matters is not measured-versus-derived, it is whether the measurement has
+signal. This one has 2,740 actual scorers behind it, putting the estimate
+~11 standard errors from 1.0, with the two leagues agreeing to 0.011 from
+independent fits. That is a different universe from the shot-location
+weight promoted this morning at 0.5 standard errors and reverted by lunch.
+
+### The estimator has to stay uncorrupted
+
+`app.evaluate_scorers` deliberately does NOT apply coverage. Its
+"allocated" row reports predicted/actual scorers with no correction, so
+`1 / that` is the constant. Applying coverage inside the backtest would
+make it report 1.0 by construction and destroy the number it exists to
+produce. Tempting, tidy, and self-defeating -- worth a comment in both
+files so nobody "fixes" it later.
+
+### What three rounds actually taught
+
+Each round I proposed a mechanism and each time the measurement disagreed:
+
+1. `allocated` will fix the leak -> it over-corrected
+2. `expected` will capture the coverage -> it found 5% of 28%
+3. the harness is stale -> **right**, and half the size I assumed
+
+The pattern in the misses: rounds 1 and 2 both theorised about the
+*model*, round 3 questioned the *measurement*. Two rounds of the first
+kind bought less than one of the second. When a quantity refuses to move
+where the mechanism says it should, the harness is the cheaper thing to
+doubt -- and I reached for it third rather than first.
+
+### Still outstanding, and now the biggest thing
+
+Pre-match lineup capture is **40 out of 57,316 rows (0%)**. The matchday
+column of every table above is an upper bound on what was ever knowable
+before kickoff, not a measurement of it. Coverage 0.864 is real arithmetic
+on lineups we mostly obtained after the final whistle. Until lineups
+actually land pre-kickoff, the matchday path cannot be trusted in
+production no matter how well it backtests.

@@ -206,6 +206,45 @@ PROMOTION_PENALTY: dict[str, float] = {
 }
 
 
+# What fraction of a team's goals are scored by the players we actually
+# predict. The rest go to players outside the pool entirely -- ones who
+# have not yet reached goal_scorer.MIN_PLAYER_MATCHES appearances, plus own
+# goals -- and no allocation rule can hand those to anyone, because the
+# players concerned are by definition not in the data yet. So this is
+# measured, not derived.
+#
+# The estimator is app.evaluate_scorers itself: its "allocated" row reports
+# calibration = predicted scorers / actual scorers with NO coverage
+# applied, so 1/that is exactly this number. That is why the backtest
+# deliberately does not apply coverage -- doing so would make it report
+# 1.0 by construction and destroy its own estimator.
+#
+# Measured 2026-08-22 on the walk-forward run (101,228 held-out
+# player-fixtures days ahead, 45,291 on matchday). Two values per
+# competition because a confirmed squad genuinely narrows the field: once
+# we know who is named, a larger share of the goals belongs to players we
+# are predicting.
+#
+#   Premier League  0.810 days ahead   0.864 confirmed squad
+#   Championship    0.799              0.859
+#   FA Cup          0.670              0.814
+#
+# Trustworthy in a way the shot-location weight never was: 2,740 actual
+# scorers put the pooled estimate about 11 standard errors from 1.0, and
+# the Premier League and Championship agree to within 0.011 despite being
+# fitted independently. FA Cup sits lower exactly as it should -- non-league
+# entrants have no reliable players at all.
+#
+# What would move these is drift, not noise: a change to
+# MIN_PLAYER_MATCHES, or a season with unusual squad churn. Re-read them
+# off the backtest's "allocated" row whenever it is re-run.
+ALLOCATION_COVERAGE: dict[str, dict[str, float]] = {
+    "Premier League": {"no_lineup": 0.810, "confirmed": 0.864},
+    "Championship": {"no_lineup": 0.799, "confirmed": 0.859},
+    "FA Cup": {"no_lineup": 0.670, "confirmed": 0.814},
+}
+
+
 def upsert_prediction(conn, fixture_id: int, prediction) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -281,6 +320,7 @@ def predict_for_competition(
     fallback_model: DixonColesModel | None = None,
     only_with_confirmed_lineups: bool = False,
     imputed_strength_penalty: float = 1.0,
+    coverage: dict[str, float] | None = None,
 ) -> None:
     """
     only_with_confirmed_lineups restricts the rewrite to fixtures that
@@ -388,7 +428,12 @@ def predict_for_competition(
                 fixture_lineup[(fixture_lineup["team_id"] == team_id) & fixture_lineup["is_starting"]]["player_id"]
             )
             for player_prediction in allocate_team_goals(
-                team_expected_goals, team_id, player_shares, confirmed_squad=team_confirmed, confirmed_starting=team_starting
+                team_expected_goals,
+                team_id,
+                player_shares,
+                confirmed_squad=team_confirmed,
+                confirmed_starting=team_starting,
+                coverage=(coverage or {}).get("confirmed" if team_confirmed else "no_lineup", 1.0),
             ):
                 upsert_player_goal_prediction(conn, fixture["fixture_id"], team_id, player_prediction)
                 goal_scorer_predictions += 1
@@ -487,6 +532,7 @@ def main() -> None:
                 player_shares,
                 fallback_model=fallback,
                 imputed_strength_penalty=PROMOTION_PENALTY[competition_name],
+                coverage=ALLOCATION_COVERAGE[competition_name],
             )
     finally:
         conn.close()
