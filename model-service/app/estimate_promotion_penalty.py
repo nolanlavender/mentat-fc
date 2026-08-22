@@ -64,7 +64,14 @@ MIN_REALIZED_MATCHES = 10
 MIN_PRIOR_HISTORY = 200
 
 FIT_COMPETITIONS = ["Premier League", "Championship", "FA Cup"]
-DIRECTIONS = ["Premier League", "Championship"]  # promoted into PL, relegated into Championship
+DIRECTIONS = ["Premier League", "Championship"]
+
+# Which competitions count as "where a club was last season". FA Cup is
+# excluded deliberately: every club plays it, so it says nothing about
+# which division they came from.
+LEAGUE_COMPETITIONS = ["Premier League", "Championship"]
+
+OUTSIDE = "outside the tracked leagues"
 
 
 def load_matches_with_season(conn) -> pd.DataFrame:
@@ -118,6 +125,41 @@ def newcomers_by_season(matches: pd.DataFrame, competition: str) -> list[tuple[s
     return result
 
 
+def classify_origin(matches: pd.DataFrame, team: str, previous_season: str, target: str) -> str:
+    """
+    Where a newcomer came FROM, which turns out to matter more than where
+    they arrived.
+
+    Found 2026-08-22, running this for real. Grouping only by destination
+    made the Championship look unbiased (penalty 1.025 from 12
+    club-seasons) -- but that set mixes two opposite populations. A club
+    entering the Championship either dropped from the Premier League
+    (rich history, 38 top-flight matches, and they tend to be STRONGER
+    than the translation says: +1.146) or came up from League One (which
+    this database does not track at all, so their imputed rating rests on
+    a handful of FA Cup ties, and they come out WEAKER: 0.918). Averaged
+    together those cancel to nothing, and "no measurable bias" was an
+    artifact of the grouping rather than a fact about the world.
+
+    The Premier League direction has no such problem and that is why its
+    signal is clean: there is exactly one way in, from the Championship.
+
+    Returns the league the club played in last season, or OUTSIDE when
+    they played in neither tracked league -- which is itself the
+    interesting category, since it means the imputation had almost nothing
+    to work from.
+    """
+    played = matches[
+        (matches["season_label"] == previous_season)
+        & (matches["competition_name"].isin(LEAGUE_COMPETITIONS))
+        & ((matches["home_team"] == team) | (matches["away_team"] == team))
+    ]
+    leagues = set(played["competition_name"]) - {target}
+    if not leagues:
+        return OUTSIDE
+    return sorted(leagues)[0]  # a club plays one league in a season
+
+
 def log_strength(model: DixonColesModel, team: str) -> float:
     return log(model.attack[team]) - log(model.defense[team])
 
@@ -140,7 +182,7 @@ def main() -> None:
             print("No finished matches -- nothing to estimate from.")
             return
 
-        all_gaps: dict[str, list[float]] = {c: [] for c in DIRECTIONS}
+        all_gaps: dict[tuple[str, str], list[float]] = {}
         for competition in DIRECTIONS:
             print(f"=== {competition} ===")
             for season, previous, newcomers in newcomers_by_season(matches, competition):
@@ -193,9 +235,10 @@ def main() -> None:
                     imputed = log_strength(day_one, team)
                     realized = log_strength(realized_fit, team)
                     gap = realized - imputed
-                    all_gaps[competition].append(gap)
+                    origin = classify_origin(matches, team, previous, competition)
+                    all_gaps.setdefault((competition, origin), []).append(gap)
                     print(
-                        f"  {season} {team}: imputed strength {exp(imputed):.3f}, "
+                        f"  {season} {team} (from {origin}): imputed strength {exp(imputed):.3f}, "
                         f"realized {exp(realized):.3f}, gap {gap:+.3f} "
                         f"({'worse' if gap < 0 else 'better'} than the translation said)"
                     )
@@ -203,20 +246,40 @@ def main() -> None:
 
         print("=== Suggested PROMOTION_PENALTY ===")
         for competition in DIRECTIONS:
-            gaps = all_gaps[competition]
-            if len(gaps) < 3:
-                print(f"  {competition}: only {len(gaps)} usable club-seasons -- too few to promote a value. Keep 1.0.")
+            groups = {origin: gaps for (comp, origin), gaps in all_gaps.items() if comp == competition}
+            pooled = [gap for gaps in groups.values() for gap in gaps]
+            if not pooled:
+                print(f"  {competition}: no usable club-seasons.")
                 continue
-            suggested = penalty_from_gaps(gaps)
-            spread = float(np.std(gaps))
-            print(
-                f"  {competition}: {suggested:.3f} from {len(gaps)} club-seasons "
-                f"(gap mean {np.mean(gaps):+.3f}, sd {spread:.3f})."
-            )
-            print(
-                "    Promote by editing app.train.PROMOTION_PENALTY -- and treat a value "
-                "within a few percent of 1.0 as 'no measurable bias', not as signal."
-            )
+
+            print(f"  {competition}: pooled {penalty_from_gaps(pooled):.3f} from {len(pooled)} club-seasons "
+                  f"(gap mean {np.mean(pooled):+.3f}).")
+            for origin, gaps in sorted(groups.items()):
+                if len(gaps) < 3:
+                    print(f"    from {origin}: only {len(gaps)} club-season(s) -- too few to read.")
+                    continue
+                # Standard error, not just spread: with n this small the
+                # question is whether the mean is distinguishable from
+                # zero at all, and sd alone does not answer that.
+                standard_error = float(np.std(gaps, ddof=1)) / len(gaps) ** 0.5
+                same_sign = sum(1 for gap in gaps if (gap < 0) == (np.mean(gaps) < 0))
+                print(
+                    f"    from {origin}: {penalty_from_gaps(gaps):.3f} from {len(gaps)} club-seasons "
+                    f"(mean {np.mean(gaps):+.3f}, se {standard_error:.3f}, "
+                    f"t {np.mean(gaps) / standard_error:+.2f}, {same_sign}/{len(gaps)} same sign)."
+                )
+            if len(groups) > 1:
+                print(
+                    "    NOTE: this competition has more than one intake route, and they can "
+                    "point OPPOSITE ways.\n"
+                    "    Read the per-origin rows, not the pooled one -- a pooled value near 1.0 "
+                    "may be two real\n    effects cancelling rather than an absence of bias."
+                )
+        print(
+            "\nPromote by editing app.train.PROMOTION_PENALTY. Treat a value within a few percent\n"
+            "of 1.0 as 'no measurable bias' rather than signal, and prefer a group where the sign\n"
+            "is consistent across club-seasons over one with a large mean and a mixed sign."
+        )
     finally:
         conn.close()
 

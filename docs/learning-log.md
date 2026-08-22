@@ -6761,3 +6761,76 @@ Caught in seconds by `test_the_two_weight_dicts_are_in_sync`, written a
 day earlier for exactly this: the two files duplicate constants
 deliberately, and "deliberate" and "unverified" are different things. That
 test justified itself the first time the duplication was touched.
+
+## 2026-08-22 -- "Do we need the other direction too?" -- a better question than it looked
+
+Nolan asked whether the promotion penalty needs a relegation counterpart.
+The answer is that we were *already* measuring both, mixed together, and
+that mixing is what made one of the two numbers meaningless.
+
+### What the estimator said
+
+```
+Premier League:  0.725   6 club-seasons, gap mean -0.643, ALL SIX negative
+Championship:    1.025  12 club-seasons, gap mean +0.050  -> "no bias"
+```
+
+The Premier League number is strong: every promoted club underperformed
+its translated rating, several enormously (Southampton imputed 1.145,
+realized 0.395). Promoted at 0.725.
+
+The Championship's 1.025 is the trap. A club entering the Championship
+arrives by one of **two opposite routes**, and the estimator was averaging
+them:
+
+| intake route | penalty | n | t | example |
+|---|---|---|---|---|
+| relegated from the Premier League | 1.146 | 6 | +1.2 | Burnley +1.067 |
+| arrived from League One | 0.918 | 6 | -2.2 | Charlton -0.478 |
+
+Relegated clubs come out **stronger** than the translation says. Clubs
+arriving from League One come out **weaker** -- and that makes sense the
+moment you look at what the imputation had to work with: this database
+tracks the Premier League, the Championship and the FA Cup, so a League One
+club's only appearances are a handful of cup ties. A relegated club brings
+38 top-flight matches; a League One club brings almost nothing. Those are
+not the same estimation problem and should never have shared a number.
+
+Pooled, +0.272 and -0.171 average to +0.050. **"No measurable bias" was an
+artifact of the grouping, not a fact about the world.**
+
+The Premier League avoided this entirely for a structural reason worth
+stating: **there is exactly one way into the Premier League.** Its
+population is homogeneous by construction, which is why its signal is
+clean and the Championship's was not.
+
+### The generalisable version
+
+Grouping by *destination* felt natural because that is how the constant is
+keyed -- `PROMOTION_PENALTY[competition]` -- and the analysis silently
+inherited the shape of the data structure it was going to feed. The right
+grouping was by *origin*, which the code had no slot for.
+
+**When an aggregate comes back at exactly "no effect", check whether the
+group is actually one population before believing it.** A null is a claim
+about a homogeneous group; on a mixed one it means nothing at all. And be
+suspicious when the grouping matches the shape of an existing config key
+rather than the shape of the phenomenon.
+
+### What shipped, and what deliberately did not
+
+Shipped: Premier League 0.725, and the estimator now reports per-origin
+with standard errors and sign consistency alongside the pooled number,
+plus an explicit warning whenever a competition has more than one intake
+route.
+
+Did NOT ship: an origin-keyed penalty. The two Championship sub-effects
+are t +1.2 and t -2.2 -- neither convincing, pointing opposite ways. After
+this week's lesson about promoting on a symmetric-loss argument at the
+edge of the noise floor, building `(competition, origin)` plumbing to act
+on that would be repeating the exact mistake. The measurement machinery is
+in place; the values can follow when they earn it.
+
+Effect on the fixture that started all this, Hull at home to Manchester
+United: 41.3% Hull under the original whole-fixture fallback, 32.2% after
+yesterday's imputation fix, **13.1% now** with United at 70.4%.

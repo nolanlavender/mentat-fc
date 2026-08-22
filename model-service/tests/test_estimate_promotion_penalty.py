@@ -140,3 +140,54 @@ class TestMainEndToEnd:
         assert "worse" in leeds_lines[0], (
             "Leeds were planted as underperformers; the estimator must measure the gap as negative"
         )
+
+
+class TestClassifyOrigin:
+    """
+    Where a club came FROM. Pinned because grouping only by destination
+    made the Championship look unbiased (pooled 1.025) when it is actually
+    two opposite effects cancelling: clubs dropping from the Premier
+    League read +1.146, clubs arriving from League One read 0.918.
+    """
+
+    @staticmethod
+    def _matches(rows):
+        return pd.DataFrame(rows, columns=["competition_name", "season_label", "home_team", "away_team"])
+
+    def test_a_club_relegated_from_the_premier_league(self):
+        rows = [("Premier League", "2024/25", "Ipswich", "Arsenal")]
+        assert module.classify_origin(self._matches(rows), "Ipswich", "2024/25", "Championship") == "Premier League"
+
+    def test_a_club_promoted_from_the_championship(self):
+        rows = [("Championship", "2024/25", "Leeds", "Hull")]
+        assert module.classify_origin(self._matches(rows), "Leeds", "2024/25", "Premier League") == "Championship"
+
+    def test_a_club_from_a_division_we_do_not_track(self):
+        # Wrexham/Charlton/Birmingham arrive from League One, which this
+        # database has no league data for at all -- so their imputed
+        # rating rests on a handful of FA Cup ties. That is a genuinely
+        # different situation and must not be pooled with relegated sides.
+        rows = [("Premier League", "2024/25", "Arsenal", "Chelsea")]
+        assert module.classify_origin(self._matches(rows), "Wrexham", "2024/25", "Championship") == module.OUTSIDE
+
+    def test_fa_cup_appearances_do_not_count_as_an_origin(self):
+        # Every club plays the FA Cup, so it says nothing about which
+        # division they came from. A League One club with only cup ties
+        # must still classify as OUTSIDE.
+        rows = [("FA Cup", "2024/25", "Wrexham", "Arsenal")]
+        assert module.classify_origin(self._matches(rows), "Wrexham", "2024/25", "Championship") == module.OUTSIDE
+
+    def test_the_destination_itself_is_never_the_origin(self):
+        # A club already in this competition last season is not a
+        # newcomer; if one is somehow passed in, it must not report the
+        # destination as its own origin.
+        rows = [("Championship", "2024/25", "Hull", "Leeds")]
+        assert module.classify_origin(self._matches(rows), "Hull", "2024/25", "Championship") == module.OUTSIDE
+
+    def test_only_the_previous_season_is_consulted(self):
+        rows = [
+            ("Premier League", "2023/24", "Burnley", "Arsenal"),
+            ("Championship", "2024/25", "Burnley", "Leeds"),
+        ]
+        # Asking about 2025/26's intake looks at 2024/25 only.
+        assert module.classify_origin(self._matches(rows), "Burnley", "2024/25", "Premier League") == "Championship"
