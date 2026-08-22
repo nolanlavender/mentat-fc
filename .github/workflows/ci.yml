@@ -1,12 +1,23 @@
 name: CI
 
 # Gates every push to main and every PR on the same checks this project
-# already runs by hand before merging (see backend/src/services/
-# bets.service.test.ts and model-service/tests/): typecheck, unit tests,
-# and a production build for each of the three packages. No live Postgres
-# involved -- the backend/model-service test suites both use dummy env
-# values specifically so they never need a real database connection (see
-# backend/vitest.setup.ts and model-service/tests/conftest.py).
+# already runs by hand before merging: typecheck, unit tests, and a
+# production build for each of the three packages.
+#
+# The first three jobs use no database -- the backend/model-service test
+# suites use dummy env values specifically so they never need one (see
+# backend/vitest.setup.ts and model-service/tests/conftest.py), which
+# keeps them fast and runnable on a laptop.
+#
+# The `database` job exists because that turned out not to be enough. On
+# 2026-08-22 app.estimate_promotion_penalty reached production with SQL
+# referencing a table alias it never joined; every unit test passed
+# because the end-to-end test monkeypatched the loader, so the query
+# executed nowhere but production. Nothing in a database-free suite can
+# catch SQL that does not match the schema. That job builds a real
+# Postgres from the migrations and executes every read query against it --
+# it found a second live bug (a NULL parameter with no cast, crashing
+# app.diagnose_lineups on any unfiltered run) within a minute of existing.
 on:
   push:
     branches: [main]
@@ -59,3 +70,53 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+
+  database:
+    # Executes every read query against a schema built from the real
+    # migrations. Tables are empty on purpose: an empty result still
+    # proves the SQL parses, the tables and columns exist, and the joins
+    # resolve -- the class of bug that keeps reaching production. Also
+    # round-trips the migrations themselves.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mentat_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/mentat_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Apply migrations
+        working-directory: backend
+        run: npm run migrate:up
+      - name: Roll the newest migration back and forward again
+        working-directory: backend
+        run: npm run migrate:down && npm run migrate:up
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+      - name: Execute every read query against the real schema
+        working-directory: model-service
+        env:
+          SMOKE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/mentat_ci
+        run: python -m pytest tests/test_queries_against_schema.py -v

@@ -6636,3 +6636,62 @@ No new external data source. The last four bugs were all in plumbing and
 measurement, not in missing signal -- better instrumentation of what we
 have beat new inputs every time so far. That priority gets revisited once
 the market check has run quietly for a while.
+
+## 2026-08-22 -- The bug my tests were structurally unable to catch
+
+`app.estimate_promotion_penalty` failed on its first production run:
+
+```
+psycopg.errors.UndefinedTable: missing FROM-clause entry for table "home_stats"
+```
+
+I had copied `load_finished_matches`' SELECT list into a new loader and
+not its two `LEFT JOIN`s. It passed review, passed CI, and passed a
+nine-test suite that included an end-to-end run of `main()` -- because
+that test monkeypatches the loader, so **the query executed nowhere except
+production.**
+
+This is the third instance of one pattern, and the pattern is now the
+lesson rather than any individual bug:
+
+| bug | what "tested" it | why that proved nothing |
+|---|---|---|
+| `app.compare` NameError | `import app.compare` | names inside function bodies never evaluate on import |
+| matchday log ambiguity | reading the code | the query excluded the rows the message was about |
+| this one | end-to-end test of `main()` | the loader was monkeypatched away |
+
+**Faking a dependency tests everything except the dependency.** Each time,
+the mock sat exactly where the bug was.
+
+### The fix, and the fix for the class
+
+The loader now *reuses* `load_finished_matches` and merges season labels
+from a trivial second query, rather than reimplementing a query with one
+extra column. Duplicated SQL that can drift is the hazard; deleting the
+duplicate removes it by construction rather than by vigilance.
+
+The class fix is a new CI job. Every job was deliberately database-free --
+correct for logic, fast, laptop-runnable -- but **nothing database-free
+can ever check that SQL matches the schema.** The `database` job now
+starts a real Postgres, applies the actual migrations, round-trips the
+newest one down and up, and executes every read query against it via
+`tests/test_queries_against_schema.py`. The tables stay empty on purpose:
+an empty result still proves the SQL parses, the tables and columns exist,
+and the joins resolve, which is the entire bug class.
+
+It earned its place within a minute of existing, by finding a second live
+bug I had shipped two days earlier:
+
+```
+psycopg.errors.IndeterminateDatatype: could not determine data type of parameter $1
+```
+
+`app.diagnose_lineups` used `%(team)s IS NULL` for its optional filter.
+With a NULL parameter and no cast Postgres cannot infer the type -- so the
+diagnostic crashed on *any unfiltered run*, which is the workflow's
+default. I had "verified" that module with tests that monkeypatch
+`_query_df`. Same mock, same blind spot, same day.
+
+The rule worth keeping: **when a test replaces the thing that talks to the
+outside world, it has stopped testing the part most likely to be wrong.**
+At least one test per integration point has to touch the real thing.

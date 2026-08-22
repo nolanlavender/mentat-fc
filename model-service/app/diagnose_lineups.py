@@ -90,7 +90,13 @@ def main() -> None:
             JOIN competitions c ON c.id = cs.competition_id
             WHERE f.status != 'finished'
               AND f.kickoff_at BETWEEN now() - interval '12 hours' AND now() + interval '48 hours'
-              AND (%(team)s IS NULL OR ht.name ILIKE %(like)s OR at.name ILIKE %(like)s)
+              -- ::text casts are load-bearing, not decoration. With a NULL
+              -- parameter and no cast Postgres cannot infer the type and
+              -- fails with "could not determine data type of parameter" --
+              -- which is exactly what an unfiltered run (the workflow's
+              -- default, since an unfilled input becomes None) did until
+              -- tests/test_queries_against_schema.py executed it.
+              AND (%(team)s::text IS NULL OR ht.name ILIKE %(like)s::text OR at.name ILIKE %(like)s::text)
             ORDER BY f.kickoff_at
             """,
             {"team": team_filter, "like": f"%{team_filter}%" if team_filter else None},
