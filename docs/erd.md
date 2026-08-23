@@ -54,6 +54,7 @@ erDiagram
     }
     teams {
         int id PK
+        timestamptz roster_synced_at "NULL = roster never verified"
         text name
         text short_name
         text logo_url "from API-Football's fixtures/lineups responses"
@@ -522,3 +523,30 @@ derivation already excludes from the parlay product. Half lines can't tie,
 which is the entire reason books quote them. Quarter lines (-2.25) are
 rejected rather than mis-graded — settling one means grading a leg as
 half-won, which a single `won`/`lost`/`void` value cannot express.
+
+### `teams.roster_synced_at` — telling "he left" from "we never checked"
+
+`clearStaleTeamRoster` sets `players.current_team_id` to NULL for anyone
+missing from a team's latest API-Football squad. That is the authoritative
+"he has left" signal — and until 2026-08-22 it was silently undone one
+layer down, where `load_player_squad_appearances` read
+`COALESCE(current_team_id, most_recent_appearance_team)` and put the player
+straight back at the club he last appeared for. Mohamed Salah was predicted
+to score for Liverpool after leaving them.
+
+The fallback is not wrong in general; it exists because a NULL
+`current_team_id` originally meant "FPL doesn't cover this player" (the
+2026-08-16 Harry Wilson chain). The problem is that NULL acquired a second
+meaning and nothing distinguished them:
+
+| `current_team_id` | last club's `roster_synced_at` | meaning | action |
+|---|---|---|---|
+| set | anything | he's there | use it |
+| NULL | set | looked for, not found | **departed — predict for nobody** |
+| NULL | NULL | never verified | fall back to appearances |
+
+Recorded on `teams` rather than `players` because the fact is "this roster
+was verified" — a property of the team, one row per sync instead of one per
+player. Only written after a **non-empty** squad response, so a failed
+fetch can never mark a roster verified and get every one of that team's
+players treated as departed.

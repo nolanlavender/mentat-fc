@@ -7148,3 +7148,71 @@ know, because it sends you to fix the wrong thing.
 table happily kept yesterday's answer for them. Idempotent upserts feel
 safe because rerunning is harmless -- but "harmless to rerun" is not
 "produces the current answer" when the correct output SHRINKS.
+
+## 2026-08-22 -- Salah at Liverpool: the fix that was undone one layer down
+
+Reported from the app: Mohamed Salah in Newcastle vs Liverpool's scorer
+picks, having left Liverpool.
+
+This is the Harry Wilson bug (2026-08-16) wearing a different hat, and the
+interesting part is that **the pipeline had already worked out he was
+gone.** `clearStaleTeamRoster` compares each team's API-Football squad
+against our records and NULLs `current_team_id` for anyone missing. It had
+done exactly that. Then `load_player_squad_appearances` read:
+
+    COALESCE(p.current_team_id, mrc.team_id)
+
+and put him straight back at Liverpool, because his most recent appearance
+was for Liverpool. **The authoritative signal was computed correctly,
+stored correctly, and then overridden by a fallback written for a different
+purpose.**
+
+### Why the fallback existed, and why that made it hard to see
+
+It is not junk code. It was added because a NULL `current_team_id` used to
+mean "FPL doesn't cover this player" -- true for every Championship player
+at the time. Falling back to appearances was the right call for that.
+
+Then `clearStaleTeamRoster` shipped and gave NULL a *second* meaning:
+"verified absent". Two states, one representation, and the reader silently
+resolved both the same way. Nobody changed the fallback because nobody had
+to -- the new writer just started producing a value the old reader
+misinterpreted.
+
+**Generalised: when you add a new way to produce an existing sentinel,
+every existing reader of that sentinel is now a bug until proven
+otherwise.** NULL is the worst offender because it is so cheap to write and
+so tempting to COALESCE away.
+
+The fix is a third fact rather than a cleverer rule: `teams.roster_synced_at`,
+so the two NULLs can be told apart.
+
+| `current_team_id` | last club's `roster_synced_at` | meaning |
+|---|---|---|
+| set | anything | he is there |
+| NULL | set | looked for, not found -> **departed** |
+| NULL | NULL | never verified -> fall back to appearances |
+
+Only written after a **non-empty** squad response: a failed fetch marking a
+roster "verified" would get every one of that team's players treated as
+departed, which is a far worse failure than the one being fixed.
+
+### Verified where it actually lives
+
+This is a SQL-shaped bug, so it was verified in SQL: a scratch Postgres
+built from the real migrations, three seeded players covering all three
+rows of that table, and an assertion that the departed one vanishes while
+the uncovered one survives. Then the same three pinned in
+`tests/test_queries_against_schema.py`, which the `database` CI job runs --
+and confirmed to fail when the SQL is reverted to the old COALESCE.
+
+No amount of Python-level mocking would have caught this. The bug was
+entirely inside a query, which is the whole reason that CI job exists.
+
+### The backtest path is deliberately exempt
+
+With an `as_of` cutoff, appearances still decide the club.
+`current_team_id` and `roster_synced_at` are both live signals; applying
+today's transfers retroactively would leak the future into the measurement
+and flatter it most for exactly the players who moved. Pinned by its own
+test.
