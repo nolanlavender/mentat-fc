@@ -472,6 +472,33 @@ penalty history doesn't get counted twice).
 > actual scorers, 1.0 is honest), then `AUC` (ranking, 0.5 is coin-flip),
 > and compare both against the base-rate row.
 
+### Which club a player is allocated for
+
+Everything above assumes we know whose $\lambda_{\text{team}}$ a player
+should be splitting. That turns out to be the least mathematical and most
+error-prone part of the scorer model — three production reports in eight
+days (Harry Wilson, Mohamed Salah, Alexander Isak) were all "predicted for
+the wrong club", and none of them was a modelling mistake.
+
+Every appearance a player has ever made is relabelled with his **current**
+club, so a transfer keeps his personal scoring rate and only changes whose
+goals he is competing for. The recency half-life then does the blending on
+its own: the day after a move his rate is old-club-dominated, and it shifts
+as he actually plays. Which club counts as "current" is resolved in order:
+
+1. `players.current_team_id` — live from FPL and the API-Football squads sync
+2. else, if his last club's roster **has** been verified since — he has left, drop him
+3. else — fall back to his most recent appearance's club
+
+Only step 1 is unambiguous. Steps 2 and 3 exist because a NULL
+`current_team_id` means two different things (see `docs/erd.md`'s
+`teams.roster_synced_at` note), and a fourth failure mode sits outside the
+chain entirely: entity resolution can split one person into two `players`
+rows on a transfer between two tracked clubs, at which point *both* rows
+resolve correctly and nothing here is wrong. The **"Diagnose a player's
+club"** workflow (`app/diagnose_player.py`) prints all of it for a given
+name — run that before theorising about the maths.
+
 ---
 
 ## 9. How we know whether any of it works
@@ -712,6 +739,9 @@ mirrored and easy to find by title.)*
 | `model-service/app/train.py` | **deployed** config + the batch prediction job |
 | `model-service/app/evaluate.py` | backtest **sandbox** — try a value here first |
 | `model-service/app/compare.py` | paired A/B — is a difference real? |
+| `model-service/app/diagnose_player.py` | why is this player attached to this club? |
+| `model-service/app/diagnose_lineups.py` | why hasn't this fixture's lineup landed? |
+| `model-service/app/diagnose_coverage.py` | why is this fixture's scorer list empty? |
 | `docs/learning-log.md` | the running history of what we tried |
 
 The `train.py` / `evaluate.py` split is deliberate and the constants are

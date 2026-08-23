@@ -550,3 +550,14 @@ was verified" — a property of the team, one row per sync instead of one per
 player. Only written after a **non-empty** squad response, so a failed
 fetch can never mark a roster verified and get every one of that team's
 players treated as departed.
+
+To read this table against a real player, run the **"Diagnose a player's
+club"** workflow (`app.diagnose_player`). It prints each link — the stored
+`current_team_id`, the last club's `roster_synced_at`, the most recent
+appearance, the appearance count — and the club the loader will actually
+choose, for every `players` row matching a name. The last part matters:
+more than one matching row means the club-resolution chain is not the
+problem at all, because each row resolves correctly on its own. See the
+`players.current_team_id` note above, and the 2026-08-23 learning-log
+entry, for how a transfer between two tracked clubs splits one person into
+two rows.
