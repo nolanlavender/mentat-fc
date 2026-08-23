@@ -757,11 +757,16 @@ export async function upsertPlayerForTeamRoster(
  * call would be a lot of damage from a single flaky response.
  */
 export async function clearStaleTeamRoster(pool: Pool, teamId: number, currentRosterPlayerIds: number[]): Promise<void> {
+  // An empty roster is a bad response, not a squad that lost everyone, so
+  // it clears nobody AND records no sync -- otherwise a single failed
+  // fetch would mark the roster "verified" and get every one of that
+  // team's players treated as departed (see migration 1701000000029).
   if (currentRosterPlayerIds.length === 0) return;
   await pool.query(`UPDATE players SET current_team_id = NULL WHERE current_team_id = $1 AND NOT (id = ANY($2::int[]))`, [
     teamId,
     currentRosterPlayerIds,
   ]);
+  await pool.query(`UPDATE teams SET roster_synced_at = now() WHERE id = $1`, [teamId]);
 }
 
 export async function upsertFplGameweek(

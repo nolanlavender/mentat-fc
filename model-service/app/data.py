@@ -434,24 +434,50 @@ def load_player_squad_appearances(
             ORDER BY player_id, kickoff_date DESC
         ),
         effective_club AS (
-            -- players.current_team_id is live (FPL reflects a transfer the
-            -- instant it happens), which is exactly what production wants
-            -- and exactly what a backtest must not see: at as_of it would
-            -- be reporting club moves from the future. So when a cutoff is
-            -- given, fall back to what the appearance history itself said
-            -- at the time. Leaving this leak in would have flattered the
-            -- backtest most for the players who moved -- the hardest ones.
+            -- players.current_team_id is live (FPL and API-Football both
+            -- reflect a transfer quickly), which is exactly what
+            -- production wants and exactly what a backtest must not see:
+            -- at as_of it would be reporting club moves from the future.
+            -- So when a cutoff is given, fall back to what the appearance
+            -- history itself said at the time. Leaving that leak in would
+            -- have flattered the backtest most for the players who moved.
+            --
+            -- The live branch used to be COALESCE(current_team_id,
+            -- mrc.team_id), and that produced a real production bug on
+            -- 2026-08-22: Mohamed Salah predicted to score for Liverpool
+            -- after leaving. clearStaleTeamRoster had correctly NULLed his
+            -- current_team_id -- he was absent from Liverpool's squad --
+            -- and the COALESCE put him straight back, because his most
+            -- recent appearance was for Liverpool. The authoritative "he
+            -- left" signal was undone by the fallback one layer down.
+            --
+            -- NULL has two meanings and teams.roster_synced_at separates
+            -- them (see migration 1701000000029): if the club he last
+            -- played for has been verified against API-Football's squad
+            -- list and he is still not on it, he was looked for and not
+            -- found, so he belongs to no tracked team and is dropped. If
+            -- that club has never been synced, the old appearance fallback
+            -- still applies -- it is a guess, but the only one available.
             SELECT mrc.player_id,
-                   CASE WHEN %(as_of)s::date IS NULL
-                        THEN COALESCE(p.current_team_id, mrc.team_id)
-                        ELSE mrc.team_id END AS team_id
+                   CASE
+                       WHEN %(as_of)s::date IS NOT NULL THEN mrc.team_id
+                       WHEN p.current_team_id IS NOT NULL THEN p.current_team_id
+                       WHEN last_club.roster_synced_at IS NOT NULL THEN NULL
+                       ELSE mrc.team_id
+                   END AS team_id
             FROM most_recent_club mrc
             JOIN players p ON p.id = mrc.player_id
+            JOIN teams last_club ON last_club.id = mrc.team_id
         )
         SELECT ec.team_id, a.player_id, a.kickoff_date, a.minutes_played, a.goals,
                a.penalties_scored, a.penalties_missed, a.rating, a.is_starting
         FROM appearances a
         JOIN effective_club ec ON ec.player_id = a.player_id
+        -- A NULL effective club means "verified as no longer at the club he
+        -- last played for", so every one of his appearances is dropped and
+        -- he is predicted for nobody. That is the whole point: a departed
+        -- player must not surface under his old team's scorer picks.
+        WHERE ec.team_id IS NOT NULL
         ORDER BY a.kickoff_date
     """
     return _query_df(conn, query, {"competition_names": competition_names, "as_of": as_of})

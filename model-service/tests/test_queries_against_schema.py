@@ -152,3 +152,85 @@ class TestModuleQueries:
         monkeypatch.setattr(module, "get_connection", lambda: psycopg.connect(SMOKE_DATABASE_URL))
         monkeypatch.setattr(module.sys, "argv", ["app.diagnose_coverage"])
         module.main()  # must not raise
+
+
+class TestDepartedPlayersAreDropped:
+    """
+    The 2026-08-22 Salah bug, pinned against a real schema because it is a
+    SQL-shaped bug and no amount of Python-level mocking would have caught
+    it. clearStaleTeamRoster had already worked out he had left Liverpool;
+    load_player_squad_appearances put him back via
+    COALESCE(current_team_id, most_recent_appearance_team).
+    """
+
+    @pytest.fixture
+    def seeded(self, conn):
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO competitions (id,name,type) VALUES (900,'Premier League','league')
+                  ON CONFLICT (id) DO NOTHING;
+                INSERT INTO seasons (id,label,start_date,end_date)
+                  VALUES (900,'2098/99','2098-08-01','2099-05-31') ON CONFLICT (id) DO NOTHING;
+                INSERT INTO competition_seasons (id,competition_id,season_id,external_season_year)
+                  VALUES (900,900,900,2098) ON CONFLICT (id) DO NOTHING;
+                INSERT INTO teams (id,name,roster_synced_at) VALUES
+                  (901,'Verified FC',now()), (902,'Other FC',now()), (903,'Unverified FC',NULL)
+                  ON CONFLICT (id) DO NOTHING;
+                INSERT INTO players (id,full_name,current_team_id) VALUES
+                  (901,'Departed Player',NULL), (902,'Present Player',902), (903,'Uncovered Player',NULL)
+                  ON CONFLICT (id) DO NOTHING;
+                INSERT INTO fixtures (id,competition_season_id,home_team_id,away_team_id,
+                                      kickoff_at,kickoff_date,status,home_score,away_score)
+                  VALUES (901,900,901,902,'2098-08-01 15:00Z','2098-08-01','finished',2,1),
+                         (902,900,903,902,'2098-08-02 15:00Z','2098-08-02','finished',1,1)
+                  ON CONFLICT (id) DO NOTHING;
+                INSERT INTO fixture_lineups (fixture_id,team_id,player_id,is_starting) VALUES
+                  (901,901,901,true),(901,902,902,true),(902,903,903,true)
+                  ON CONFLICT (fixture_id, player_id) DO NOTHING;
+            """)
+        conn.commit()
+        yield conn
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM fixture_lineups WHERE fixture_id IN (901,902);"
+                        "DELETE FROM fixtures WHERE id IN (901,902);"
+                        "DELETE FROM players WHERE id IN (901,902,903);"
+                        "DELETE FROM teams WHERE id IN (901,902,903);"
+                        "DELETE FROM competition_seasons WHERE id = 900;"
+                        "DELETE FROM seasons WHERE id = 900;"
+                        "DELETE FROM competitions WHERE id = 900;")
+        conn.commit()
+
+    def test_a_verified_departure_is_dropped_entirely(self, seeded):
+        from app.data import load_player_squad_appearances
+
+        frame = load_player_squad_appearances(seeded, ["Premier League"])
+        assert 901 not in set(frame["player_id"]), (
+            "a player absent from his last club's VERIFIED roster must not be predicted for it"
+        )
+
+    def test_a_player_still_on_the_roster_is_kept(self, seeded):
+        from app.data import load_player_squad_appearances
+
+        frame = load_player_squad_appearances(seeded, ["Premier League"])
+        assert set(frame[frame["player_id"] == 902]["team_id"]) == {902}
+
+    def test_an_unverified_club_still_falls_back_to_appearances(self, seeded):
+        # The reason the fallback exists at all -- a club we have never
+        # synced tells us nothing, so a NULL current_team_id there is
+        # "unknown", not "departed". Removing this would silently delete
+        # every player at any club the roster sync has not reached.
+        from app.data import load_player_squad_appearances
+
+        frame = load_player_squad_appearances(seeded, ["Premier League"])
+        assert set(frame[frame["player_id"] == 903]["team_id"]) == {903}
+
+    def test_the_backtest_path_is_untouched(self, seeded):
+        # With a cutoff we must use only what the appearance history said
+        # at the time -- current_team_id and roster_synced_at are both live
+        # signals and would leak the future into the measurement.
+        from datetime import date
+
+        from app.data import load_player_squad_appearances
+
+        frame = load_player_squad_appearances(seeded, ["Premier League"], as_of=date(2099, 1, 1))
+        assert 901 in set(frame["player_id"]), "a backtest must not apply today's transfers retroactively"
