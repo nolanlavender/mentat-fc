@@ -7216,3 +7216,96 @@ With an `as_of` cutoff, appearances still decide the club.
 today's transfers retroactively would leak the future into the measurement
 and flatter it most for exactly the players who moved. Pinned by its own
 test.
+
+---
+
+## 2026-08-23 — Building the instrument instead of answering the question a fourth time
+
+"Isak plays for Liverpool" is the third report of this shape in eight days.
+Harry Wilson predicted for Fulham after joining Leeds (2026-08-16). Mohamed
+Salah for Liverpool after leaving (2026-08-22). Now Alexander Isak for
+Newcastle after joining Liverpool.
+
+All three looked identical from the app: a player's name next to a club he
+does not play for. All three had **different causes**, in different layers:
+
+| report | actual cause | fix |
+|---|---|---|
+| Harry Wilson | appearance-derived club ignored a live `current_team_id` | read `current_team_id` first |
+| Mohamed Salah | `COALESCE` undid a correctly-computed "departed" NULL | add `teams.roster_synced_at` |
+| Alexander Isak | not yet known | not yet known |
+
+Each of the first two was diagnosed the same way: read the chain of code,
+form a theory, argue myself into it, ship. That worked, twice. It is also
+exactly the method that cannot distinguish the third case from the first
+two, because **the observable is the same in all of them** — a name and a
+wrong club — while the state that produced it lives across four places I
+cannot see from here.
+
+### What the four links actually are
+
+`load_player_squad_appearances` resolves a player's club through a chain,
+and any link can be the broken one:
+
+1. `players.current_team_id` — live from FPL and the API-Football squads
+   sync. Authoritative when set.
+2. `teams.roster_synced_at` on his last club — separates "verified absent"
+   from "never checked" (the Salah fix above).
+3. his most recent appearance's team — the fallback.
+4. `MIN_PLAYER_MATCHES` — whether he reaches the pool at all.
+
+And there is a fifth possibility that is not in the chain at all, which is
+what made this worth stopping for.
+
+### The failure mode the chain cannot express: a split identity
+
+`ROSTER_CANDIDATES_CTE` in `backend/seed/lib/db.ts` scopes the fuzzy-match
+candidate pool to the team being synced:
+
+```sql
+WHERE COALESCE(p.current_team_id, ra.team_id) = $1
+```
+
+That is a reasonable narrowing — until you notice that for a transferring
+player, **the team being synced is the one club he is not yet associated
+with.** So syncing Liverpool's roster looks for Isak among Liverpool's
+players, does not find him (he is Newcastle's), and inserts a *second*
+player row. The name-based link only saves you if he was already matched by
+his namespaced `api_football_squads` external id.
+
+The result is two rows for one person, and here is why it defeats the
+read-the-code method: **each row resolves correctly.** The Newcastle row
+genuinely has Newcastle appearances and no newer club. The Liverpool row
+genuinely has `current_team_id = Liverpool`. Nothing in the resolution
+chain is wrong. You can stare at the CASE expression indefinitely and find
+nothing, because the bug is upstream, in the assumption that one person is
+one row.
+
+### So: a diagnostic, not a fix
+
+`app.diagnose_player` (plus a manual-dispatch workflow) prints all four
+links for every player row matching a name, the club each row resolves to
+with the reason, and a warning when more than one row matches — with the
+tell for reading it: one source per row usually means a real namesake, the
+*same* source on both rows means one person got split.
+
+The general lesson, and the reason this is worth an entry rather than a
+commit message: **the third time you answer the same question by reading
+code, the thing to build is not the answer — it is the instrument.** Two
+data points looked like a pattern ("club resolution is subtly wrong
+again"). Three is enough to notice that the shared thing is not the cause
+at all, it is the *invisibility*: production state I have no way to look
+at, so every diagnosis has to be a deduction. Deductions are only as good
+as the assumption that the failure is one you have already imagined.
+
+### The one design decision inside it
+
+`resolve_club()` **re-implements** the `effective_club` CASE rather than
+importing it. That looks like exactly the duplication this repo otherwise
+avoids, and it is deliberate: a diagnostic that calls the code under test
+can never report a disagreement with it, and "what the loader will actually
+decide" is the entire question being asked. The cost is real — the copy can
+drift — so it is paid for with a schema test that seeds the three cases and
+asserts the diagnostic and the loader reach the same answer against a real
+database. Divergence gets caught; it just gets caught by a test rather than
+made impossible by construction.

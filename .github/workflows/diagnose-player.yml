@@ -1,0 +1,51 @@
+name: Diagnose a player's club
+
+# Manual-only. Answers "why is the app predicting X to score for his OLD
+# club?" -- a question that has now come up three times (Harry Wilson,
+# Mohamed Salah, Alexander Isak) and been answered three times by reading
+# code and guessing which link in the chain had failed.
+#
+# Prints the chain instead (see app.diagnose_player's docstring):
+#   1. players.current_team_id            -- authoritative when set
+#   2. teams.roster_synced_at on his last club -- "verified absent" vs "never checked"
+#   3. his most recent appearance's team  -- the fallback
+#   4. appearance count vs MIN_PLAYER_MATCHES
+# plus every player row with a similar name, because a transfer between
+# two tracked clubs can split one person into two rows rather than moving
+# him -- which looks identical from the app and needs a different fix.
+#
+# Read-only, writes nothing, safe against production any time.
+#
+# Actions > "Diagnose a player's club" > Run workflow, and pass a surname.
+#
+# Requires the DATABASE_URL secret the other workflows already use.
+on:
+  workflow_dispatch:
+    inputs:
+      player:
+        description: 'Name substring to look up (e.g. Isak)'
+        required: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install model-service dependencies
+        working-directory: model-service
+        run: pip install -r requirements.txt
+
+      - name: Diagnose player
+        working-directory: model-service
+        # Passed through env, NOT interpolated straight into the run: line
+        # -- `${{ inputs.player }}` inline would let a dispatch input
+        # inject shell commands. Quoted "$PLAYER" is inert.
+        env:
+          PLAYER: ${{ inputs.player }}
+        run: python -m app.diagnose_player "$PLAYER"

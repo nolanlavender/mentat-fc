@@ -144,6 +144,16 @@ class TestModuleQueries:
         module.main()
         assert "Nothing in range" in capsys.readouterr().out
 
+    def test_diagnose_player_runs(self, monkeypatch, capsys):
+        import psycopg
+
+        import app.diagnose_player as module
+
+        monkeypatch.setattr(module, "get_connection", lambda: psycopg.connect(SMOKE_DATABASE_URL))
+        monkeypatch.setattr(module.sys, "argv", ["app.diagnose_player", "Isak"])
+        module.main()
+        assert "No player matching" in capsys.readouterr().out
+
     def test_diagnose_coverage_runs(self, monkeypatch):
         import psycopg
 
@@ -223,6 +233,37 @@ class TestDepartedPlayersAreDropped:
 
         frame = load_player_squad_appearances(seeded, ["Premier League"])
         assert set(frame[frame["player_id"] == 903]["team_id"]) == {903}
+
+    def test_the_diagnostic_agrees_with_the_loader(self, seeded):
+        # app.diagnose_player re-implements the effective_club CASE rather
+        # than importing it, on purpose (see resolve_club's docstring): a
+        # diagnostic that shares the code under test can never report a
+        # disagreement. The cost of that choice is that the copy can drift
+        # silently, so this pins the two to the same answer against a real
+        # database, on the exact three cases the CASE exists to separate.
+        from app.data import load_player_squad_appearances
+        from app.diagnose_player import load_player_chain, resolve_club
+
+        actual = load_player_squad_appearances(seeded, ["Premier League"])
+        club_by_player = {
+            int(player_id): frame["team_id"].iloc[0]
+            for player_id, frame in actual.groupby("player_id")
+        }
+        names = {"Verified FC": 901, "Other FC": 902, "Unverified FC": 903}
+
+        chain = load_player_chain(seeded, "Player")
+        seen = set()
+        for row in chain.itertuples():
+            if row.player_id not in (901, 902, 903):
+                continue  # a real database may hold other "...Player..." names
+            seen.add(row.player_id)
+            club, why = resolve_club(row)
+            predicted = names[club] if club else None
+            assert predicted == club_by_player.get(row.player_id), (
+                f"diagnostic says {club} for player {row.player_id} ({why}), "
+                f"loader says {club_by_player.get(row.player_id)}"
+            )
+        assert seen == {901, 902, 903}, "the seeded rows must all be reachable by name"
 
     def test_the_backtest_path_is_untouched(self, seeded):
         # With a cutoff we must use only what the appearance history said
