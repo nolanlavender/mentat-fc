@@ -38,6 +38,33 @@ jobs:
         working-directory: backend
         run: npm ci
 
+      - name: Restore any external ids nulled by the 2026-09-05 bug
+        working-directory: backend
+        # Runs FIRST, before anything reads players.external_api_football_id.
+        # That column is read in exactly one place --
+        # upsertPlayerGoldenRecord's abbreviated-name tier, whose candidate
+        # query requires `external_api_football_id IS NULL` to mean "not
+        # linked to API-Football yet". A player wrongly showing NULL is
+        # therefore eligible for a name matcher they should be excluded
+        # from, so repairing before the seed steps below is what keeps this
+        # run from acting on the wrong state.
+        #
+        # Deliberately not a separate manual workflow, and deliberately not
+        # date-guarded like the FPL step below. It retires on the actual
+        # condition rather than a guessed date: once every recoverable row
+        # is restored it prints "Nothing to repair" and exits 0, costing one
+        # query a day forever after.
+        #
+        # Kept permanently rather than removed once the backlog clears,
+        # because the condition it looks for is a standing invariant, not a
+        # one-off cleanup: a player with an api_football link row but a NULL
+        # external_api_football_id should be impossible. If that count ever
+        # goes non-zero again, something has started writing NULLs over real
+        # ids a second time -- which is precisely the silent, committed,
+        # crash-free corruption that made the original bug take a week to
+        # notice.
+        run: npm run db:repair-nulled-api-football-ids -- --apply
+
       - name: Refresh current-season fixtures (Premier League + Championship)
         working-directory: backend
         run: npm run db:seed:current-season

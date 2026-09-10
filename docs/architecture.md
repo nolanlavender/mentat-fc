@@ -136,12 +136,18 @@ Until then it only runs when invoked by hand:
     above — Championship transfers aren't tied to FPL's calendar — and
     cheap regardless (~44 calls/day, trivial against the paid tier's
     7500/day budget).
-- **`backend/scripts/daily-refresh.sh`** runs `npm run db:seed:current-season`
+- **`backend/scripts/daily-refresh.sh`** runs
+  `npm run db:repair-nulled-api-football-ids -- --apply` →
+  `npm run db:seed:current-season`
   → `npm run db:seed:backfill-lineups` → (transfer-window only, through
   2026-09-02) `npm run db:seed:fpl` → `npm run db:seed:photos` →
   `python -m app.train`, in that order (order matters: the backfill only
   sees a fixture as a candidate once its status says `finished`, so the
-  fixture-list refresh has to run first). Written to run under either a
+  fixture-list refresh has to run first; the repair goes first because it
+  restores `players.external_api_football_id`, which the seed steps then
+  read — see the 2026-09-10 learning-log entry, and the workflow's own
+  comment for why that step is permanent rather than a one-off). Written
+  to run under either a
   local `cron`/`launchd` entry or a GitHub Actions scheduled workflow --
   same script, same commands, only the trigger differs. **Decided
   2026-08-16: skip the local `cron`/`launchd` step entirely and wire this
