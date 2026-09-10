@@ -7415,6 +7415,25 @@ That job was built on 2026-08-22 for *read* queries. This is the second
 distinct production outage it would have caught and didn't, because
 nothing was executing the **write** paths. Now it does.
 
+Adding write specs to that job changed its character, and the first CI run
+said so: the specs passed, then a model-service schema test three steps
+later failed on `assert "No player matching" in ...`. Nothing was wrong
+with either — the write specs had simply left their last fixture row
+behind, and that assertion had always been checking a property of the
+*database* (nothing named Isak exists) rather than of the code.
+
+Two fixes, because there were two mistakes. The specs now clean up in
+`afterAll` as well as `beforeEach` — tidying only on the way in is enough
+to pass in isolation, which is exactly why it is not enough in a job that
+shares one Postgres across steps. And the assertion now searches for a
+deliberately unmatchable string, so it proves the query executes against
+the real schema without depending on what else lives there.
+
+**Generalised: the moment a test job gains its first writer, every reader
+in it that assumed an empty database is now order-dependent.** Worth
+fixing at the source (don't leak) *and* at the assertion (don't depend on
+emptiness), since either alone leaves the trap set for the next writer.
+
 ### Repairing the damage
 
 `players.external_api_football_id` is read in exactly one place: the

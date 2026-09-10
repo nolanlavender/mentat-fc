@@ -44,7 +44,15 @@ const REAL_API_FOOTBALL_ID = 990901;
 describeWithDb('null external ids from API-Football', () => {
   const pool = new Pool({ connectionString: SMOKE_DATABASE_URL });
 
+  // Cleanup runs before each test AND after the last one. beforeEach alone
+  // is enough for these specs to pass in isolation, which is exactly why it
+  // is not enough: the `database` CI job runs this against the same Postgres
+  // the model-service schema tests use afterwards, and rows left behind by
+  // the final test broke one of them that (reasonably) assumed an empty
+  // schema. A suite that only tidies up on the way in is a suite that
+  // leaves a mess for whatever runs next.
   afterAll(async () => {
+    await clean();
     await pool.end();
   });
 
@@ -54,7 +62,7 @@ describeWithDb('null external ids from API-Football', () => {
   // run's teardown rather than its assertions. Matched by name instead.
   const CREATED_NAMES = ['Brand New Signing', 'Squad Player Without An Id'];
 
-  beforeEach(async () => {
+  async function clean(): Promise<void> {
     const scope = `id >= $1 OR full_name = ANY($2)`;
     await pool.query(`DELETE FROM player_external_ids WHERE player_id IN (SELECT id FROM players WHERE ${scope})`, [
       PLAYER_ID,
@@ -62,6 +70,10 @@ describeWithDb('null external ids from API-Football', () => {
     ]);
     await pool.query(`DELETE FROM players WHERE ${scope}`, [PLAYER_ID, CREATED_NAMES]);
     await pool.query(`DELETE FROM teams WHERE id >= $1`, [TEAM_ID]);
+  }
+
+  beforeEach(async () => {
+    await clean();
     await pool.query(`INSERT INTO teams (id, name) VALUES ($1, 'Test United'), ($2, 'Test Rovers')`, [TEAM_ID, OTHER_TEAM_ID]);
     // Two seeded players because the two name-matching tiers have
     // deliberately different eligibility. The abbreviated tier only
