@@ -7448,3 +7448,28 @@ restores from it, but only where unambiguous (exactly one link row, and no
 other player already holding that id — a collision there means a genuine
 duplicate for `repair-duplicate-players.ts`, not something to guess at).
 Dry-run by default.
+
+It does **not** heal on its own without that: the found-by-external-id
+branch of `upsertPlayerGoldenRecord` re-claims `external_fpl_id` but never
+`external_api_football_id`, so a wiped player stays wiped indefinitely
+while resolving perfectly well by link row. Worth checking rather than
+assuming — "it'll fix itself next run" was the intuition, and it was wrong.
+
+So it runs as the **first step of the daily refresh** rather than as a
+manual workflow. Three reasons, in order of how much they mattered:
+
+1. It has to precede the seed steps. A wrongly-NULL
+   `external_api_football_id` makes a player *eligible* for the
+   abbreviated-name matcher, so repairing after the seed means this run
+   already acted on the bad state.
+2. It retires on the real condition instead of a guessed date — once the
+   backlog clears it prints "Nothing to repair" and exits 0. The FPL step
+   two below it uses a date guard for the same self-retiring purpose;
+   a condition is strictly better than a date where one is available.
+3. It stays permanently, because what it looks for is a **standing
+   invariant**, not a cleanup: an `api_football` link row with a NULL
+   `external_api_football_id` should be impossible. If that count ever
+   goes non-zero again, something has started writing NULLs over real ids
+   a second time — the same silent, committed, crash-free corruption that
+   took a week to notice the first time. A daily query is a cheap
+   tripwire for it.
