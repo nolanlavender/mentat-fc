@@ -7309,3 +7309,123 @@ drift — so it is paid for with a schema test that seeds the three cases and
 asserts the diagnostic and the loader reach the same answer against a real
 database. Divergence gets caught; it just gets caught by a test rather than
 made impossible by construction.
+
+---
+
+## 2026-09-10 — A null that two layers each mishandled differently
+
+The daily refresh and the matchday lineup check had been failing
+intermittently since 2026-09-05 — not every run, which is why it read as
+flakiness rather than a bug. Every failure had the same cause:
+
+```
+null value in column "external_id" of relation "player_external_ids"
+  violates not-null constraint
+detail: Failing row contains (21103, 19356, api_football, null)
+  at linkPlayerExternalId (backend/seed/lib/db.ts)
+  at upsertPlayerGoldenRecord
+  at seedApiFootballLineupsAndStatsBulk
+```
+
+API-Football serves `player.id` as **null** for someone it has not
+assigned a player record to yet — in practice a recent signing named in a
+lineup before the player record catches up. Intermittent because it only
+fires when a fixture in that run's batch happens to contain such a player.
+
+### The type said `number`, so nobody was asked
+
+```ts
+startXI: Array<{ player: { id: number; name: string; ... } }> | null;
+```
+
+Every *other* nullable field on that interface was typed honestly and
+handled with `?? undefined` at the call site. `id` was typed `number`, so
+it got passed straight through. Downstream, `PlayerInput` declared
+`externalApiFootballId?: number` and every guard asked `!== undefined`.
+
+`null !== undefined` is `true`. The null satisfied every guard on the way
+in and arrived at the two id writers.
+
+**The lesson is not "use `!= null`".** It is that an optional field and a
+nullable field are different claims, and TypeScript will only make you
+handle the case you actually described. The response type was a promise
+about someone else's API, made by us, with nothing checking it. Writing
+`id: number` did not make nulls impossible — it made them *invisible*,
+and moved the failure from a compile error to a production crash a week
+later.
+
+### Two writers, same null, two completely different failures
+
+| writer | what a null did | how it showed up |
+|---|---|---|
+| `linkPlayerExternalId` | `INSERT` into a `NOT NULL` column | crashed the run |
+| `claimPlayerExternalId` | `UPDATE players SET external_api_football_id = NULL` | **silent** |
+
+The second one is the interesting one. Its safety check is:
+
+```sql
+SELECT id FROM players WHERE external_api_football_id = $1 AND id != $2
+```
+
+With `$1 = NULL` that matches nothing — `= NULL` is never true in SQL — so
+the collision check waved it through and the `UPDATE` below wiped a real,
+correct external id. These are `pool.query` calls on a `Pool`, so each
+statement autocommits: the wipe **committed** and then the next statement
+threw. Every crashed run un-linked one player on its way down.
+
+So the loud half was the harmless one. Verified against a real Postgres
+rather than argued:
+
+```
+BEFORE external_api_football_id = 991900
+THREW: null value in column "external_id" ...
+AFTER  external_api_football_id = null
+```
+
+**Generalised: a guard written as an equality comparison silently stops
+guarding when its input is NULL.** Same shape as the `COALESCE` bug from
+2026-08-22 — SQL's NULL semantics turning a correct-looking check into a
+no-op — and worth recognising faster next time.
+
+### The obvious fix was wrong
+
+The one-line fix is to gate the block on `!= null`. But both name-matching
+tiers (abbreviated `"A. Isak"`, and the roster-scoped fuzzy match) lived
+*inside* that block, because they were written as "the fallbacks for when
+the id lookup misses". Gating it would have sent every id-less sighting
+past them to the exact-name path — which an abbreviated name never matches
+— quietly inserting a **second row** for a player we already had. That is
+the same split-identity failure those tiers exist to prevent, and it would
+have looked like a fix in CI.
+
+A sighting with no id is precisely the one that needs name matching most,
+since the id lookup cannot help it at all. So the tiers moved out of the
+gate; only the id lookup itself is gated now.
+
+### Pinned where it lives
+
+Neither half is reachable by a database-free test: one is a `NOT NULL`
+constraint, the other is NULL comparison semantics. Six specs in
+`backend/seed/lib/db.player-ids.test.ts` run in CI's `database` job (which
+already stands up a migrated Postgres for the model-service read queries)
+and skip everywhere else. Confirmed to fail against the pre-fix code with
+the exact production error, including one guarding the restructure above.
+
+That job was built on 2026-08-22 for *read* queries. This is the second
+distinct production outage it would have caught and didn't, because
+nothing was executing the **write** paths. Now it does.
+
+### Repairing the damage
+
+`players.external_api_football_id` is read in exactly one place: the
+abbreviated-name tier's `external_api_football_id IS NULL` eligibility
+condition, which means "not linked to API-Football yet". A wiped player
+silently becomes eligible for a matcher they were correctly excluded from.
+
+Recoverable, because only the `players` row was damaged — the `INSERT`
+that failed was into `player_external_ids`, so the pre-existing link row
+still holds the right id. `npm run db:repair-nulled-api-football-ids`
+restores from it, but only where unambiguous (exactly one link row, and no
+other player already holding that id — a collision there means a genuine
+duplicate for `repair-duplicate-players.ts`, not something to guess at).
+Dry-run by default.

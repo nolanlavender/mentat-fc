@@ -205,8 +205,19 @@ export async function setPlayerCurrentTeam(pool: Pool, playerId: number, teamId:
 }
 
 export interface PlayerInput {
-  externalFplId?: number;
-  externalApiFootballId?: number;
+  // Both are `| null`, not just optional, on purpose. API-Football serves
+  // player.id as null for someone it has not assigned an id to yet --
+  // routinely a deadline-day signing named in a lineup days before the
+  // player record catches up. Typing these as `number | undefined` did not
+  // make that impossible, it just made it invisible: null sailed through
+  // every `!== undefined` guard below and reached the writes, where
+  // player_external_ids.external_id is NOT NULL. That crashed the daily
+  // refresh and the matchday lineup check intermittently from 2026-09-05.
+  //
+  // Modelling the null explicitly means every guard below has to decide
+  // what "no id" means, and TypeScript checks that it did.
+  externalFplId?: number | null;
+  externalApiFootballId?: number | null;
   fullName: string;
   dateOfBirth?: string;
   nationality?: string;
@@ -232,6 +243,14 @@ export interface PlayerInput {
 // mapping to a different player would be exactly the kind of misattribution
 // this table exists to prevent.
 export async function linkPlayerExternalId(pool: Pool, playerId: number, source: string, externalId: number): Promise<void> {
+  // See claimPlayerExternalId: same unreachable-but-load-bearing guard.
+  // Here a null was merely loud -- external_id is NOT NULL, so it took the
+  // whole run down with a constraint violation instead of skipping one
+  // player's bookkeeping.
+  if (externalId == null) {
+    console.warn(`linkPlayerExternalId: no ${source} id for player ${playerId} -- recording no link for this sighting.`);
+    return;
+  }
   await pool.query(
     `INSERT INTO player_external_ids (player_id, source, external_id) VALUES ($1, $2, $3)
      ON CONFLICT (source, external_id) DO NOTHING`,
@@ -272,6 +291,19 @@ async function claimPlayerExternalId(
   column: 'external_fpl_id' | 'external_api_football_id',
   value: number,
 ): Promise<void> {
+  // Unreachable through the callers above now that PlayerInput models null
+  // -- but this is the destructive half of the 2026-09-05 bug and it is
+  // worth being unable to repeat rather than merely unlikely to. A null
+  // slipped past the old `!== undefined` guards and arrived here, where
+  // `WHERE ${column} = NULL` matches nothing, so the collision check waved
+  // it through and the UPDATE below wrote NULL over whatever real id the
+  // player already had. Every crashed run un-linked one player before it
+  // died, and unlike the crash that followed it, that part was silent and
+  // committed (these are pool.query calls, so each statement autocommits).
+  if (value == null) {
+    console.warn(`claimPlayerExternalId: refusing to write a null ${column} for player ${playerId} -- ignoring this sighting's id.`);
+    return;
+  }
   const { rows } = await pool.query<{ id: number }>(`SELECT id FROM players WHERE ${column} = $1 AND id != $2`, [value, playerId]);
   if (rows[0]) {
     console.warn(
@@ -321,7 +353,7 @@ async function claimPlayerExternalId(
  */
 export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Promise<number> {
   // Check the reliable external id first, before any name-based matching.
-  if (p.externalApiFootballId !== undefined) {
+  if (p.externalApiFootballId != null) {
     const existing = await findPlayerByExternalId(pool, 'api_football', p.externalApiFootballId);
     if (existing) {
       const { id, full_name: existingFullName } = existing;
@@ -389,13 +421,27 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
          WHERE id = $1`,
         [id, p.dateOfBirth ?? null, p.nationality ?? null, p.position ?? null, p.photoUrl ?? null, shouldUpgradeName, p.fullName, wouldCollide],
       );
-      if (p.externalFplId !== undefined) {
+      if (p.externalFplId != null) {
         await claimPlayerExternalId(pool, id, 'external_fpl_id', p.externalFplId);
         await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
       }
       return id;
     }
+  }
 
+  // The two name-matching tiers below are deliberately NOT gated on having
+  // an external id. They used to sit inside the block above, which read as
+  // "these are the fallbacks for when the id lookup misses" -- true, but it
+  // also meant an id-less sighting skipped them entirely and fell through
+  // to the exact-name path, which an abbreviated name ("A. Isak") never
+  // matches, inserting a duplicate row instead of finding the real player.
+  // A sighting with no id is precisely the one that needs name matching
+  // most, since step 1 cannot help it at all.
+  //
+  // Safe for the callers that pass no id today: FPL sends a full legal
+  // name (so parseAbbreviatedName returns null, skipping the first tier)
+  // and no teamId (skipping the second).
+  {
     // Real bug found in production 2026-08-16: API-Football frequently
     // serves a player under an abbreviated "R. James" form -- confirmed for
     // Reece James himself, a current Chelsea/Premier League player, not
@@ -436,8 +482,10 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
            WHERE id = $1`,
           [id, p.position ?? null, p.photoUrl ?? null],
         );
-        await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
-        await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
+        if (p.externalApiFootballId != null) {
+          await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
+          await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
+        }
         return id;
       }
     }
@@ -494,8 +542,10 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
            WHERE id = $1`,
           [match.id, preferIncomingName, p.fullName, wouldCollide, p.position ?? null, p.photoUrl ?? null],
         );
-        await claimPlayerExternalId(pool, match.id, 'external_api_football_id', p.externalApiFootballId);
-        await linkPlayerExternalId(pool, match.id, 'api_football', p.externalApiFootballId);
+        if (p.externalApiFootballId != null) {
+          await claimPlayerExternalId(pool, match.id, 'external_api_football_id', p.externalApiFootballId);
+          await linkPlayerExternalId(pool, match.id, 'api_football', p.externalApiFootballId);
+        }
         return match.id;
       }
     }
@@ -526,11 +576,11 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
       [p.fullName, p.dateOfBirth, p.nationality ?? null, p.position ?? null, p.photoUrl ?? null],
     );
     const id = rows[0].id;
-    if (p.externalApiFootballId !== undefined) {
+    if (p.externalApiFootballId != null) {
       await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
       await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
     }
-    if (p.externalFplId !== undefined) {
+    if (p.externalFplId != null) {
       await claimPlayerExternalId(pool, id, 'external_fpl_id', p.externalFplId);
       await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
     }
@@ -549,11 +599,11 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
        WHERE id = $1`,
       [id, p.position ?? null, p.photoUrl ?? null],
     );
-    if (p.externalApiFootballId !== undefined) {
+    if (p.externalApiFootballId != null) {
       await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
       await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
     }
-    if (p.externalFplId !== undefined) {
+    if (p.externalFplId != null) {
       await claimPlayerExternalId(pool, id, 'external_fpl_id', p.externalFplId);
       await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
     }
@@ -570,11 +620,11 @@ export async function upsertPlayerGoldenRecord(pool: Pool, p: PlayerInput): Prom
     [p.fullName, p.nationality ?? null, p.position ?? null, p.photoUrl ?? null],
   );
   const id = inserted.rows[0].id;
-  if (p.externalApiFootballId !== undefined) {
+  if (p.externalApiFootballId != null) {
     await claimPlayerExternalId(pool, id, 'external_api_football_id', p.externalApiFootballId);
     await linkPlayerExternalId(pool, id, 'api_football', p.externalApiFootballId);
   }
-  if (p.externalFplId !== undefined) {
+  if (p.externalFplId != null) {
     await claimPlayerExternalId(pool, id, 'external_fpl_id', p.externalFplId);
     await linkPlayerExternalId(pool, id, 'fpl', p.externalFplId);
   }
@@ -646,9 +696,13 @@ const ROSTER_CANDIDATES_CTE = `
 export async function upsertPlayerForTeamRoster(
   pool: Pool,
   teamId: number,
-  p: { externalApiFootballId: number; fullName: string; photoUrl?: string },
+  p: { externalApiFootballId: number | null; fullName: string; photoUrl?: string },
 ): Promise<number> {
-  const existing = await findPlayerByExternalId(pool, 'api_football_squads', p.externalApiFootballId);
+  // A null id (see PlayerInput) means this endpoint has no stable handle
+  // for the player yet, so step 1 cannot apply -- fall straight through to
+  // the name-based tiers below, which is exactly what happens for anyone
+  // this endpoint has never served an id for.
+  const existing = p.externalApiFootballId != null ? await findPlayerByExternalId(pool, 'api_football_squads', p.externalApiFootballId) : null;
   if (existing) {
     await pool.query(`UPDATE players SET photo_url = COALESCE(photo_url, $2) WHERE id = $1`, [existing.id, p.photoUrl ?? null]);
     await setPlayerCurrentTeam(pool, existing.id, teamId);
@@ -670,7 +724,7 @@ export async function upsertPlayerForTeamRoster(
   if (candidates.length === 1) {
     const id = candidates[0].id;
     await pool.query(`UPDATE players SET photo_url = COALESCE(photo_url, $2) WHERE id = $1`, [id, p.photoUrl ?? null]);
-    await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
+    if (p.externalApiFootballId != null) await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
     await setPlayerCurrentTeam(pool, id, teamId);
     return id;
   }
@@ -706,7 +760,7 @@ export async function upsertPlayerForTeamRoster(
          WHERE id = $1`,
         [match.id, p.photoUrl ?? null, preferIncomingName, p.fullName],
       );
-      await linkPlayerExternalId(pool, match.id, 'api_football_squads', p.externalApiFootballId);
+      if (p.externalApiFootballId != null) await linkPlayerExternalId(pool, match.id, 'api_football_squads', p.externalApiFootballId);
       await setPlayerCurrentTeam(pool, match.id, teamId);
       return match.id;
     }
@@ -737,7 +791,7 @@ export async function upsertPlayerForTeamRoster(
     fullName: p.fullName,
     photoUrl: p.photoUrl,
   });
-  await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
+  if (p.externalApiFootballId != null) await linkPlayerExternalId(pool, id, 'api_football_squads', p.externalApiFootballId);
   await setPlayerCurrentTeam(pool, id, teamId);
   return id;
 }
