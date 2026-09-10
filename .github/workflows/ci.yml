@@ -72,11 +72,12 @@ jobs:
       - run: npm run build
 
   database:
-    # Executes every read query against a schema built from the real
-    # migrations. Tables are empty on purpose: an empty result still
-    # proves the SQL parses, the tables and columns exist, and the joins
-    # resolve -- the class of bug that keeps reaching production. Also
-    # round-trips the migrations themselves.
+    # Executes every read query, and the seed write paths, against a schema
+    # built from the real migrations. For the reads, empty tables are the
+    # point: an empty result still proves the SQL parses, the tables and
+    # columns exist, and the joins resolve -- the class of bug that keeps
+    # reaching production. The write specs seed their own rows, because
+    # constraints only fire on real data. Also round-trips the migrations.
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -108,6 +109,20 @@ jobs:
       - name: Roll the newest migration back and forward again
         working-directory: backend
         run: npm run migrate:down && npm run migrate:up
+
+      - name: Execute the seed writers against the real schema
+        # The read queries below were not enough either. On 2026-09-05 a
+        # null player id from API-Football reached seed/lib/db.ts's two id
+        # writers and broke the daily refresh and the matchday lineup check
+        # for a week. Both halves of that bug are invisible without a
+        # database: one is a NOT NULL constraint, the other is SQL's
+        # `= NULL` matching nothing. These specs skip without
+        # SMOKE_DATABASE_URL, so the database-free `backend` job above
+        # still runs them as no-ops.
+        working-directory: backend
+        env:
+          SMOKE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/mentat_ci
+        run: npm run test
 
       - uses: actions/setup-python@v5
         with:

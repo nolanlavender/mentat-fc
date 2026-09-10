@@ -213,15 +213,21 @@ export async function seedApiFootballFixtures(pool: Pool, spec: CompetitionSeaso
 // assume the docs' happy-path shape.
 interface ApiFootballLineupEntry {
   team: { id: number; name: string; logo?: string | null };
-  startXI: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }> | null;
-  substitutes: Array<{ player: { id: number; name: string; number: number | null; pos: string | null } }> | null;
+  // player.id is nullable, and not rarely: API-Football serves null for
+  // anyone it has not assigned a player record to yet, which in practice
+  // means new signings named in a lineup within days of a transfer. Typing
+  // it `number` is what let a null reach the writes and take down the
+  // daily refresh and matchday lineup check from 2026-09-05 -- see
+  // PlayerInput in seed/lib/db.ts.
+  startXI: Array<{ player: { id: number | null; name: string; number: number | null; pos: string | null } }> | null;
+  substitutes: Array<{ player: { id: number | null; name: string; number: number | null; pos: string | null } }> | null;
 }
 
 interface ApiFootballPlayerStatsEntry {
   team: { id: number; name: string; logo?: string | null };
   players:
     | Array<{
-        player: { id: number; name: string; photo?: string | null };
+        player: { id: number | null; name: string; photo?: string | null };
         statistics: Array<{
           games: { minutes: number | null; rating: string | null; position: string | null };
           shots: { total: number | null; on: number | null };
@@ -852,7 +858,8 @@ function isTransientDbConnectionError(err: unknown): boolean {
 }
 
 interface ApiFootballSquadEntry {
-  id: number;
+  // Nullable for the same reason as the lineups/player-stats ids above.
+  id: number | null;
   name: string;
   photo: string | null;
 }

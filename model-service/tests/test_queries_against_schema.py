@@ -150,7 +150,15 @@ class TestModuleQueries:
         import app.diagnose_player as module
 
         monkeypatch.setattr(module, "get_connection", lambda: psycopg.connect(SMOKE_DATABASE_URL))
-        monkeypatch.setattr(module.sys, "argv", ["app.diagnose_player", "Isak"])
+        # A needle chosen to match nothing, rather than a real surname that
+        # happens to match nothing today. This asserted "Isak" until
+        # 2026-09-10, when the backend seed-writer specs started running
+        # against this same database earlier in the job and left an
+        # "Alexander Isak Ramirez" fixture row behind. The specs were wrong
+        # to leak it, and this was wrong to depend on them not doing so:
+        # the point here is that the query executes against the real
+        # schema, which an unmatchable needle proves just as well.
+        monkeypatch.setattr(module.sys, "argv", ["app.diagnose_player", "zzz-no-such-player-zzz"])
         module.main()
         assert "No player matching" in capsys.readouterr().out
 
